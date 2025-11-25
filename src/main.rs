@@ -1,35 +1,14 @@
 use anyhow::anyhow;
+mod assets;
+mod themes;
+use crate::assets::Assets;
+use crate::{assets::TermIconName, themes::set_theme};
 use gpui::*;
 use gpui_component::{
-    IconName, Root, TitleBar,
+    Root, TitleBar,
     button::{Button, ButtonVariants},
     h_flex, v_flex,
 };
-use rust_embed::Embed;
-use std::borrow::Cow;
-
-#[derive(Embed)]
-#[folder = "./assets"]
-#[include = "icons/*.svg"]
-pub struct Assets;
-
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path.is_empty() {
-            return Ok(None);
-        }
-
-        Self::get(path)
-            .map(|f| Some(f.data))
-            .ok_or_else(|| anyhow!("could not find asset at path \"{path}\""))
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(Self::iter()
-            .filter_map(|p| p.starts_with(path).then(|| p.into()))
-            .collect())
-    }
-}
 
 pub struct Example;
 impl Render for Example {
@@ -57,10 +36,13 @@ impl Render for Example {
                     .child("Hello, World!")
                     .child(
                         Button::new("ok")
-                            .icon(IconName::GitHub)
+                            .icon(TermIconName::GitHub)
                             .primary()
                             .label("Let's Go!")
-                            .on_click(|_, _, _| println!("Clicked!")),
+                            .on_click(|_, _, cx| {
+                                println!("Clicked!");
+                                set_theme(cx, "Tokyo Moon");
+                            }),
                     ),
             )
     }
@@ -71,6 +53,7 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+        set_theme(cx, "Tokyo Night");
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
@@ -81,7 +64,7 @@ fn main() {
 
             cx.open_window(window_options, |window, cx| {
                 let view = cx.new(|_| Example);
-                cx.new(|cx| Root::new(view.into(), window, cx))
+                cx.new(|cx| Root::new(view, window, cx))
             })?;
 
             Ok::<_, anyhow::Error>(())

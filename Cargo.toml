@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+terminal = { path = "crates/terminal" }
 gpui = "0.2"
-gpui-component = "0.3"
+gpui-component = "0.4"
 rust-embed = "8"
 anyhow = "1.0"
