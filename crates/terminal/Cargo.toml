@@ -3,49 +3,15 @@ name = "terminal"
 version = "0.1.0"
 edition = "2024"
 
-# [features]
-# test-support = [
-#     "collections/test-support",
-#     "gpui/test-support",
-#     "settings/test-support",
-# ]
-
-# [lints]
-# workspace = true
-
-[lib]
-path = "src/terminal.rs"
-doctest = false
-
 [dependencies]
-alacritty_terminal = "*"
-anyhow = "*"
-# collections = "*"
-futures = "*"
-gpui = "*"
-itertools = "*"
-libc = "*"
-log = "*"
-# release_channel = "*"
-schemars = "*"
-serde = "*"
-settings = "*"
-sysinfo = "*"
-smol = "*"
-# task = "*"
-# theme = "*"
-thiserror = "*"
-# util = "*"
-fancy-regex = "*"
-urlencoding = "*"
+gpui.workspace = true
+alacritty_terminal.workspace = true
+sysinfo.workspace = true
+serde.workspace = true
+tokio.workspace = true
+fancy-regex.workspace = true
+log.workspace = true
+anyhow.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = "*"
-
-[dev-dependencies]
-gpui = { version = "*", features = ["test-support"] }
-rand = "*"
-serde_json = "*"
-settings = { version = "*", features = ["test-support"] }
-url = "*"
-# util_macros = "*"
+windows.workspace = true

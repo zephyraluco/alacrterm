@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "terminal",
+]
+
+[workspace.dependencies]
+gpui = "0.2"
+gpui-component = "0.4"
+anyhow = "1.0"
+rust-embed = "8"
+alacritty_terminal = "0.25"
+
+libc = "0.2"
+log = "0.4"
+serde = "1.0"
+thiserror = "2.0"
+windows = "0.61"
+sysinfo = "0.37"
+tokio = { version = "1", features = ["full"] }
+
+fancy-regex = "0.16"
+
