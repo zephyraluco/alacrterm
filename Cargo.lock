@@ -5749,6 +5749,7 @@ dependencies = [
  "anyhow",
  "fancy-regex",
  "gpui",
+ "libc",
  "log",
  "serde",
  "sysinfo 0.37.2",
