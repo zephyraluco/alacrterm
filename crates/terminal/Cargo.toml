@@ -12,6 +12,9 @@ tokio.workspace = true
 fancy-regex.workspace = true
 log.workspace = true
 anyhow.workspace = true
+gpui-component.workspace = true
+urlencoding.workspace = true
+schemars.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
