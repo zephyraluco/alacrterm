@@ -3,6 +3,10 @@ name = "terminal"
 version = "0.1.0"
 edition = "2024"
 
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+
 [dependencies]
 gpui.workspace = true
 alacritty_terminal.workspace = true
