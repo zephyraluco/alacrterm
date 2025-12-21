@@ -3,22 +3,11 @@ name = "terminal"
 version = "0.1.0"
 edition = "2024"
 
-[[example]]
-name = "demo"
-path = "examples/demo.rs"
-
 [dependencies]
-gpui.workspace = true
 alacritty_terminal.workspace = true
-sysinfo.workspace = true
-serde.workspace = true
 tokio.workspace = true
-fancy-regex.workspace = true
-log.workspace = true
-anyhow.workspace = true
-gpui-component.workspace = true
-urlencoding.workspace = true
-schemars.workspace = true
+sysinfo.workspace = true
+
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

@@ -53,7 +53,7 @@ impl EventListener for PrinterProxy {
 
 fn main() {
     // 初始化日志
-    env_logger::init();
+    // env_logger::init();
 
     // --- 步骤 1: 终端核心初始化 ---
     let config = Config::default();
@@ -67,7 +67,7 @@ fn main() {
     
     // Windows 下使用 PowerShell，Unix 下读取环境变量或使用 sh
     #[cfg(target_os = "windows")]
-    let shell_cmd = "pwsh.exe";
+    let shell_cmd: &str = "pwsh.exe";
     #[cfg(not(target_os = "windows"))]
     let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
 
