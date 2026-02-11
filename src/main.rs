@@ -1,49 +1,36 @@
-use anyhow::anyhow;
 mod assets;
 mod themes;
-use crate::assets::Assets;
-use crate::{assets::TermIconName, themes::set_theme};
-use gpui::*;
-use gpui_component::{
-    Root, TitleBar,
-    button::{Button, ButtonVariants},
-    h_flex, v_flex,
-};
+mod terminal_view;
 
-pub struct Example;
-impl Render for Example {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+use crate::assets::Assets;
+use crate::themes::set_theme;
+use crate::terminal_view::TerminalView;
+use gpui::*;
+use gpui_component::{Root, TitleBar, h_flex, v_flex};
+
+pub struct TerminalApp;
+
+impl Render for TerminalApp {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let terminal_view = cx.new(|cx| TerminalView::new(cx));
+
         v_flex()
             .size_full()
             .child(
-                // Render custom title bar on top of Root view.
                 TitleBar::new().child(
                     h_flex()
                         .w_full()
                         .pr_2()
                         .justify_between()
-                        .child("App with Custom title bar")
-                        .child("Right Item"),
+                        .child("Alacrterm - Terminal Emulator")
+                        .child(""),
                 ),
             )
             .child(
                 div()
-                    .id("window-body")
-                    .p_5()
+                    .id("terminal-container")
                     .size_full()
-                    .items_center()
-                    .justify_center()
-                    .child("Hello, World!")
-                    .child(
-                        Button::new("ok")
-                            .icon(TermIconName::GitHub)
-                            .primary()
-                            .label("Let's Go!")
-                            .on_click(|_, _, cx| {
-                                println!("Clicked!");
-                                set_theme(cx, "Tokyo Moon");
-                            }),
-                    ),
+                    .child(terminal_view)
             )
     }
 }
@@ -57,13 +44,12 @@ fn main() {
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
-                // Setup GPUI to use custom title bar
                 titlebar: Some(TitleBar::title_bar_options()),
                 ..Default::default()
             };
 
             cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|_| Example);
+                let view = cx.new(|_| TerminalApp);
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
 
