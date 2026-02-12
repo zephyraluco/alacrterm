@@ -14,11 +14,13 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty;
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 struct TermSize {
     columns: usize,
     screen_lines: usize,
+    history_size: usize,
 }
 
 impl TermSize {
@@ -26,6 +28,7 @@ impl TermSize {
         Self {
             columns,
             screen_lines,
+            history_size: 10000, // 10000 行历史缓冲区
         }
     }
 }
@@ -38,20 +41,24 @@ impl Dimensions for TermSize {
         self.screen_lines
     }
     fn total_lines(&self) -> usize {
-        self.screen_lines
+        self.screen_lines + self.history_size
     }
 }
 #[derive(Clone)]
-struct TermProxy;
+struct TermProxy {
+    dirty: Arc<AtomicBool>,
+}
+
+impl TermProxy {
+    fn new(dirty: Arc<AtomicBool>) -> Self {
+        Self { dirty }
+    }
+}
 
 impl EventListener for TermProxy {
-    fn send_event(&self, event: Event) {
-        // 仅在非 Wakeup 事件时打印，减少噪音
-        if let Event::Wakeup = event {
-            return;
-        }
-        // Windows 和 Unix 抛出的事件可能略有不同
-        // println!("[Event]: {:?}", event);
+    fn send_event(&self, _event: Event) {
+        // 标记终端需要重新渲染
+        self.dirty.store(true, Ordering::Relaxed);
     }
 }
 
@@ -59,6 +66,7 @@ pub struct Terminal {
     term: Arc<FairMutex<Term<TermProxy>>>,
     notifier: Notifier,
     _io_thread: JoinHandle<(EventLoop<tty::Pty, TermProxy>, State)>,
+    dirty: Arc<AtomicBool>,
 }
 
 impl Terminal {
@@ -85,9 +93,12 @@ impl Terminal {
             cell_width: 1,
             cell_height: 1,
         };
+
         let pty = tty::new(&pty_config, window_size, 0).expect("创建 PTY 失败");
         let size = TermSize::new(80, 24);
-        let proxy = TermProxy;
+
+        let dirty = Arc::new(AtomicBool::new(true));
+        let proxy = TermProxy::new(dirty.clone());
         let term = Term::new(config.clone(), &size, proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
@@ -101,6 +112,7 @@ impl Terminal {
             term,
             notifier,
             _io_thread: io_thread,
+            dirty,
         }
     }
 
@@ -109,14 +121,24 @@ impl Terminal {
         let _ = self.notifier.0.send(Msg::Input(Cow::Owned(data.to_vec())));
     }
 
-    /// 获取终端内容用于渲染
-    pub fn get_content(&self) -> Vec<String> {
+    /// 获取终端内容用于渲染（支持滚动偏移）
+    /// scroll_offset: 0 表示最底部（当前内容），大于 0 表示向上滚动的行数
+    pub fn get_content_with_scroll(&self, scroll_offset: usize) -> Vec<String> {
         let term = self.term.lock();
         let grid = term.grid();
         let mut lines = Vec::new();
 
-        for i in 0..grid.screen_lines() {
-            let line = &grid[Line(i as i32)];
+        let screen_lines = grid.screen_lines();
+        let total_lines = grid.total_lines();
+        let history_size = total_lines - screen_lines;
+
+        // 限制滚动偏移量不超过历史缓冲区大小
+        let offset = scroll_offset.min(history_size);
+
+        // 计算起始行（从历史缓冲区或屏幕区域）
+        for i in 0..screen_lines {
+            let line_index = i as i32 - offset as i32;
+            let line = &grid[Line(line_index)];
             let mut line_str = String::new();
             for j in 0..grid.columns() {
                 let cell = &line[Column(j)];
@@ -127,6 +149,18 @@ impl Terminal {
         }
 
         lines
+    }
+
+    /// 获取终端内容用于渲染
+    pub fn get_content(&self) -> Vec<String> {
+        self.get_content_with_scroll(0)
+    }
+
+    /// 获取历史缓冲区大小
+    pub fn history_size(&self) -> usize {
+        let term = self.term.lock();
+        let grid = term.grid();
+        grid.total_lines() - grid.screen_lines()
     }
 
     /// 获取光标位置 (column, line)
@@ -141,6 +175,15 @@ impl Terminal {
         let size = TermSize::new(cols, lines);
         let mut term = self.term.lock();
         term.resize(size);
+
+        // 同步更新 PTY 窗口大小
+        let window_size = WindowSize {
+            num_lines: lines as u16,
+            num_cols: cols as u16,
+            cell_width: 1,
+            cell_height: 1,
+        };
+        let _ = self.notifier.0.send(Msg::Resize(window_size));
     }
 
     /// 获取终端尺寸 (columns, lines)
@@ -148,5 +191,10 @@ impl Terminal {
         let term = self.term.lock();
         let grid = term.grid();
         (grid.columns(), grid.screen_lines())
+    }
+
+    /// 检查终端是否需要重新渲染
+    pub fn needs_render(&self) -> bool {
+        self.dirty.swap(false, Ordering::Relaxed)
     }
 }

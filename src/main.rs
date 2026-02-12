@@ -8,12 +8,19 @@ use crate::terminal_view::TerminalView;
 use gpui::*;
 use gpui_component::{Root, TitleBar, h_flex, v_flex};
 
-pub struct TerminalApp;
+pub struct TerminalApp {
+    terminal_view: Entity<TerminalView>,
+}
+
+impl TerminalApp {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let terminal_view = cx.new(|cx| TerminalView::new(cx));
+        Self { terminal_view }
+    }
+}
 
 impl Render for TerminalApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let terminal_view = cx.new(|cx| TerminalView::new(cx));
-
+    fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
             .child(
@@ -30,7 +37,7 @@ impl Render for TerminalApp {
                 div()
                     .id("terminal-container")
                     .size_full()
-                    .child(terminal_view)
+                    .child(self.terminal_view.clone())
             )
     }
 }
@@ -49,7 +56,7 @@ fn main() {
             };
 
             cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|_| TerminalApp);
+                let view = cx.new(|cx| TerminalApp::new(cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
 
