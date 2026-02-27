@@ -4,14 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui.workspace = true
 alacritty_terminal.workspace = true
-sysinfo.workspace = true
-serde.workspace = true
 tokio.workspace = true
-fancy-regex.workspace = true
-log.workspace = true
-anyhow.workspace = true
+sysinfo.workspace = true
+
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
