@@ -1,5 +1,8 @@
 # Alacrterm
 
+> **⚠️项目归档说明**  
+> 由于 GPUI 和 gpui-component 的主线 API 更新频繁，本项目暂停开发
+
 一个基于 Rust 和 GPUI 框架构建的现代化终端模拟器。
 
 ## 项目简介
