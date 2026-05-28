@@ -1,6 +1,8 @@
 mod assets;
-mod themes;
+mod layout;
+mod terminal_element;
 mod terminal_view;
+mod themes;
 
 use crate::assets::Assets;
 use crate::themes::set_theme;
@@ -43,7 +45,7 @@ impl Render for TerminalApp {
 }
 
 fn main() {
-    let app = Application::new().with_assets(Assets);
+    let app = gpui_platform::application().with_assets(Assets);
 
     app.run(move |cx| {
         gpui_component::init(cx);

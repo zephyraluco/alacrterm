@@ -1,200 +1,539 @@
+pub mod mappings;
 mod pty_info;
 mod utils;
 
+pub use mappings::keys::to_esc_str;
 pub use pty_info::{ProcessInfo, PtyProcessInfo};
 
-use crate::utils::find_in_env;
+use alacritty_terminal::{
+    Term,
+    event::{Event as AlacEvent, EventListener, WindowSize},
+    event_loop::{EventLoop, Msg, Notifier, State},
+    grid::{Dimensions, Scroll as AlacScroll},
+    index::Point as AlacPoint,
+    selection::{Selection, SelectionRange, SelectionType},
+    sync::FairMutex,
+    term::{Config, RenderableCursor, TermMode, cell::Cell},
+    tty,
+};
 
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier, State};
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::tty;
-use std::borrow::Cow;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
+use gpui::{Context, EventEmitter, Keystroke};
+use std::{
+    borrow::Cow,
+    collections::VecDeque,
+    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
+    thread::JoinHandle,
+};
+
+// ─── 尺寸 ────────────────────────────────────────────────────────────────────
+
+/// 终端像素尺寸（参考 Zed 的 TerminalBounds）
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerminalBounds {
+    pub cell_width: f32,
+    pub line_height: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Default for TerminalBounds {
+    fn default() -> Self {
+        Self {
+            cell_width: 8.0,
+            line_height: 16.0,
+            width: 640.0,
+            height: 384.0,
+        }
+    }
+}
+
+impl TerminalBounds {
+    pub fn new(cell_width: f32, line_height: f32, width: f32, height: f32) -> Self {
+        Self { cell_width, line_height, width, height }
+    }
+
+    pub fn num_lines(&self) -> usize {
+        let raw = self.height / self.line_height;
+        raw.ceil().max(1.0) as usize
+    }
+
+    pub fn num_columns(&self) -> usize {
+        let raw = self.width / self.cell_width;
+        raw.ceil().max(1.0) as usize
+    }
+}
+
+impl From<TerminalBounds> for WindowSize {
+    fn from(b: TerminalBounds) -> Self {
+        WindowSize {
+            num_lines: b.num_lines() as u16,
+            num_cols: b.num_columns() as u16,
+            cell_width: b.cell_width as u16,
+            cell_height: b.line_height as u16,
+        }
+    }
+}
 
 struct TermSize {
     columns: usize,
     screen_lines: usize,
-    history_size: usize,
-}
-
-impl TermSize {
-    fn new(columns: usize, screen_lines: usize) -> Self {
-        Self {
-            columns,
-            screen_lines,
-            history_size: 10000, // 10000 行历史缓冲区
-        }
-    }
 }
 
 impl Dimensions for TermSize {
-    fn columns(&self) -> usize {
-        self.columns
-    }
-    fn screen_lines(&self) -> usize {
-        self.screen_lines
-    }
-    fn total_lines(&self) -> usize {
-        self.screen_lines + self.history_size
-    }
+    fn columns(&self) -> usize { self.columns }
+    fn screen_lines(&self) -> usize { self.screen_lines }
+    fn total_lines(&self) -> usize { self.screen_lines + 10_000 }
 }
+
+// ─── 单元格 ───────────────────────────────────────────────────────────────────
+
+/// 带位置信息的单元格（参考 Zed 的 IndexedCell）
+#[derive(Clone, Debug)]
+pub struct IndexedCell {
+    pub point: AlacPoint,
+    pub cell: Cell,
+}
+
+impl std::ops::Deref for IndexedCell {
+    type Target = Cell;
+    fn deref(&self) -> &Cell { &self.cell }
+}
+
+// ─── 终端内容快照 ──────────────────────────────────────────────────────────────
+
+/// 渲染所需的终端内容快照（参考 Zed 的 TerminalContent）
+#[derive(Clone, Default)]
+pub struct TerminalContent {
+    /// 可见区域的所有单元格（包含样式信息）
+    pub cells: Vec<IndexedCell>,
+    /// 终端模式标志（用于键盘映射、鼠标等）
+    pub mode: TermMode,
+    /// 当前显示偏移（滚动位置）
+    pub display_offset: usize,
+    /// 选中的文本范围
+    pub selection: Option<SelectionRange>,
+    /// 选中的文本内容
+    pub selection_text: Option<String>,
+    /// 光标信息
+    pub cursor: Option<RenderableCursor>,
+    /// 光标所在位置的字符
+    pub cursor_char: char,
+    /// 终端像素尺寸
+    pub terminal_bounds: TerminalBounds,
+    /// 标题文字
+    pub title: String,
+    /// 是否滚动到了顶部
+    pub scrolled_to_top: bool,
+    /// 是否滚动到了底部
+    pub scrolled_to_bottom: bool,
+}
+
+// ─── 事件 ─────────────────────────────────────────────────────────────────────
+
+/// 终端向 TerminalView 发出的事件
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    /// 内容更新，需要重新渲染
+    Wakeup,
+    /// 终端响铃
+    Bell,
+    /// 标题变更
+    TitleChanged,
+    /// 终端进程退出，请求关闭
+    CloseTerminal,
+    /// 选中内容变化
+    SelectionsChanged,
+}
+
+// ─── 内部事件队列 ──────────────────────────────────────────────────────────────
+
+enum InternalEvent {
+    Resize(TerminalBounds),
+    Scroll(AlacScroll),
+    SetSelection(Option<(Selection, AlacPoint)>),
+    UpdateSelection(AlacPoint),
+    Clear,
+}
+
+// ─── Alacritty 事件监听器 ──────────────────────────────────────────────────────
+
 #[derive(Clone)]
-struct TermProxy {
+struct TermListener {
     dirty: Arc<AtomicBool>,
+    events: Arc<Mutex<VecDeque<AlacEvent>>>,
 }
 
-impl TermProxy {
-    fn new(dirty: Arc<AtomicBool>) -> Self {
-        Self { dirty }
+impl EventListener for TermListener {
+    fn send_event(&self, event: AlacEvent) {
+        let mut q = self.events.lock().unwrap();
+        q.push_back(event);
+        self.dirty.store(true, Ordering::Release);
     }
 }
 
-impl EventListener for TermProxy {
-    fn send_event(&self, _event: Event) {
-        // 标记终端需要重新渲染
-        self.dirty.store(true, Ordering::Relaxed);
-    }
-}
+// ─── Terminal ─────────────────────────────────────────────────────────────────
 
+/// 终端后端（GPUI Model），管理 PTY、alacritty term 和内容渲染
 pub struct Terminal {
-    term: Arc<FairMutex<Term<TermProxy>>>,
-    notifier: Notifier,
-    _io_thread: JoinHandle<(EventLoop<tty::Pty, TermProxy>, State)>,
+    term: Arc<FairMutex<Term<TermListener>>>,
+    pty_tx: Notifier,
+    _io_thread: JoinHandle<(EventLoop<tty::Pty, TermListener>, State)>,
+    /// 最近一次同步的渲染内容快照
+    pub last_content: TerminalContent,
+    /// 待处理的内部事件队列
+    events: VecDeque<InternalEvent>,
+    /// 用于通知 GPUI 有更新的脏标志
+    #[allow(dead_code)]
     dirty: Arc<AtomicBool>,
+    /// alacritty 事件队列
+    alac_events: Arc<Mutex<VecDeque<AlacEvent>>>,
+    /// 标题文字
+    breadcrumb_text: String,
+    /// PTY 进程信息
+    pub pty_info: Arc<PtyProcessInfo>,
 }
 
 impl Terminal {
-    pub fn new(config: &Config) -> Self {
-        let shell_path;
-        if cfg!(target_os = "windows") {
-            // 优先使用 PowerShell 7
-            shell_path = find_in_env("pwsh.exe");
-        } else {
-            shell_path = None;
-        }
-        let shell = shell_path.map(|path| tty::Shell::new(path, vec![]));
+    /// 创建终端（在 cx.new() 中调用）
+    pub fn new(cx: &mut Context<Self>) -> anyhow::Result<Self> {
+        let dirty = Arc::new(AtomicBool::new(false));
+        let alac_events = Arc::new(Mutex::new(VecDeque::<AlacEvent>::new()));
+
+        let listener = TermListener {
+            dirty: dirty.clone(),
+            events: alac_events.clone(),
+        };
+
+        let shell = utils::find_shell();
         let pty_config = tty::Options {
             shell,
             working_directory: None,
-            drain_on_exit: false,
+            drain_on_exit: true,
             env: std::collections::HashMap::new(),
             #[cfg(target_os = "windows")]
             escape_args: true,
         };
-        let window_size = WindowSize {
-            num_lines: 24,
-            num_cols: 80,
-            cell_width: 1,
-            cell_height: 1,
+
+        let bounds = TerminalBounds::default();
+        let config = Config {
+            scrolling_history: 10_000,
+            ..Config::default()
         };
 
-        let pty = tty::new(&pty_config, window_size, 0).expect("创建 PTY 失败");
-        let size = TermSize::new(80, 24);
+        let size = TermSize {
+            columns: bounds.num_columns(),
+            screen_lines: bounds.num_lines(),
+        };
 
-        let dirty = Arc::new(AtomicBool::new(true));
-        let proxy = TermProxy::new(dirty.clone());
-        let term = Term::new(config.clone(), &size, proxy.clone());
+        let pty = tty::new(&pty_config, bounds.into(), 0)?;
+        let pty_info = Arc::new(PtyProcessInfo::new(&pty));
+        let term = Term::new(config, &size, listener.clone());
         let term = Arc::new(FairMutex::new(term));
 
-        let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)
-            .expect("EventLoop 初始化失败");
-
-        let notifier = Notifier(event_loop.channel());
+        let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
+        let pty_tx = Notifier(event_loop.channel());
         let io_thread = event_loop.spawn();
 
-        Self {
-            term,
-            notifier,
-            _io_thread: io_thread,
-            dirty,
-        }
-    }
+        // 启动轮询任务：每 8ms 检查一次脏标志
+        let dirty_clone = dirty.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(8))
+                    .await;
 
-    /// 写入数据到终端
-    pub fn write(&self, data: &[u8]) {
-        let _ = self.notifier.0.send(Msg::Input(Cow::Owned(data.to_vec())));
-    }
-
-    /// 获取终端内容用于渲染（支持滚动偏移）
-    /// scroll_offset: 0 表示最底部（当前内容），大于 0 表示向上滚动的行数
-    pub fn get_content_with_scroll(&self, scroll_offset: usize) -> Vec<String> {
-        let term = self.term.lock();
-        let grid = term.grid();
-        let mut lines = Vec::new();
-
-        let screen_lines = grid.screen_lines();
-        let total_lines = grid.total_lines();
-        let history_size = total_lines - screen_lines;
-
-        // 限制滚动偏移量不超过历史缓冲区大小
-        let offset = scroll_offset.min(history_size);
-
-        // 计算起始行（从历史缓冲区或屏幕区域）
-        for i in 0..screen_lines {
-            let line_index = i as i32 - offset as i32;
-            let line = &grid[Line(line_index)];
-            let mut line_str = String::new();
-            for j in 0..grid.columns() {
-                let cell = &line[Column(j)];
-                let c = if cell.c == '\0' { ' ' } else { cell.c };
-                line_str.push(c);
+                if dirty_clone.swap(false, Ordering::Acquire) {
+                    let _ = this.update(cx, |terminal, cx| {
+                        terminal.drain_alac_events(cx);
+                    });
+                }
             }
-            lines.push(line_str);
+        })
+        .detach();
+
+        Ok(Self {
+            term,
+            pty_tx,
+            _io_thread: io_thread,
+            last_content: TerminalContent::default(),
+            events: VecDeque::new(),
+            dirty,
+            alac_events,
+            breadcrumb_text: String::new(),
+            pty_info,
+        })
+    }
+
+    /// 消费 alacritty 事件并处理
+    fn drain_alac_events(&mut self, cx: &mut Context<Self>) {
+        let events: Vec<AlacEvent> = {
+            let mut q = self.alac_events.lock().unwrap();
+            q.drain(..).collect()
+        };
+
+        let mut needs_sync = false;
+        for event in events {
+            match event {
+                AlacEvent::Wakeup => {
+                    needs_sync = true;
+                }
+                AlacEvent::Bell => {
+                    cx.emit(Event::Bell);
+                }
+                AlacEvent::Title(title) => {
+                    self.breadcrumb_text = title;
+                    cx.emit(Event::TitleChanged);
+                }
+                AlacEvent::ResetTitle => {
+                    self.breadcrumb_text.clear();
+                    cx.emit(Event::TitleChanged);
+                }
+                AlacEvent::PtyWrite(data) => {
+                    self.write_to_pty(data.into_bytes());
+                }
+                AlacEvent::ClipboardStore(_, _) => {}
+                AlacEvent::ClipboardLoad(_, format) => {
+                    self.write_to_pty(format("").into_bytes());
+                }
+                AlacEvent::Exit | AlacEvent::ChildExit(_) => {
+                    cx.emit(Event::CloseTerminal);
+                }
+                _ => {
+                    needs_sync = true;
+                }
+            }
         }
 
-        lines
+        if needs_sync {
+            self.sync(cx);
+            cx.emit(Event::Wakeup);
+        }
     }
 
-    /// 获取终端内容用于渲染
-    pub fn get_content(&self) -> Vec<String> {
-        self.get_content_with_scroll(0)
+    /// 处理内部事件并刷新内容快照
+    pub fn sync(&mut self, _cx: &mut Context<Self>) {
+        let term = self.term.clone();
+        let mut terminal = term.lock_unfair();
+
+        while let Some(event) = self.events.pop_front() {
+            match event {
+                InternalEvent::Resize(bounds) => {
+                    terminal.resize(TermSize {
+                        columns: bounds.num_columns(),
+                        screen_lines: bounds.num_lines(),
+                    });
+                    let _ = self.pty_tx.0.send(Msg::Resize(bounds.into()));
+                }
+                InternalEvent::Scroll(scroll) => {
+                    terminal.scroll_display(scroll);
+                }
+                InternalEvent::SetSelection(sel) => {
+                    terminal.selection = sel.map(|(s, _)| s);
+                }
+                InternalEvent::UpdateSelection(point) => {
+                    if let Some(mut sel) = terminal.selection.take() {
+                        sel.update(
+                            point,
+                            alacritty_terminal::index::Direction::Right,
+                        );
+                        terminal.selection = Some(sel);
+                    }
+                }
+                InternalEvent::Clear => {
+                    // 发送清屏转义序列到 PTY（清除屏幕 + 清除滚回）
+                    drop(terminal);
+                    let _ = self.pty_tx.0.send(Msg::Input(Cow::Borrowed(b"\x1b[2J\x1b[3J\x1b[H")));
+                    terminal = term.lock_unfair();
+                }
+            }
+        }
+
+        let content = terminal.renderable_content();
+        let cursor = content.cursor;
+        let cursor_char = terminal.grid()[cursor.point].c;
+        let display_offset = content.display_offset;
+        let history_size = terminal.history_size();
+
+        let mut cells = Vec::new();
+        for ic in content.display_iter {
+            cells.push(IndexedCell {
+                point: ic.point,
+                cell: ic.cell.clone(),
+            });
+        }
+
+        let selection_text = if content.selection.is_some() {
+            terminal.selection_to_string()
+        } else {
+            None
+        };
+
+        self.last_content = TerminalContent {
+            cells,
+            mode: content.mode,
+            display_offset,
+            selection: content.selection,
+            selection_text,
+            cursor: Some(cursor),
+            cursor_char,
+            terminal_bounds: self.last_content.terminal_bounds,
+            title: self.breadcrumb_text.clone(),
+            scrolled_to_top: display_offset == history_size,
+            scrolled_to_bottom: display_offset == 0,
+        };
     }
 
-    /// 获取历史缓冲区大小
-    pub fn history_size(&self) -> usize {
-        let term = self.term.lock();
-        let grid = term.grid();
-        grid.total_lines() - grid.screen_lines()
+    // ─── 公开 API ──────────────────────────────────────────────────────────────
+
+    /// 发送字节到 PTY
+    pub fn input(&mut self, data: impl Into<Cow<'static, [u8]>>) {
+        self.write_to_pty(data.into());
     }
 
-    /// 获取光标位置 (column, line)
-    pub fn cursor_position(&self) -> (usize, usize) {
-        let term = self.term.lock();
-        let cursor = term.grid().cursor.point;
-        (cursor.column.0, cursor.line.0 as usize)
+    /// 处理键盘事件，返回是否已处理
+    pub fn try_keystroke(
+        &mut self,
+        keystroke: &Keystroke,
+        option_as_meta: bool,
+    ) -> bool {
+        let esc = to_esc_str(keystroke, &self.last_content.mode, option_as_meta);
+        if let Some(esc) = esc {
+            self.events
+                .push_back(InternalEvent::Scroll(AlacScroll::Bottom));
+            match esc {
+                Cow::Borrowed(s) => self.input(s.as_bytes()),
+                Cow::Owned(s) => self.input(s.into_bytes()),
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// 调整终端大小
-    pub fn resize(&self, cols: usize, lines: usize) {
-        let size = TermSize::new(cols, lines);
-        let mut term = self.term.lock();
-        term.resize(size);
+    pub fn resize(&mut self, new_bounds: TerminalBounds) {
+        let old = &self.last_content.terminal_bounds;
+        let needs_resize = old.num_lines() != new_bounds.num_lines()
+            || old.num_columns() != new_bounds.num_columns()
+            || (old.cell_width - new_bounds.cell_width).abs() > 0.5
+            || (old.line_height - new_bounds.line_height).abs() > 0.5;
 
-        // 同步更新 PTY 窗口大小
-        let window_size = WindowSize {
-            num_lines: lines as u16,
-            num_cols: cols as u16,
-            cell_width: 1,
-            cell_height: 1,
+        self.last_content.terminal_bounds = new_bounds;
+
+        if needs_resize {
+            match self.events.back_mut() {
+                Some(InternalEvent::Resize(pending)) => {
+                    *pending = new_bounds;
+                }
+                _ => {
+                    self.events.push_back(InternalEvent::Resize(new_bounds));
+                }
+            }
+        }
+    }
+
+    /// 粘贴文本（支持 bracketed paste 模式）
+    pub fn paste(&mut self, text: &str) {
+        let paste_text = if self
+            .last_content
+            .mode
+            .contains(TermMode::BRACKETED_PASTE)
+        {
+            format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
+        } else {
+            text.replace("\r\n", "\r").replace('\n', "\r")
         };
-        let _ = self.notifier.0.send(Msg::Resize(window_size));
+        self.input(paste_text.into_bytes());
     }
 
-    /// 获取终端尺寸 (columns, lines)
-    pub fn size(&self) -> (usize, usize) {
-        let term = self.term.lock();
-        let grid = term.grid();
-        (grid.columns(), grid.screen_lines())
+    /// 复制当前选中内容
+    pub fn copy(&self) -> Option<String> {
+        self.term.lock().selection_to_string()
     }
 
-    /// 检查终端是否需要重新渲染
-    pub fn needs_render(&self) -> bool {
-        self.dirty.swap(false, Ordering::Relaxed)
+    /// 向上滚动若干行
+    pub fn scroll_up_by(&mut self, lines: usize) {
+        self.events
+            .push_back(InternalEvent::Scroll(AlacScroll::Delta(lines as i32)));
+    }
+
+    /// 向下滚动若干行
+    pub fn scroll_down_by(&mut self, lines: usize) {
+        self.events
+            .push_back(InternalEvent::Scroll(AlacScroll::Delta(-(lines as i32))));
+    }
+
+    /// 向上翻一页
+    pub fn scroll_page_up(&mut self) {
+        self.events
+            .push_back(InternalEvent::Scroll(AlacScroll::PageUp));
+    }
+
+    /// 向下翻一页
+    pub fn scroll_page_down(&mut self) {
+        self.events
+            .push_back(InternalEvent::Scroll(AlacScroll::PageDown));
+    }
+
+    /// 滚动到顶部
+    pub fn scroll_to_top(&mut self) {
+        self.events
+            .push_back(InternalEvent::Scroll(AlacScroll::Top));
+    }
+
+    /// 滚动到底部
+    pub fn scroll_to_bottom(&mut self) {
+        self.events
+            .push_back(InternalEvent::Scroll(AlacScroll::Bottom));
+    }
+
+    /// 清除屏幕
+    pub fn clear(&mut self) {
+        self.events.push_back(InternalEvent::Clear);
+    }
+
+    /// 开始选择
+    pub fn start_selection(
+        &mut self,
+        selection_type: SelectionType,
+        point: AlacPoint,
+        side: alacritty_terminal::index::Direction,
+    ) {
+        let selection = Selection::new(selection_type, point, side);
+        self.events
+            .push_back(InternalEvent::SetSelection(Some((selection, point))));
+    }
+
+    /// 更新选择终点
+    pub fn update_selection(&mut self, point: AlacPoint) {
+        self.events
+            .push_back(InternalEvent::UpdateSelection(point));
+    }
+
+    /// 清除选择
+    pub fn clear_selection(&mut self) {
+        self.events
+            .push_back(InternalEvent::SetSelection(None));
+    }
+
+    /// 获取终端标题
+    pub fn title(&self) -> &str {
+        if self.breadcrumb_text.is_empty() {
+            "Terminal"
+        } else {
+            &self.breadcrumb_text
+        }
+    }
+
+    fn write_to_pty(&self, data: impl Into<Cow<'static, [u8]>>) {
+        let _ = self.pty_tx.0.send(Msg::Input(data.into()));
+    }
+}
+
+impl EventEmitter<Event> for Terminal {}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        let _ = self.pty_tx.0.send(Msg::Shutdown);
     }
 }

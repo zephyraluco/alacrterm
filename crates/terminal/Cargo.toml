@@ -5,9 +5,12 @@ edition = "2024"
 
 [dependencies]
 alacritty_terminal.workspace = true
-tokio.workspace = true
+gpui.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
 sysinfo.workspace = true
-
+smallvec.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

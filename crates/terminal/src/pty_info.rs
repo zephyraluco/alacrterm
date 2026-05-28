@@ -120,15 +120,18 @@ impl PtyProcessInfo {
         }
     }
 
+    #[allow(dead_code)]
     fn get_child(&self) -> Option<&Process> {
         let pid = self.pid_getter.fallback_pid();
         self.system.process(pid)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn kill_current_process(&mut self) -> bool {
         self.refresh().is_some_and(|process| process.kill())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn kill_child_process(&mut self) -> bool {
         self.get_child().is_some_and(|process| process.kill())
     }
