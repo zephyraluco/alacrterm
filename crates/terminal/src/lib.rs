@@ -54,7 +54,8 @@ impl TerminalBounds {
 
     pub fn num_lines(&self) -> usize {
         let raw = self.height / self.line_height;
-        raw.ceil().max(1.0) as usize
+        // floor: 只分配完整的行，避免最后一行被截断，也避免亚像素抖动触发不必要的 resize
+        raw.floor().max(1.0) as usize
     }
 
     pub fn num_columns(&self) -> usize {
@@ -151,7 +152,7 @@ enum InternalEvent {
     Resize(TerminalBounds),
     Scroll(AlacScroll),
     SetSelection(Option<(Selection, AlacPoint)>),
-    UpdateSelection(AlacPoint),
+    UpdateSelection(AlacPoint, alacritty_terminal::index::Side),
     Clear,
 }
 
@@ -330,12 +331,9 @@ impl Terminal {
                 InternalEvent::SetSelection(sel) => {
                     terminal.selection = sel.map(|(s, _)| s);
                 }
-                InternalEvent::UpdateSelection(point) => {
+                InternalEvent::UpdateSelection(point, side) => {
                     if let Some(mut sel) = terminal.selection.take() {
-                        sel.update(
-                            point,
-                            alacritty_terminal::index::Direction::Right,
-                        );
+                        sel.update(point, side);
                         terminal.selection = Some(sel);
                     }
                 }
@@ -505,9 +503,10 @@ impl Terminal {
     }
 
     /// 更新选择终点
-    pub fn update_selection(&mut self, point: AlacPoint) {
+    /// side: 鼠标在格子内的位置（Left = 左半格，Right = 右半格）
+    pub fn update_selection(&mut self, point: AlacPoint, side: alacritty_terminal::index::Side) {
         self.events
-            .push_back(InternalEvent::UpdateSelection(point));
+            .push_back(InternalEvent::UpdateSelection(point, side));
     }
 
     /// 清除选择

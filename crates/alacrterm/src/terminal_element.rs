@@ -34,6 +34,8 @@ impl TerminalElement {
         let font_size = bounds.cell_width / 0.6;
         let visible_lines = bounds.num_lines() as i32;
         let default_bg = colors::DEFAULT_BG();
+        // 滚动时 alacritty 返回负数行号（历史行）：display_row = line.0 + display_offset
+        let display_offset = self.content.display_offset as i32;
 
         let rows = group_cells_by_line(self.content.cells);
 
@@ -41,7 +43,10 @@ impl TerminalElement {
             .into_iter()
             .filter(|row| {
                 row.first()
-                    .map(|c| { let l = c.point.line.0; l >= 0 && l < visible_lines })
+                    .map(|c| {
+                        let dr = c.point.line.0 + display_offset;
+                        dr >= 0 && dr < visible_lines
+                    })
                     .unwrap_or(false)
             })
             .map(|row| {
@@ -223,7 +228,7 @@ fn resolve_cell_colors(
         return (default_bg, default_bg);
     }
 
-    let (mut fg, mut bg) = if cell.flags.contains(Flags::INVERSE) {
+    let (fg, mut bg) = if cell.flags.contains(Flags::INVERSE) {
         (
             colors::resolve_color(&cell.bg, false),
             colors::resolve_color(&cell.fg, is_bold),
@@ -236,8 +241,10 @@ fn resolve_cell_colors(
     };
 
     if is_cursor {
+        // 只改 bg，不反转 fg：
+        // 1. fg 不变 → text run 不因光标位置而分裂 → 无亚像素跳动
+        // 2. 光标仍清晰可见（光标色背景 + 自然前景色）
         bg = cursor_color;
-        fg = default_bg;
     } else if is_selected {
         bg = selection_bg;
     }

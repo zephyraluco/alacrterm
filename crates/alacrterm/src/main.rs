@@ -38,7 +38,10 @@ impl Render for TerminalApp {
             .child(
                 div()
                     .id("terminal-container")
-                    .size_full()
+                    .flex_grow()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
                     .child(self.terminal_view.clone())
             )
     }

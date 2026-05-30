@@ -19,6 +19,8 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     cursor_visible: bool,
     is_selecting: bool,
+    /// 当前滚动偏移（每帧从 content.display_offset 更新），用于鼠标坐标转换
+    display_offset: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -30,15 +32,16 @@ impl TerminalView {
     /// gpui-component TitleBar 固定高度（见 gpui-component title_bar.rs TITLE_BAR_HEIGHT）
     const TITLE_BAR_HEIGHT: f32 = 34.0;
 
-    /// 将窗口像素坐标转换为终端网格坐标
-    /// position 是窗口坐标：y=0 在窗口顶部，终端内容从 TITLE_BAR_HEIGHT+PADDING 开始
-    fn pixel_to_point(x: f32, y: f32) -> AlacPoint {
+    /// 将窗口像素坐标转换为终端绝对网格坐标
+    /// 视觉行 R → 绝对行 R - display_offset（滚动后历史行为负数）
+    fn pixel_to_point(x: f32, y: f32, display_offset: usize) -> AlacPoint {
         let col = ((x - Self::PADDING) / Self::CELL_WIDTH)
             .floor()
             .max(0.0) as usize;
-        let line = ((y - Self::TITLE_BAR_HEIGHT - Self::PADDING) / Self::LINE_HEIGHT)
+        let visual_row = ((y - Self::TITLE_BAR_HEIGHT - Self::PADDING) / Self::LINE_HEIGHT)
             .floor()
             .max(0.0) as i32;
+        let line = visual_row - display_offset as i32;
         AlacPoint::new(Line(line), Column(col))
     }
 
@@ -84,6 +87,7 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             cursor_visible: true,
             is_selecting: false,
+            display_offset: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -91,9 +95,9 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let window_size = window.bounds().size;
-        let available_w: f32 = window_size.width.into();
-        let available_h: f32 = window_size.height.into();
+        let vp = window.viewport_size();
+        let available_w: f32 = vp.width.into();
+        let available_h: f32 = vp.height.into();
 
         let new_bounds = TerminalBounds::new(
             Self::CELL_WIDTH,
@@ -108,6 +112,8 @@ impl Render for TerminalView {
             terminal.sync(cx);
             terminal.last_content.clone()
         });
+        // 缓存滚动偏移，供鼠标事件坐标转换使用
+        self.display_offset = content.display_offset;
 
         // ── 构建 UI ──────────────────────────────────────────────────────────
         let focused = self.focus_handle.is_focused(window);
@@ -127,7 +133,7 @@ impl Render for TerminalView {
                     window.focus(&this.focus_handle, cx);
                     let x: f32 = event.position.x.into();
                     let y: f32 = event.position.y.into();
-                    let point = TerminalView::pixel_to_point(x, y);
+                    let point = TerminalView::pixel_to_point(x, y, this.display_offset);
                     let side = TerminalView::pixel_side(x);
                     this.is_selecting = true;
                     this.terminal.update(cx, |terminal, _cx| {
@@ -144,9 +150,10 @@ impl Render for TerminalView {
                 {
                     let x: f32 = event.position.x.into();
                     let y: f32 = event.position.y.into();
-                    let point = TerminalView::pixel_to_point(x, y);
+                    let point = TerminalView::pixel_to_point(x, y, this.display_offset);
+                    let side = TerminalView::pixel_side(x);
                     this.terminal.update(cx, |terminal, _cx| {
-                        terminal.update_selection(point);
+                        terminal.update_selection(point, side);
                     });
                     cx.notify();
                 }
