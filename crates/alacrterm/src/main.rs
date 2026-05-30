@@ -5,47 +5,10 @@ mod terminal_view;
 mod themes;
 
 use crate::assets::Assets;
+use crate::layout::TerminalApp;
 use crate::themes::set_theme;
-use crate::terminal_view::TerminalView;
 use gpui::*;
-use gpui_component::{Root, TitleBar, h_flex, v_flex};
-
-pub struct TerminalApp {
-    terminal_view: Entity<TerminalView>,
-}
-
-impl TerminalApp {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let terminal_view = cx.new(|cx| TerminalView::new(cx));
-        Self { terminal_view }
-    }
-}
-
-impl Render for TerminalApp {
-    fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .pr_2()
-                        .justify_between()
-                        .child("Alacrterm - Terminal Emulator")
-                        .child(""),
-                ),
-            )
-            .child(
-                div()
-                    .id("terminal-container")
-                    .flex_grow()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(self.terminal_view.clone())
-            )
-    }
-}
+use gpui_component::{Root, TitleBar};
 
 fn main() {
     let app = gpui_platform::application().with_assets(Assets);
