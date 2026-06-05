@@ -20,7 +20,10 @@ struct TermSize {
 
 impl TermSize {
     fn new(columns: usize, screen_lines: usize) -> Self {
-        Self { columns, screen_lines }
+        Self {
+            columns,
+            screen_lines,
+        }
     }
 }
 
@@ -64,7 +67,7 @@ fn main() {
     let term = Arc::new(FairMutex::new(term));
 
     // --- 步骤 2: 确定 Shell 和参数 (平台相关) ---
-    
+
     // Windows 下使用 PowerShell，Unix 下读取环境变量或使用 sh
     #[cfg(target_os = "windows")]
     let shell_cmd: &str = "pwsh.exe";
@@ -80,7 +83,7 @@ fn main() {
         working_directory: None,
         drain_on_exit: false,
         env: HashMap::new(),
-        
+
         // [Windows 特有] 是否转义参数
         #[cfg(target_os = "windows")]
         escape_args: true,
@@ -96,8 +99,7 @@ fn main() {
     // --- 步骤 4: 创建 PTY ---
     // tty::new 会根据 target_os 自动调用 windows 或 unix 下的实现
     // 第三个参数 window_id 在无头模式下传 0 即可
-    let pty = tty::new(&pty_config, window_size, 0)
-        .expect("创建 PTY 失败");
+    let pty = tty::new(&pty_config, window_size, 0).expect("创建 PTY 失败");
 
     // --- 步骤 5: 启动事件循环 ---
     let event_loop = EventLoop::new(
@@ -106,15 +108,19 @@ fn main() {
         pty,
         false, // drain_on_exit
         false, // ref_test
-    ).expect("EventLoop 初始化失败");
+    )
+    .expect("EventLoop 初始化失败");
 
     // [重要] 在 spawn 之前获取 channel，因为 spawn 会转移所有权
     let sender = event_loop.channel();
-    
+
     // 启动后台 I/O 线程
     let _io_thread = event_loop.spawn();
 
-    println!("终端后端已启动 ({})", if cfg!(windows) { "Windows" } else { "Unix" });
+    println!(
+        "终端后端已启动 ({})",
+        if cfg!(windows) { "Windows" } else { "Unix" }
+    );
 
     // --- 步骤 6: 交互演示 (平台相关) ---
     thread::sleep(Duration::from_secs(1)); // 等待 Shell 就绪
@@ -122,12 +128,14 @@ fn main() {
     // 根据平台发送不同的命令
     #[cfg(target_os = "windows")]
     let input_bytes = b"dir\r\n"; // Windows 建议 \r\n
-    
+
     #[cfg(not(target_os = "windows"))]
     let input_bytes = b"ls -l\n";
 
     println!("发送命令...");
-    sender.send(Msg::Input(Cow::Owned(input_bytes.to_vec()))).unwrap();
+    sender
+        .send(Msg::Input(Cow::Owned(input_bytes.to_vec())))
+        .unwrap();
 
     // 等待执行和回显
     thread::sleep(Duration::from_secs(2));
@@ -147,7 +155,9 @@ fn main() {
                 let cell = &line[Column(j)];
                 // 处理空字符，便于显示
                 let c = if cell.c == '\0' { ' ' } else { cell.c };
-                if c != ' ' { has_content = true; }
+                if c != ' ' {
+                    has_content = true;
+                }
                 line_str.push(c);
             }
 

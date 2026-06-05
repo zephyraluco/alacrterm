@@ -1,6 +1,6 @@
 use gpui::{AnyElement, App, AssetSource, IntoElement, RenderOnce, Result, SharedString, Window};
-use gpui_component::{Icon, IconNamed};
 use gpui_component::icon_named;
+use gpui_component::{Icon, IconNamed};
 use rust_embed::RustEmbed;
 
 // 调用宏扫描你自己的 Crate 目录下的自定义图标

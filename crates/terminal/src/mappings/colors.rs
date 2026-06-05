@@ -102,9 +102,7 @@ fn indexed_to_color(index: u8) -> Hsla {
             let r = i / 36;
             let g = (i % 36) / 6;
             let b = i % 6;
-            let to_val = |v: u8| -> u8 {
-                if v == 0 { 0 } else { v * 40 + 55 }
-            };
+            let to_val = |v: u8| -> u8 { if v == 0 { 0 } else { v * 40 + 55 } };
             rgb(to_val(r), to_val(g), to_val(b))
         }
 

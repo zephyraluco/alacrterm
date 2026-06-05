@@ -17,11 +17,14 @@ use alacritty_terminal::{
     tty,
 };
 
-use gpui::{Context, EventEmitter, Keystroke};
+use gpui::{ClipboardItem, Context, EventEmitter, Keystroke};
 use std::{
     borrow::Cow,
     collections::VecDeque,
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::JoinHandle,
 };
 
@@ -49,18 +52,23 @@ impl Default for TerminalBounds {
 
 impl TerminalBounds {
     pub fn new(cell_width: f32, line_height: f32, width: f32, height: f32) -> Self {
-        Self { cell_width, line_height, width, height }
+        Self {
+            cell_width,
+            line_height,
+            width,
+            height,
+        }
     }
 
     pub fn num_lines(&self) -> usize {
         let raw = self.height / self.line_height;
-        // floor: 只分配完整的行，避免最后一行被截断，也避免亚像素抖动触发不必要的 resize
-        raw.floor().max(1.0) as usize
+        // Match Zed: compensate for f32 precision without allocating partial rows.
+        raw.next_up().floor().max(1.0) as usize
     }
 
     pub fn num_columns(&self) -> usize {
         let raw = self.width / self.cell_width;
-        raw.ceil().max(1.0) as usize
+        raw.next_up().floor().max(1.0) as usize
     }
 }
 
@@ -81,9 +89,15 @@ struct TermSize {
 }
 
 impl Dimensions for TermSize {
-    fn columns(&self) -> usize { self.columns }
-    fn screen_lines(&self) -> usize { self.screen_lines }
-    fn total_lines(&self) -> usize { self.screen_lines + 10_000 }
+    fn columns(&self) -> usize {
+        self.columns
+    }
+    fn screen_lines(&self) -> usize {
+        self.screen_lines
+    }
+    fn total_lines(&self) -> usize {
+        self.screen_lines + 10_000
+    }
 }
 
 // ─── 单元格 ───────────────────────────────────────────────────────────────────
@@ -97,7 +111,9 @@ pub struct IndexedCell {
 
 impl std::ops::Deref for IndexedCell {
     type Target = Cell;
-    fn deref(&self) -> &Cell { &self.cell }
+    fn deref(&self) -> &Cell {
+        &self.cell
+    }
 }
 
 // ─── 终端内容快照 ──────────────────────────────────────────────────────────────
@@ -153,7 +169,23 @@ enum InternalEvent {
     Scroll(AlacScroll),
     SetSelection(Option<(Selection, AlacPoint)>),
     UpdateSelection(AlacPoint, alacritty_terminal::index::Side),
+    MouseReport(MouseReport),
     Clear,
+}
+
+#[derive(Clone, Copy)]
+enum MouseReportKind {
+    Press(u8),
+    Release(u8),
+    Move(u8),
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Clone, Copy)]
+struct MouseReport {
+    point: AlacPoint,
+    kind: MouseReportKind,
 }
 
 // ─── Alacritty 事件监听器 ──────────────────────────────────────────────────────
@@ -292,9 +324,15 @@ impl Terminal {
                 AlacEvent::PtyWrite(data) => {
                     self.write_to_pty(data.into_bytes());
                 }
-                AlacEvent::ClipboardStore(_, _) => {}
+                AlacEvent::ClipboardStore(_, text) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
                 AlacEvent::ClipboardLoad(_, format) => {
-                    self.write_to_pty(format("").into_bytes());
+                    let text = cx
+                        .read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .unwrap_or_default();
+                    self.write_to_pty(format(&text).into_bytes());
                 }
                 AlacEvent::Exit | AlacEvent::ChildExit(_) => {
                     cx.emit(Event::CloseTerminal);
@@ -316,6 +354,7 @@ impl Terminal {
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
 
+        let mut selection_changed = false;
         while let Some(event) = self.events.pop_front() {
             match event {
                 InternalEvent::Resize(bounds) => {
@@ -330,17 +369,33 @@ impl Terminal {
                 }
                 InternalEvent::SetSelection(sel) => {
                     terminal.selection = sel.map(|(s, _)| s);
+                    selection_changed = true;
                 }
                 InternalEvent::UpdateSelection(point, side) => {
                     if let Some(mut sel) = terminal.selection.take() {
                         sel.update(point, side);
                         terminal.selection = Some(sel);
+                        selection_changed = true;
+                    }
+                }
+                InternalEvent::MouseReport(report) => {
+                    if let Some(bytes) = encode_mouse_report(
+                        report,
+                        *terminal.mode(),
+                        self.last_content.display_offset,
+                    ) {
+                        drop(terminal);
+                        let _ = self.pty_tx.0.send(Msg::Input(Cow::Owned(bytes)));
+                        terminal = term.lock_unfair();
                     }
                 }
                 InternalEvent::Clear => {
                     // 发送清屏转义序列到 PTY（清除屏幕 + 清除滚回）
                     drop(terminal);
-                    let _ = self.pty_tx.0.send(Msg::Input(Cow::Borrowed(b"\x1b[2J\x1b[3J\x1b[H")));
+                    let _ = self
+                        .pty_tx
+                        .0
+                        .send(Msg::Input(Cow::Borrowed(b"\x1b[2J\x1b[3J\x1b[H")));
                     terminal = term.lock_unfair();
                 }
             }
@@ -379,6 +434,10 @@ impl Terminal {
             scrolled_to_top: display_offset == history_size,
             scrolled_to_bottom: display_offset == 0,
         };
+
+        if selection_changed {
+            _cx.emit(Event::SelectionsChanged);
+        }
     }
 
     // ─── 公开 API ──────────────────────────────────────────────────────────────
@@ -389,11 +448,7 @@ impl Terminal {
     }
 
     /// 处理键盘事件，返回是否已处理
-    pub fn try_keystroke(
-        &mut self,
-        keystroke: &Keystroke,
-        option_as_meta: bool,
-    ) -> bool {
+    pub fn try_keystroke(&mut self, keystroke: &Keystroke, option_as_meta: bool) -> bool {
         let esc = to_esc_str(keystroke, &self.last_content.mode, option_as_meta);
         if let Some(esc) = esc {
             self.events
@@ -432,11 +487,7 @@ impl Terminal {
 
     /// 粘贴文本（支持 bracketed paste 模式）
     pub fn paste(&mut self, text: &str) {
-        let paste_text = if self
-            .last_content
-            .mode
-            .contains(TermMode::BRACKETED_PASTE)
-        {
+        let paste_text = if self.last_content.mode.contains(TermMode::BRACKETED_PASTE) {
             format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")
@@ -449,16 +500,97 @@ impl Terminal {
         self.term.lock().selection_to_string()
     }
 
+    pub fn has_selection(&self) -> bool {
+        self.last_content.selection.is_some()
+    }
+
     /// 向上滚动若干行
     pub fn scroll_up_by(&mut self, lines: usize) {
+        if self.should_send_alternate_scroll() {
+            for _ in 0..lines.max(1) {
+                self.input(b"\x1b[A".as_slice());
+            }
+            return;
+        }
         self.events
             .push_back(InternalEvent::Scroll(AlacScroll::Delta(lines as i32)));
     }
 
     /// 向下滚动若干行
     pub fn scroll_down_by(&mut self, lines: usize) {
+        if self.should_send_alternate_scroll() {
+            for _ in 0..lines.max(1) {
+                self.input(b"\x1b[B".as_slice());
+            }
+            return;
+        }
         self.events
             .push_back(InternalEvent::Scroll(AlacScroll::Delta(-(lines as i32))));
+    }
+
+    pub fn mouse_mode(&self) -> bool {
+        self.last_content.mode.intersects(TermMode::MOUSE_MODE)
+    }
+
+    pub fn mouse_down(&mut self, button: u8, point: AlacPoint) -> bool {
+        if !self.mouse_mode() {
+            return false;
+        }
+        self.events
+            .push_back(InternalEvent::MouseReport(MouseReport {
+                point,
+                kind: MouseReportKind::Press(button),
+            }));
+        true
+    }
+
+    pub fn mouse_up(&mut self, button: u8, point: AlacPoint) -> bool {
+        if !self.mouse_mode() {
+            return false;
+        }
+        self.events
+            .push_back(InternalEvent::MouseReport(MouseReport {
+                point,
+                kind: MouseReportKind::Release(button),
+            }));
+        true
+    }
+
+    pub fn mouse_move(&mut self, button: u8, point: AlacPoint) -> bool {
+        let mode = self.last_content.mode;
+        if !mode.contains(TermMode::MOUSE_DRAG) && !mode.contains(TermMode::MOUSE_MOTION) {
+            return false;
+        }
+        self.events
+            .push_back(InternalEvent::MouseReport(MouseReport {
+                point,
+                kind: MouseReportKind::Move(button),
+            }));
+        true
+    }
+
+    pub fn mouse_scroll_up(&mut self, point: AlacPoint) -> bool {
+        if !self.mouse_mode() {
+            return false;
+        }
+        self.events
+            .push_back(InternalEvent::MouseReport(MouseReport {
+                point,
+                kind: MouseReportKind::ScrollUp,
+            }));
+        true
+    }
+
+    pub fn mouse_scroll_down(&mut self, point: AlacPoint) -> bool {
+        if !self.mouse_mode() {
+            return false;
+        }
+        self.events
+            .push_back(InternalEvent::MouseReport(MouseReport {
+                point,
+                kind: MouseReportKind::ScrollDown,
+            }));
+        true
     }
 
     /// 向上翻一页
@@ -511,8 +643,7 @@ impl Terminal {
 
     /// 清除选择
     pub fn clear_selection(&mut self) {
-        self.events
-            .push_back(InternalEvent::SetSelection(None));
+        self.events.push_back(InternalEvent::SetSelection(None));
     }
 
     /// 获取终端标题
@@ -526,6 +657,67 @@ impl Terminal {
 
     fn write_to_pty(&self, data: impl Into<Cow<'static, [u8]>>) {
         let _ = self.pty_tx.0.send(Msg::Input(data.into()));
+    }
+
+    fn should_send_alternate_scroll(&self) -> bool {
+        self.last_content.mode.contains(TermMode::ALT_SCREEN)
+            && self.last_content.mode.contains(TermMode::ALTERNATE_SCROLL)
+            && !self.mouse_mode()
+    }
+}
+
+fn encode_mouse_report(
+    report: MouseReport,
+    mode: TermMode,
+    display_offset: usize,
+) -> Option<Vec<u8>> {
+    if !mode.intersects(TermMode::MOUSE_MODE) {
+        return None;
+    }
+
+    let mut code = match report.kind {
+        MouseReportKind::Press(button) => button.min(2),
+        MouseReportKind::Release(button) => {
+            if mode.contains(TermMode::SGR_MOUSE) {
+                button.min(2)
+            } else {
+                3
+            }
+        }
+        MouseReportKind::Move(button) => (if button <= 2 { button } else { 3 }) | 32,
+        MouseReportKind::ScrollUp => 64,
+        MouseReportKind::ScrollDown => 65,
+    };
+
+    if matches!(report.kind, MouseReportKind::Move(_))
+        && !mode.contains(TermMode::MOUSE_MOTION)
+        && !mode.contains(TermMode::MOUSE_DRAG)
+    {
+        return None;
+    }
+
+    let col = report.point.column.0.saturating_add(1);
+    let row = (report.point.line.0 + display_offset as i32)
+        .max(0)
+        .saturating_add(1) as usize;
+
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let suffix = if matches!(report.kind, MouseReportKind::Release(_)) {
+            'm'
+        } else {
+            'M'
+        };
+        Some(format!("\x1b[<{};{};{}{}", code, col, row, suffix).into_bytes())
+    } else {
+        code = code.saturating_add(32);
+        Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            code,
+            (col + 32) as u8,
+            (row + 32) as u8,
+        ])
     }
 }
 

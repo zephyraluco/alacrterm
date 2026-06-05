@@ -5,8 +5,8 @@ mod terminal_view;
 mod themes;
 
 use crate::assets::Assets;
-use crate::themes::set_theme;
 use crate::terminal_view::TerminalView;
+use crate::themes::set_theme;
 use gpui::*;
 use gpui_component::{Root, TitleBar, h_flex, v_flex};
 
@@ -42,7 +42,7 @@ impl Render for TerminalApp {
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
-                    .child(self.terminal_view.clone())
+                    .child(self.terminal_view.clone()),
             )
     }
 }

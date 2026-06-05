@@ -1,13 +1,8 @@
 use alacritty_terminal::{
-    index::Point as AlacPoint,
-    selection::SelectionRange,
-    term::cell::Flags, vte::ansi::CursorShape,
+    index::Point as AlacPoint, selection::SelectionRange, term::cell::Flags, vte::ansi::CursorShape,
 };
 use gpui::{Div, FontWeight, Hsla, div, prelude::*, px};
-use terminal::{
-    IndexedCell, TerminalContent,
-    mappings::colors,
-};
+use terminal::{IndexedCell, TerminalContent, mappings::colors};
 
 pub struct TerminalElement {
     content: TerminalContent,
@@ -17,19 +12,24 @@ pub struct TerminalElement {
 
 impl TerminalElement {
     pub fn new(content: TerminalContent, focused: bool, cursor_visible: bool) -> Self {
-        Self { content, focused, cursor_visible }
+        Self {
+            content,
+            focused,
+            cursor_visible,
+        }
     }
 
     pub fn render_div(self) -> Div {
         let bounds = self.content.terminal_bounds;
         let cursor_point = self.content.cursor.map(|c| c.point);
         // CursorShape::Hidden 表示终端自身隐藏光标，叠加闪烁与焦点状态
-        let cursor_shape = self.content.cursor
+        let cursor_shape = self
+            .content
+            .cursor
             .map(|c| c.shape)
             .unwrap_or(CursorShape::Block);
-        let cursor_visible = self.cursor_visible
-            && self.focused
-            && cursor_shape != CursorShape::Hidden;
+        let cursor_visible =
+            self.cursor_visible && self.focused && cursor_shape != CursorShape::Hidden;
         let selection = self.content.selection;
         let font_size = bounds.cell_width / 0.6;
         let visible_lines = bounds.num_lines() as i32;
@@ -54,6 +54,7 @@ impl TerminalElement {
                     row,
                     cursor_point,
                     cursor_visible,
+                    cursor_shape,
                     bounds.line_height,
                     bounds.cell_width,
                     selection.clone(),
@@ -109,23 +110,38 @@ fn render_row(
     cells: Vec<IndexedCell>,
     cursor_point: Option<AlacPoint>,
     cursor_visible: bool,
+    cursor_shape: CursorShape,
     line_height: f32,
     cell_width: f32,
     selection: Option<SelectionRange>,
     default_bg: Hsla,
 ) -> Div {
     // ── 背景层 ────────────────────────────────────────────────────────────────
-    struct BgSpan { col_count: usize, bg: Hsla }
+    struct BgSpan {
+        col_count: usize,
+        bg: Hsla,
+    }
     let mut bg_spans: Vec<BgSpan> = Vec::new();
 
     for cell in &cells {
-        let is_cursor = cursor_visible && cursor_point.map_or(false, |p| p == cell.point);
-        let is_sel = selection.as_ref().map_or(false, |s| is_point_selected(&cell.point, s));
+        let is_cursor = cursor_visible
+            && cursor_shape == CursorShape::Block
+            && cursor_point.map_or(false, |p| p == cell.point);
+        let is_sel = selection
+            .as_ref()
+            .map_or(false, |s| is_point_selected(&cell.point, s));
         let (_, bg) = resolve_cell_colors(cell, is_cursor, is_sel);
-        let cw: usize = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+        let cw: usize = if cell.flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
 
         if let Some(last) = bg_spans.last_mut() {
-            if last.bg == bg { last.col_count += cw; continue; }
+            if last.bg == bg {
+                last.col_count += cw;
+                continue;
+            }
         }
         bg_spans.push(BgSpan { col_count: cw, bg });
     }
@@ -161,7 +177,11 @@ fn render_row(
 
     for cell in &cells {
         let col = cell.point.column.0;
-        let cw: usize = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+        let cw: usize = if cell.flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
         let ch = cell.c;
 
         // 空格、null、FEFF 跳过——bg 层已负责颜色，无需文字节点
@@ -170,8 +190,12 @@ fn render_row(
             continue;
         }
 
-        let is_cursor = cursor_visible && cursor_point.map_or(false, |p| p == cell.point);
-        let is_sel = selection.as_ref().map_or(false, |s| is_point_selected(&cell.point, s));
+        let is_cursor = cursor_visible
+            && cursor_shape == CursorShape::Block
+            && cursor_point.map_or(false, |p| p == cell.point);
+        let is_sel = selection
+            .as_ref()
+            .map_or(false, |s| is_point_selected(&cell.point, s));
         let (fg, _) = resolve_cell_colors(cell, is_cursor, is_sel);
         let bold = cell.flags.contains(Flags::BOLD);
         let italic = cell.flags.contains(Flags::ITALIC);
@@ -189,9 +213,24 @@ fn render_row(
             }
         }
 
-        text_runs.push(TextRun { text: ch.to_string(), start_col: col, fg, bold, italic });
+        text_runs.push(TextRun {
+            text: ch.to_string(),
+            start_col: col,
+            fg,
+            bold,
+            italic,
+        });
         last_text_end_col = col + cw;
     }
+
+    let cursor_layer = render_cursor_layer(
+        cursor_point,
+        cursor_visible,
+        cursor_shape,
+        cells.first().map(|cell| cell.point.line.0),
+        line_height,
+        cell_width,
+    );
 
     div()
         .relative()
@@ -200,6 +239,7 @@ fn render_row(
         .overflow_hidden()
         .bg(default_bg)
         .child(bg_layer)
+        .children(cursor_layer)
         .children(text_runs.into_iter().map(move |run| {
             let x = run.start_col as f32 * cell_width;
             div()
@@ -214,11 +254,91 @@ fn render_row(
         }))
 }
 
-fn resolve_cell_colors(
-    cell: &IndexedCell,
-    is_cursor: bool,
-    is_selected: bool,
-) -> (Hsla, Hsla) {
+fn render_cursor_layer(
+    cursor_point: Option<AlacPoint>,
+    cursor_visible: bool,
+    cursor_shape: CursorShape,
+    row_line: Option<i32>,
+    line_height: f32,
+    cell_width: f32,
+) -> Option<Div> {
+    if !cursor_visible || cursor_shape == CursorShape::Block || cursor_shape == CursorShape::Hidden
+    {
+        return None;
+    }
+
+    let cursor_point = cursor_point?;
+    if row_line != Some(cursor_point.line.0) {
+        return None;
+    }
+
+    let x = cursor_point.column.0 as f32 * cell_width;
+    let color = colors::CURSOR_COLOR();
+
+    let cursor = match cursor_shape {
+        CursorShape::Underline => div()
+            .absolute()
+            .left(px(x))
+            .bottom(px(1.0))
+            .w(px(cell_width))
+            .h(px(2.0))
+            .bg(color),
+        CursorShape::Beam => div()
+            .absolute()
+            .left(px(x))
+            .top(px(0.0))
+            .w(px(2.0))
+            .h(px(line_height))
+            .bg(color),
+        CursorShape::HollowBlock => div()
+            .absolute()
+            .left(px(x))
+            .top(px(0.0))
+            .w(px(cell_width))
+            .h(px(line_height))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .w_full()
+                    .h(px(1.0))
+                    .bg(color),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(0.0))
+                    .left(px(0.0))
+                    .w_full()
+                    .h(px(1.0))
+                    .bg(color),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .w(px(1.0))
+                    .h_full()
+                    .bg(color),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .right(px(0.0))
+                    .w(px(1.0))
+                    .h_full()
+                    .bg(color),
+            ),
+        CursorShape::Block | CursorShape::Hidden => return None,
+    };
+
+    Some(cursor)
+}
+
+fn resolve_cell_colors(cell: &IndexedCell, is_cursor: bool, is_selected: bool) -> (Hsla, Hsla) {
     let default_bg = colors::DEFAULT_BG();
     let cursor_color = colors::CURSOR_COLOR();
     let selection_bg = colors::SELECTION_BG();

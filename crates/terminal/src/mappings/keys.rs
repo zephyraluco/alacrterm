@@ -35,48 +35,12 @@ pub fn to_esc_str(
     // 光标键（受 APP_CURSOR 模式影响）
     let app_cursor = mode.contains(TermMode::APP_CURSOR);
     match key {
-        "up" => {
-            return Some(Cow::Borrowed(if app_cursor {
-                "\x1bOA"
-            } else {
-                "\x1b[A"
-            }))
-        }
-        "down" => {
-            return Some(Cow::Borrowed(if app_cursor {
-                "\x1bOB"
-            } else {
-                "\x1b[B"
-            }))
-        }
-        "right" => {
-            return Some(Cow::Borrowed(if app_cursor {
-                "\x1bOC"
-            } else {
-                "\x1b[C"
-            }))
-        }
-        "left" => {
-            return Some(Cow::Borrowed(if app_cursor {
-                "\x1bOD"
-            } else {
-                "\x1b[D"
-            }))
-        }
-        "home" => {
-            return Some(Cow::Borrowed(if app_cursor {
-                "\x1bOH"
-            } else {
-                "\x1b[H"
-            }))
-        }
-        "end" => {
-            return Some(Cow::Borrowed(if app_cursor {
-                "\x1bOF"
-            } else {
-                "\x1b[F"
-            }))
-        }
+        "up" => return Some(Cow::Borrowed(if app_cursor { "\x1bOA" } else { "\x1b[A" })),
+        "down" => return Some(Cow::Borrowed(if app_cursor { "\x1bOB" } else { "\x1b[B" })),
+        "right" => return Some(Cow::Borrowed(if app_cursor { "\x1bOC" } else { "\x1b[C" })),
+        "left" => return Some(Cow::Borrowed(if app_cursor { "\x1bOD" } else { "\x1b[D" })),
+        "home" => return Some(Cow::Borrowed(if app_cursor { "\x1bOH" } else { "\x1b[H" })),
+        "end" => return Some(Cow::Borrowed(if app_cursor { "\x1bOF" } else { "\x1b[F" })),
         "pageup" => return Some(Cow::Borrowed("\x1b[5~")),
         "pagedown" => return Some(Cow::Borrowed("\x1b[6~")),
         "delete" => return Some(Cow::Borrowed("\x1b[3~")),
@@ -88,7 +52,7 @@ pub fn to_esc_str(
                 Cow::Borrowed("\x1b[Z")
             } else {
                 Cow::Borrowed("\t")
-            })
+            });
         }
         "escape" => return Some(Cow::Borrowed("\x1b")),
         "space" => {
