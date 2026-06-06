@@ -2,7 +2,7 @@ pub mod mappings;
 mod pty_info;
 mod utils;
 
-pub use mappings::keys::to_esc_str;
+pub use mappings::{colors::TerminalTheme, keys::to_esc_str};
 pub use pty_info::{ProcessInfo, PtyProcessInfo};
 
 use alacritty_terminal::{
@@ -10,23 +10,16 @@ use alacritty_terminal::{
     event::{Event as AlacEvent, EventListener, WindowSize},
     event_loop::{EventLoop, Msg, Notifier, State},
     grid::{Dimensions, Scroll as AlacScroll},
-    index::Point as AlacPoint,
+    index::{Column, Direction as AlacDirection, Point as AlacPoint},
     selection::{Selection, SelectionRange, SelectionType},
     sync::FairMutex,
-    term::{Config, RenderableCursor, TermMode, cell::Cell},
+    term::{Config, RenderableCursor, TermMode, cell::Cell, search::RegexSearch},
     tty,
 };
+use mappings::mouse::{MouseReport, MouseReportKind, encode_mouse_report};
 
-use gpui::{ClipboardItem, Context, EventEmitter, Keystroke};
-use std::{
-    borrow::Cow,
-    collections::VecDeque,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread::JoinHandle,
-};
+use gpui::{Bounds, ClipboardItem, Context, EventEmitter, Keystroke, Pixels, Point, Size, px};
+use std::{borrow::Cow, collections::VecDeque, sync::Arc, thread::JoinHandle};
 
 // ─── 尺寸 ────────────────────────────────────────────────────────────────────
 
@@ -35,8 +28,7 @@ use std::{
 pub struct TerminalBounds {
     pub cell_width: f32,
     pub line_height: f32,
-    pub width: f32,
-    pub height: f32,
+    pub bounds: Bounds<Pixels>,
 }
 
 impl Default for TerminalBounds {
@@ -44,30 +36,42 @@ impl Default for TerminalBounds {
         Self {
             cell_width: 8.0,
             line_height: 16.0,
-            width: 640.0,
-            height: 384.0,
+            bounds: Bounds {
+                origin: Point::default(),
+                size: Size {
+                    width: px(640.0),
+                    height: px(384.0),
+                },
+            },
         }
     }
 }
 
 impl TerminalBounds {
-    pub fn new(cell_width: f32, line_height: f32, width: f32, height: f32) -> Self {
+    pub fn new(cell_width: f32, line_height: f32, bounds: Bounds<Pixels>) -> Self {
         Self {
             cell_width,
             line_height,
-            width,
-            height,
+            bounds,
         }
     }
 
+    pub fn width(&self) -> f32 {
+        self.bounds.size.width.into()
+    }
+
+    pub fn height(&self) -> f32 {
+        self.bounds.size.height.into()
+    }
+
     pub fn num_lines(&self) -> usize {
-        let raw = self.height / self.line_height;
+        let raw = self.height() / self.line_height;
         // Match Zed: compensate for f32 precision without allocating partial rows.
         raw.next_up().floor().max(1.0) as usize
     }
 
     pub fn num_columns(&self) -> usize {
-        let raw = self.width / self.cell_width;
+        let raw = self.width() / self.cell_width;
         raw.next_up().floor().max(1.0) as usize
     }
 }
@@ -109,6 +113,12 @@ pub struct IndexedCell {
     pub cell: Cell,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub start: AlacPoint,
+    pub end: AlacPoint,
+}
+
 impl std::ops::Deref for IndexedCell {
     type Target = Cell;
     fn deref(&self) -> &Cell {
@@ -127,6 +137,8 @@ pub struct TerminalContent {
     pub mode: TermMode,
     /// 当前显示偏移（滚动位置）
     pub display_offset: usize,
+    /// 滚回历史行数
+    pub history_size: usize,
     /// 选中的文本范围
     pub selection: Option<SelectionRange>,
     /// 选中的文本内容
@@ -143,6 +155,8 @@ pub struct TerminalContent {
     pub scrolled_to_top: bool,
     /// 是否滚动到了底部
     pub scrolled_to_bottom: bool,
+    /// 当前搜索匹配范围
+    pub search_matches: Vec<SearchMatch>,
 }
 
 // ─── 事件 ─────────────────────────────────────────────────────────────────────
@@ -160,6 +174,8 @@ pub enum Event {
     CloseTerminal,
     /// 选中内容变化
     SelectionsChanged,
+    /// 终端请求改变光标闪烁状态
+    CursorBlinkingChanged(bool),
 }
 
 // ─── 内部事件队列 ──────────────────────────────────────────────────────────────
@@ -171,71 +187,68 @@ enum InternalEvent {
     UpdateSelection(AlacPoint, alacritty_terminal::index::Side),
     MouseReport(MouseReport),
     Clear,
-}
-
-#[derive(Clone, Copy)]
-enum MouseReportKind {
-    Press(u8),
-    Release(u8),
-    Move(u8),
-    ScrollUp,
-    ScrollDown,
-}
-
-#[derive(Clone, Copy)]
-struct MouseReport {
-    point: AlacPoint,
-    kind: MouseReportKind,
+    /// 仅展示模式：原始 VTE 字节序列（通过 write_output 注入）
+    WriteOutput(Vec<u8>),
 }
 
 // ─── Alacritty 事件监听器 ──────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct TermListener {
-    dirty: Arc<AtomicBool>,
-    events: Arc<Mutex<VecDeque<AlacEvent>>>,
+    events_tx: async_channel::Sender<AlacEvent>,
 }
 
 impl EventListener for TermListener {
     fn send_event(&self, event: AlacEvent) {
-        let mut q = self.events.lock().unwrap();
-        q.push_back(event);
-        self.dirty.store(true, Ordering::Release);
+        let _ = self.events_tx.try_send(event);
     }
 }
 
 // ─── Terminal ─────────────────────────────────────────────────────────────────
 
+/// 终端后端运行模式
+enum TerminalType {
+    /// 连接真实 PTY shell 的终端
+    Pty {
+        pty_tx: Notifier,
+        _io_thread: JoinHandle<(EventLoop<tty::Pty, TermListener>, State)>,
+        pty_info: Arc<PtyProcessInfo>,
+    },
+    /// 仅展示模式：无 PTY，通过 write_output() 注入内容
+    DisplayOnly,
+}
+
 /// 终端后端（GPUI Model），管理 PTY、alacritty term 和内容渲染
 pub struct Terminal {
     term: Arc<FairMutex<Term<TermListener>>>,
-    pty_tx: Notifier,
-    _io_thread: JoinHandle<(EventLoop<tty::Pty, TermListener>, State)>,
+    terminal_type: TerminalType,
     /// 最近一次同步的渲染内容快照
     pub last_content: TerminalContent,
     /// 待处理的内部事件队列
     events: VecDeque<InternalEvent>,
-    /// 用于通知 GPUI 有更新的脏标志
-    #[allow(dead_code)]
-    dirty: Arc<AtomicBool>,
-    /// alacritty 事件队列
-    alac_events: Arc<Mutex<VecDeque<AlacEvent>>>,
     /// 标题文字
     breadcrumb_text: String,
-    /// PTY 进程信息
-    pub pty_info: Arc<PtyProcessInfo>,
+    /// 当前 UI 主题映射到终端 ANSI/特殊颜色的快照
+    pub theme: TerminalTheme,
+    search_query: Option<String>,
+}
+
+/// 向后兼容：pty_info 通过方法暴露
+impl Terminal {
+    pub fn pty_info(&self) -> Option<&Arc<PtyProcessInfo>> {
+        match &self.terminal_type {
+            TerminalType::Pty { pty_info, .. } => Some(pty_info),
+            TerminalType::DisplayOnly => None,
+        }
+    }
 }
 
 impl Terminal {
     /// 创建终端（在 cx.new() 中调用）
     pub fn new(cx: &mut Context<Self>) -> anyhow::Result<Self> {
-        let dirty = Arc::new(AtomicBool::new(false));
-        let alac_events = Arc::new(Mutex::new(VecDeque::<AlacEvent>::new()));
+        let (events_tx, events_rx) = async_channel::unbounded::<AlacEvent>();
 
-        let listener = TermListener {
-            dirty: dirty.clone(),
-            events: alac_events.clone(),
-        };
+        let listener = TermListener { events_tx };
 
         let shell = utils::find_shell();
         let pty_config = tty::Options {
@@ -267,17 +280,27 @@ impl Terminal {
         let pty_tx = Notifier(event_loop.channel());
         let io_thread = event_loop.spawn();
 
-        // 启动轮询任务：每 8ms 检查一次脏标志
-        let dirty_clone = dirty.clone();
         cx.spawn(async move |this, cx| {
-            loop {
+            while let Ok(event) = events_rx.recv().await {
+                let _ = this.update(cx, |terminal, cx| {
+                    terminal.drain_alac_events(vec![event], cx);
+                });
+
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(8))
+                    .timer(std::time::Duration::from_millis(4))
                     .await;
 
-                if dirty_clone.swap(false, Ordering::Acquire) {
+                let mut batch = Vec::new();
+                while batch.len() < 100 {
+                    match events_rx.try_recv() {
+                        Ok(event) => batch.push(event),
+                        Err(_) => break,
+                    }
+                }
+
+                if !batch.is_empty() {
                     let _ = this.update(cx, |terminal, cx| {
-                        terminal.drain_alac_events(cx);
+                        terminal.drain_alac_events(batch, cx);
                     });
                 }
             }
@@ -286,24 +309,48 @@ impl Terminal {
 
         Ok(Self {
             term,
-            pty_tx,
-            _io_thread: io_thread,
+            terminal_type: TerminalType::Pty {
+                pty_tx,
+                _io_thread: io_thread,
+                pty_info,
+            },
             last_content: TerminalContent::default(),
             events: VecDeque::new(),
-            dirty,
-            alac_events,
             breadcrumb_text: String::new(),
-            pty_info,
+            theme: TerminalTheme::default(),
+            search_query: None,
         })
     }
 
-    /// 消费 alacritty 事件并处理
-    fn drain_alac_events(&mut self, cx: &mut Context<Self>) {
-        let events: Vec<AlacEvent> = {
-            let mut q = self.alac_events.lock().unwrap();
-            q.drain(..).collect()
+    /// 创建仅展示模式的终端（无 PTY，通过 write_output 注入内容）
+    pub fn new_display_only(_cx: &mut Context<Self>) -> Self {
+        let (events_tx, _events_rx) = async_channel::unbounded::<AlacEvent>();
+        let listener = TermListener { events_tx };
+        let bounds = TerminalBounds::default();
+        let config = Config {
+            scrolling_history: 10_000,
+            ..Config::default()
         };
+        let size = TermSize {
+            columns: bounds.num_columns(),
+            screen_lines: bounds.num_lines(),
+        };
+        let term = Term::new(config, &size, listener);
+        let term = Arc::new(FairMutex::new(term));
 
+        Self {
+            term,
+            terminal_type: TerminalType::DisplayOnly,
+            last_content: TerminalContent::default(),
+            events: VecDeque::new(),
+            breadcrumb_text: String::new(),
+            theme: TerminalTheme::default(),
+            search_query: None,
+        }
+    }
+
+    /// 消费 alacritty 事件并处理
+    fn drain_alac_events(&mut self, events: Vec<AlacEvent>, cx: &mut Context<Self>) {
         let mut needs_sync = false;
         for event in events {
             match event {
@@ -334,6 +381,19 @@ impl Terminal {
                         .unwrap_or_default();
                     self.write_to_pty(format(&text).into_bytes());
                 }
+                AlacEvent::ColorRequest(index, format) => {
+                    let color = mappings::colors::to_vte_rgb(self.theme.color_at_index(index));
+                    self.write_to_pty(format(color).into_bytes());
+                }
+                AlacEvent::TextAreaSizeRequest(format) => {
+                    self.write_to_pty(
+                        format(self.last_content.terminal_bounds.into()).into_bytes(),
+                    );
+                }
+                AlacEvent::CursorBlinkingChange => {
+                    let blinking = self.term.lock().cursor_style().blinking;
+                    cx.emit(Event::CursorBlinkingChanged(blinking));
+                }
                 AlacEvent::Exit | AlacEvent::ChildExit(_) => {
                     cx.emit(Event::CloseTerminal);
                 }
@@ -362,7 +422,9 @@ impl Terminal {
                         columns: bounds.num_columns(),
                         screen_lines: bounds.num_lines(),
                     });
-                    let _ = self.pty_tx.0.send(Msg::Resize(bounds.into()));
+                    if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+                        let _ = pty_tx.0.send(Msg::Resize(bounds.into()));
+                    }
                 }
                 InternalEvent::Scroll(scroll) => {
                     terminal.scroll_display(scroll);
@@ -385,18 +447,27 @@ impl Terminal {
                         self.last_content.display_offset,
                     ) {
                         drop(terminal);
-                        let _ = self.pty_tx.0.send(Msg::Input(Cow::Owned(bytes)));
+                        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+                            let _ = pty_tx.0.send(Msg::Input(Cow::Owned(bytes)));
+                        }
                         terminal = term.lock_unfair();
                     }
                 }
                 InternalEvent::Clear => {
                     // 发送清屏转义序列到 PTY（清除屏幕 + 清除滚回）
                     drop(terminal);
-                    let _ = self
-                        .pty_tx
-                        .0
-                        .send(Msg::Input(Cow::Borrowed(b"\x1b[2J\x1b[3J\x1b[H")));
+                    if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+                        let _ = pty_tx
+                            .0
+                            .send(Msg::Input(Cow::Borrowed(b"\x1b[2J\x1b[3J\x1b[H")));
+                    }
                     terminal = term.lock_unfair();
+                }
+                InternalEvent::WriteOutput(data) => {
+                    // DisplayOnly 模式：使用 alacritty_terminal 内置的 VTE 处理器处理字节
+                    use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+                    let mut processor: Processor<StdSyncHandler> = Processor::new();
+                    processor.advance(&mut *terminal, &data);
                 }
             }
         }
@@ -420,11 +491,17 @@ impl Terminal {
         } else {
             None
         };
+        let search_matches = self
+            .search_query
+            .as_deref()
+            .map(|query| collect_search_matches(&terminal, query))
+            .unwrap_or_default();
 
         self.last_content = TerminalContent {
             cells,
             mode: content.mode,
             display_offset,
+            history_size,
             selection: content.selection,
             selection_text,
             cursor: Some(cursor),
@@ -433,6 +510,7 @@ impl Terminal {
             title: self.breadcrumb_text.clone(),
             scrolled_to_top: display_offset == history_size,
             scrolled_to_bottom: display_offset == 0,
+            search_matches,
         };
 
         if selection_changed {
@@ -467,9 +545,7 @@ impl Terminal {
     pub fn resize(&mut self, new_bounds: TerminalBounds) {
         let old = &self.last_content.terminal_bounds;
         let needs_resize = old.num_lines() != new_bounds.num_lines()
-            || old.num_columns() != new_bounds.num_columns()
-            || (old.cell_width - new_bounds.cell_width).abs() > 0.5
-            || (old.line_height - new_bounds.line_height).abs() > 0.5;
+            || old.num_columns() != new_bounds.num_columns();
 
         self.last_content.terminal_bounds = new_bounds;
 
@@ -482,6 +558,37 @@ impl Terminal {
                     self.events.push_back(InternalEvent::Resize(new_bounds));
                 }
             }
+        }
+    }
+
+    pub fn set_theme(&mut self, theme: TerminalTheme) {
+        self.theme = theme;
+    }
+
+    pub fn set_search_query(&mut self, query: impl Into<String>) {
+        let query = query.into();
+        self.search_query = (!query.is_empty()).then_some(query);
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search_query = None;
+    }
+
+    pub fn hyperlink_at(&self, point: AlacPoint) -> Option<String> {
+        self.last_content
+            .cells
+            .iter()
+            .find(|cell| cell.point == point)
+            .and_then(|cell| cell.cell.hyperlink())
+            .map(|hyperlink| hyperlink.uri().to_string())
+    }
+
+    pub fn working_directory(&self) -> Option<std::path::PathBuf> {
+        match &self.terminal_type {
+            TerminalType::Pty { pty_info, .. } => {
+                pty_info.current.as_ref().map(|info| info.cwd.clone())
+            }
+            TerminalType::DisplayOnly => None,
         }
     }
 
@@ -617,6 +724,16 @@ impl Terminal {
             .push_back(InternalEvent::Scroll(AlacScroll::Bottom));
     }
 
+    pub fn scroll_to_display_offset(&mut self, display_offset: usize) {
+        let current = self.last_content.display_offset as i32;
+        let target = display_offset.min(self.last_content.history_size) as i32;
+        let delta = target - current;
+        if delta != 0 {
+            self.events
+                .push_back(InternalEvent::Scroll(AlacScroll::Delta(delta)));
+        }
+    }
+
     /// 清除屏幕
     pub fn clear(&mut self) {
         self.events.push_back(InternalEvent::Clear);
@@ -646,6 +763,44 @@ impl Terminal {
         self.events.push_back(InternalEvent::SetSelection(None));
     }
 
+    pub fn select_all(&mut self) {
+        let terminal = self.term.lock();
+        let mut selection = Selection::new(
+            SelectionType::Lines,
+            AlacPoint::new(terminal.topmost_line(), Column(0)),
+            AlacDirection::Left,
+        );
+        selection.update(
+            AlacPoint::new(terminal.bottommost_line(), terminal.last_column()),
+            AlacDirection::Right,
+        );
+        drop(terminal);
+        self.events.push_back(InternalEvent::SetSelection(Some((
+            selection,
+            AlacPoint::new(alacritty_terminal::index::Line(0), Column(0)),
+        ))));
+    }
+
+    pub fn focus_in(&mut self) {
+        let mut terminal = self.term.lock();
+        terminal.is_focused = true;
+        let report_focus = terminal.mode().contains(TermMode::FOCUS_IN_OUT);
+        drop(terminal);
+        if report_focus {
+            self.input(b"\x1b[I".as_slice());
+        }
+    }
+
+    pub fn focus_out(&mut self) {
+        let mut terminal = self.term.lock();
+        terminal.is_focused = false;
+        let report_focus = terminal.mode().contains(TermMode::FOCUS_IN_OUT);
+        drop(terminal);
+        if report_focus {
+            self.input(b"\x1b[O".as_slice());
+        }
+    }
+
     /// 获取终端标题
     pub fn title(&self) -> &str {
         if self.breadcrumb_text.is_empty() {
@@ -656,7 +811,25 @@ impl Terminal {
     }
 
     fn write_to_pty(&self, data: impl Into<Cow<'static, [u8]>>) {
-        let _ = self.pty_tx.0.send(Msg::Input(data.into()));
+        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+            let _ = pty_tx.0.send(Msg::Input(data.into()));
+        }
+    }
+
+    /// 仅展示模式：将原始 VTE 字节直接注入终端网格（不经过 PTY）
+    /// 这些字节会在 sync() 时通过 InternalEvent::WriteOutput 处理
+    pub fn write_output(&mut self, data: impl Into<Vec<u8>>) {
+        // DisplayOnly 下直接推入事件队列
+        if matches!(self.terminal_type, TerminalType::DisplayOnly) {
+            self.events
+                .push_back(InternalEvent::WriteOutput(data.into()));
+        }
+        // PTY 模式下此方法无效（输出应从 PTY 自然读取）
+    }
+
+    /// 返回是否为仅展示模式
+    pub fn is_display_only(&self) -> bool {
+        matches!(self.terminal_type, TerminalType::DisplayOnly)
     }
 
     fn should_send_alternate_scroll(&self) -> bool {
@@ -666,65 +839,47 @@ impl Terminal {
     }
 }
 
-fn encode_mouse_report(
-    report: MouseReport,
-    mode: TermMode,
-    display_offset: usize,
-) -> Option<Vec<u8>> {
-    if !mode.intersects(TermMode::MOUSE_MODE) {
-        return None;
-    }
-
-    let mut code = match report.kind {
-        MouseReportKind::Press(button) => button.min(2),
-        MouseReportKind::Release(button) => {
-            if mode.contains(TermMode::SGR_MOUSE) {
-                button.min(2)
-            } else {
-                3
-            }
-        }
-        MouseReportKind::Move(button) => (if button <= 2 { button } else { 3 }) | 32,
-        MouseReportKind::ScrollUp => 64,
-        MouseReportKind::ScrollDown => 65,
+fn collect_search_matches(term: &Term<TermListener>, query: &str) -> Vec<SearchMatch> {
+    let Ok(mut regex) = RegexSearch::new(&regex_escape(query)) else {
+        return Vec::new();
     };
 
-    if matches!(report.kind, MouseReportKind::Move(_))
-        && !mode.contains(TermMode::MOUSE_MOTION)
-        && !mode.contains(TermMode::MOUSE_DRAG)
-    {
-        return None;
-    }
+    let start = AlacPoint::new(term.topmost_line(), Column(0));
+    let end = AlacPoint::new(term.bottommost_line(), term.last_column());
+    alacritty_terminal::term::search::RegexIter::new(
+        start,
+        end,
+        AlacDirection::Right,
+        term,
+        &mut regex,
+    )
+    .map(|range| SearchMatch {
+        start: *range.start(),
+        end: *range.end(),
+    })
+    .collect()
+}
 
-    let col = report.point.column.0.saturating_add(1);
-    let row = (report.point.line.0 + display_offset as i32)
-        .max(0)
-        .saturating_add(1) as usize;
-
-    if mode.contains(TermMode::SGR_MOUSE) {
-        let suffix = if matches!(report.kind, MouseReportKind::Release(_)) {
-            'm'
-        } else {
-            'M'
-        };
-        Some(format!("\x1b[<{};{};{}{}", code, col, row, suffix).into_bytes())
-    } else {
-        code = code.saturating_add(32);
-        Some(vec![
-            0x1b,
-            b'[',
-            b'M',
-            code,
-            (col + 32) as u8,
-            (row + 32) as u8,
-        ])
+fn regex_escape(query: &str) -> String {
+    let mut escaped = String::with_capacity(query.len());
+    for ch in query.chars() {
+        if matches!(
+            ch,
+            '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
     }
+    escaped
 }
 
 impl EventEmitter<Event> for Terminal {}
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        let _ = self.pty_tx.0.send(Msg::Shutdown);
+        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+            let _ = pty_tx.0.send(Msg::Shutdown);
+        }
     }
 }

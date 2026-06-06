@@ -1,5 +1,6 @@
 mod assets;
 mod layout;
+mod settings;
 mod terminal_element;
 mod terminal_view;
 mod themes;
@@ -15,8 +16,8 @@ pub struct TerminalApp {
 }
 
 impl TerminalApp {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let terminal_view = cx.new(|cx| TerminalView::new(cx));
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let terminal_view = cx.new(|cx| TerminalView::new(window, cx));
         Self { terminal_view }
     }
 }
@@ -61,7 +62,7 @@ fn main() {
             };
 
             cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|cx| TerminalApp::new(cx));
+                let view = cx.new(|cx| TerminalApp::new(window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
 
