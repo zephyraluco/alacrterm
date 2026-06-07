@@ -1,11 +1,16 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/terminal","crates/alacrterm"
+    "crates/terminal","crates/alacrterm","crates/util"
 ]
+
+[workspace.package]
+publish = false
+edition = "2024"
 
 [workspace.dependencies]
 terminal = { path = "crates/terminal" }
+util = { path = "crates/util" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
@@ -21,6 +26,17 @@ sysinfo = "0.39"
 tokio = { version = "1", features = ["full"] }
 fancy-regex = "0.18"
 schemars = "1"
+url = "2.2"
 urlencoding = "2.1"
 smallvec = "1"
+parking_lot = "0.12"
+percent-encoding = "2.3"
+futures = "0.3.32"
+futures-lite = "1.13"
+itertools = "0.14.0"
+regex = "1.5"
+vte = { version = "0.15.0", features = ["ansi"] }
+rand = "0.9"
+
+# [target.'cfg(windows)'.dependencies]
 windows = {version = "0.62", features = ["Win32_Foundation", "Win32_System_Kernel", "Win32_System_SystemInformation", "Win32_System_SystemServices","Win32_System_Threading"]}

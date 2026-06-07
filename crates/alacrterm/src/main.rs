@@ -1,8 +1,4 @@
 mod assets;
-mod layout;
-mod settings;
-mod terminal_element;
-mod terminal_view;
 mod themes;
 
 use crate::assets::Assets;

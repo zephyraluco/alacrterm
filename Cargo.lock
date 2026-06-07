@@ -1430,7 +1430,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2180,7 +2180,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.18",
- "windows 0.57.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3705,7 +3705,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5854,12 +5854,23 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "async-channel 2.5.0",
+ "futures",
+ "futures-lite 1.13.0",
  "gpui",
+ "itertools 0.14.0",
  "libc",
  "log",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.9.4",
+ "regex",
+ "schemars",
  "serde",
- "smallvec",
  "sysinfo 0.39.2",
+ "thiserror 2.0.18",
+ "url",
+ "urlencoding",
+ "vte",
  "windows 0.62.2",
 ]
 
@@ -6295,6 +6306,12 @@ dependencies = [
  "percent-encoding",
  "serde",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usvg"
