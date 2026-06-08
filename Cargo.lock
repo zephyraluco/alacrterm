@@ -1402,6 +1402,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "diff"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2366,7 +2372,7 @@ dependencies = [
  "strum",
  "swash",
  "url",
- "util",
+ "util 0.1.0 (git+https://github.com/zed-industries/zed)",
  "uuid",
 ]
 
@@ -2410,7 +2416,7 @@ dependencies = [
  "semver",
  "smallvec",
  "strum",
- "util",
+ "util 0.1.0 (git+https://github.com/zed-industries/zed)",
  "uuid",
  "zed-font-kit",
 ]
@@ -2529,7 +2535,7 @@ dependencies = [
  "rand 0.9.4",
  "raw-window-handle",
  "smallvec",
- "util",
+ "util 0.1.0 (git+https://github.com/zed-industries/zed)",
  "uuid",
  "windows 0.61.3",
  "windows-core 0.61.2",
@@ -2726,7 +2732,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "url",
- "util",
+ "util 0.1.0 (git+https://github.com/zed-industries/zed)",
 ]
 
 [[package]]
@@ -3609,6 +3615,18 @@ dependencies = [
 
 [[package]]
 name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.11.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
+name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
@@ -4455,6 +4473,16 @@ name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
+
+[[package]]
+name = "pretty_assertions"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d"
+dependencies = [
+ "diff",
+ "yansi",
+]
 
 [[package]]
 name = "prettyplease"
@@ -5870,6 +5898,7 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "urlencoding",
+ "util 0.1.0",
  "vte",
  "windows 0.62.2",
 ]
@@ -6355,6 +6384,28 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 [[package]]
 name = "util"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "dunce",
+ "globset",
+ "itertools 0.14.0",
+ "log",
+ "nix 0.30.1",
+ "percent-encoding",
+ "pretty_assertions",
+ "regex",
+ "schemars",
+ "serde",
+ "shlex",
+ "tendril",
+ "url",
+ "which 8.0.3",
+]
+
+[[package]]
+name = "util"
+version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed#60374460f263aaf56b8c1ced54f7731c0324b1f5"
 dependencies = [
  "anyhow",
@@ -6388,7 +6439,7 @@ dependencies = [
  "unicase",
  "url",
  "walkdir",
- "which",
+ "which 6.0.3",
 ]
 
 [[package]]
@@ -6856,6 +6907,15 @@ dependencies = [
  "home",
  "rustix 0.38.44",
  "winsafe",
+]
+
+[[package]]
+name = "which"
+version = "8.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c789537cf2f7f55be8e6192f92e464174ee55f91af622777f7f1ceb0dbccd03e"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -7464,6 +7524,12 @@ name = "y4m"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
+
+[[package]]
+name = "yansi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yazi"
