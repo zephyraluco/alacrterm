@@ -3,10 +3,12 @@ mod serde_helper;
 use std::{borrow::Cow, collections::{BTreeMap, HashMap}, fmt::Display, path::PathBuf, rc::Rc, sync::Arc};
 use indexmap::IndexMap;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use gpui::{SharedString, WindowButtonLayout};
 pub use content_into_gpui::*;
 use serde_helper::{serialize_f32_with_two_decimal_places, serialize_optional_f32_with_two_decimal_places};
+use util::asset_str;
+use rust_embed::RustEmbed;
 
 #[derive(Clone, Debug, Serialize, Deserialize,JsonSchema,PartialEq, Eq)]
 // serde(transparent) 序列化和反序列化时直接使用内部字段的表示，而不是把包装结构体本身序列化出来
@@ -259,7 +261,7 @@ pub enum WindowBackgroundContent {
     Blurred,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(untagged)]
 pub enum PathHyperlinkRegex {
     SingleLine(String),
@@ -383,7 +385,7 @@ impl TerminalLineHeight {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivateScript {
     #[default]
@@ -395,7 +397,7 @@ pub enum ActivateScript {
     Pyenv,
 }
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CondaManager {
@@ -409,7 +411,7 @@ pub enum CondaManager {
     /// Use micromamba
     Micromamba,
 }
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VenvSettings {
     #[default]
@@ -436,6 +438,7 @@ pub enum VenvSettings {
     Deserialize,
     PartialEq,
     Eq,
+    JsonSchema,
     strum::EnumDiscriminants,
 )]
 #[strum_discriminants(derive(strum::VariantArray, strum::VariantNames, strum::FromRepr))]
@@ -485,6 +488,7 @@ pub enum AlternateScroll {
     Deserialize,
     PartialEq,
     Eq,
+    JsonSchema,
     strum::EnumDiscriminants,
 )]
 #[strum_discriminants(derive(strum::VariantArray, strum::VariantNames, strum::FromRepr))]
@@ -626,9 +630,67 @@ pub struct ScrollbarSettingsContent {
     pub show: Option<ShowScrollbar>,
 }
 
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectTerminalSettingsContent {
+    /// What shell to use when opening a terminal.
+    ///
+    /// Default: system
+    pub shell: Option<Shell>,
+    /// What working directory to use when launching the terminal
+    ///
+    /// Default: current_project_directory
+    pub working_directory: Option<WorkingDirectory>,
+    /// Any key-value pairs added to this list will be added to the terminal's
+    /// environment. Use `:` to separate multiple values.
+    ///
+    /// Default: {}
+    pub env: Option<HashMap<String, String>>,
+    /// Activates the python virtual environment, if one is found, in the
+    /// terminal's working directory (as resolved by the working_directory
+    /// setting). Set this to "off" to disable this behavior.
+    ///
+    /// Default: on
+    pub detect_venv: Option<VenvSettings>,
+    /// Regexes used to identify paths for hyperlink navigation.
+    ///
+    /// Default: [
+    ///   // Python-style diagnostics
+    ///   "File \"(?<path>[^\"]+)\", line (?<line>[0-9]+)",
+    ///   // Common path syntax with optional line, column, description, trailing punctuation, or
+    ///   // surrounding symbols or quotes
+    ///   [
+    ///     "(?x)",
+    ///     "# optionally starts with 0-2 opening prefix symbols",
+    ///     "[({\\[<]{0,2}",
+    ///     "# which may be followed by an opening quote",
+    ///     "(?<quote>[\"'`])?",
+    ///     "# `path` is the shortest sequence of any non-space character",
+    ///     "(?<link>(?<path>[^ ]+?",
+    ///     "    # which may end with a line and optionally a column,",
+    ///     "    (?<line_column>:+[0-9]+(:[0-9]+)?|:?\\([0-9]+([,:][0-9]+)?\\))?",
+    ///     "))",
+    ///     "# which must be followed by a matching quote",
+    ///     "(?(<quote>)\\k<quote>)",
+    ///     "# and optionally a single closing symbol",
+    ///     "[)}\\]>]?",
+    ///     "# if line/column matched, may be followed by a description",
+    ///     "(?(<line_column>):[^ 0-9][^ ]*)?",
+    ///     "# which may be followed by trailing punctuation",
+    ///     "[.,:)}\\]>]*",
+    ///     "# and always includes trailing whitespace or end of line",
+    ///     "([ ]+|$)"
+    ///   ]
+    /// ]
+    pub path_hyperlink_regexes: Option<Vec<PathHyperlinkRegex>>,
+    /// Timeout for hover and Cmd-click path hyperlink discovery in milliseconds.
+    ///
+    /// Default: 1
+    pub path_hyperlink_timeout_ms: Option<u64>,
+}
 #[derive(Clone, Debug, PartialEq, Default, Serialize,Deserialize, JsonSchema)]
 pub struct TerminalSettingsContent {
-
+    #[serde(flatten)]
+    pub project: ProjectTerminalSettingsContent,
     /// Sets the terminal's font size.
     ///
     /// If this option is not included,
@@ -947,4 +1009,19 @@ pub struct SettingsStore {
 
     last_user_settings_content: Option<String>,
     last_global_settings_content: Option<String>,
+}
+
+#[derive(RustEmbed)]
+#[folder = "../../assets"]
+#[include = "settings/*"]
+#[include = "keymaps/*"]
+#[exclude = "*.DS_Store"]
+pub struct SettingsAssets;
+
+pub fn default_settings() -> Cow<'static, str> {
+    asset_str::<SettingsAssets>("settings/default.json")
+}
+
+pub fn parse_json_with_comments<T: DeserializeOwned>(content: &str) -> serde_json::Result<T> {
+    serde_json::from_str(content)
 }

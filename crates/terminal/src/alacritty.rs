@@ -150,16 +150,10 @@ pub(super) fn apply_config(term: &AlacrittyTermLock, config: &AlacrittyTermConfi
     term.lock().set_options(config.clone());
 }
 
-#[cfg(not(windows))]
-pub(super) fn current_child_signal_mask() -> io::Result<tty::SignalMask> {
-    tty::SignalMask::current()
-}
-
 pub(super) fn pty_options(
     shell: Option<(String, Vec<String>)>,
     working_directory: Option<PathBuf>,
     env: impl IntoIterator<Item = (String, String)>,
-    #[cfg(not(windows))] child_signal_mask: Option<tty::SignalMask>,
     #[cfg(windows)] escape_args: bool,
 ) -> tty::Options {
     tty::Options {
@@ -167,8 +161,6 @@ pub(super) fn pty_options(
         working_directory,
         drain_on_exit: true,
         env: env.into_iter().collect(),
-        #[cfg(not(windows))]
-        child_signal_mask,
         #[cfg(windows)]
         escape_args,
     }

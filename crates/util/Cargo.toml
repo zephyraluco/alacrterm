@@ -23,6 +23,7 @@ serde.workspace = true
 shlex = "1.3"
 url.workspace = true
 percent-encoding.workspace = true
+rust-embed.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 which = "8.0"

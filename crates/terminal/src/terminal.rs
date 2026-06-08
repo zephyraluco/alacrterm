@@ -4,8 +4,6 @@ mod alacritty;
 mod pty_info;
 pub mod terminal_settings;
 
-#[cfg(not(windows))]
-use anyhow::Context as _;
 use anyhow::{Result, bail};
 use futures_lite::future::yield_now;
 use log::trace;
@@ -52,8 +50,6 @@ use gpui::{
     Point as GpuiPoint, Rgba, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, black, px,
 };
 
-#[cfg(not(windows))]
-use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches, apply_config,
@@ -959,13 +955,7 @@ impl TerminalBuilder {
         path_style: PathStyle,
     ) -> Task<Result<TerminalBuilder>> {
         let background_executor = cx.background_executor().clone();
-        #[cfg(not(windows))]
-        let child_signal_mask = match current_child_signal_mask()
-            .context("failed to capture terminal child signal mask")
-        {
-            Ok(signal_mask) => Some(signal_mask),
-            Err(error) => return Task::ready(Err(error)),
-        };
+
         let fut = async move {
             // Remove SHLVL so the spawned shell initializes it to 1, matching
             // the behavior of standalone terminal emulators like iTerm2/Kitty/Alacritty.
@@ -1056,8 +1046,6 @@ impl TerminalBuilder {
                 // so terminal construction can run on a background thread without breaking Ctrl-C and other signals
                 // otherwise the terminal would inherit the background executor's signal mask which blocks
                 // some terminal signals
-                #[cfg(not(windows))]
-                child_signal_mask,
                 #[cfg(windows)]
                 shell_kind.tty_escape_args(),
             );

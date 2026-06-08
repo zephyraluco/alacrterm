@@ -12,3 +12,5 @@ indexmap = { version = "2.7.0", features = ["serde"] }
 schemars = { version = "1.0", features = ["indexmap2"] }
 gpui.workspace = true
 log.workspace = true
+util.workspace = true
+rust-embed.workspace = true

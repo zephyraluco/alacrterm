@@ -2,7 +2,7 @@ pub mod paths;
 pub mod rel_path;
 pub mod shell;
 
-use std::path::{Component, Path, PathBuf};
+use std::{borrow::Cow, path::{Component, Path, PathBuf}};
 
 pub use self::shell::{
     get_default_system_shell, get_default_system_shell_preferring_bash, get_system_shell,
@@ -80,4 +80,12 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     }
 
     ret
+}
+
+// Get an embedded file as a string.
+pub fn asset_str<A: rust_embed::RustEmbed>(path: &str) -> Cow<'static, str> {
+    match A::get(path).expect(path).data {
+        Cow::Borrowed(bytes) => Cow::Borrowed(std::str::from_utf8(bytes).unwrap()),
+        Cow::Owned(bytes) => Cow::Owned(String::from_utf8(bytes).unwrap()),
+    }
 }

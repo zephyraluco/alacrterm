@@ -50,6 +50,65 @@ pub struct TerminalSettings {
     pub show_count_badge: bool,
     pub bell: TerminalBell,
 }
+impl TerminalSettings {
+    pub fn from_settings(content: &settings::SettingsContent) -> Self {
+        let user_content = content.terminal.clone().unwrap();
+        // Note: we allow a subset of "terminal" settings in the project files.
+        let project_content = user_content.project.clone();
+        // project_content.merge_from_option(content.project.terminal.as_ref());
+        TerminalSettings {
+            shell: settings_shell_to_shell(project_content.shell.unwrap()),
+            working_directory: project_content.working_directory.unwrap(),
+            font_size: user_content.font_size.map(|s| s.into_gpui()),
+            font_family: user_content.font_family,
+            font_fallbacks: user_content.font_fallbacks.map(|fallbacks| {
+                FontFallbacks::from_fonts(
+                    fallbacks
+                        .into_iter()
+                        .map(|family| family.0.to_string())
+                        .collect(),
+                )
+            }),
+            font_features: user_content.font_features.map(|f| f.into_gpui()),
+            font_weight: user_content.font_weight.map(|w| w.into_gpui()),
+            line_height: user_content.line_height.unwrap(),
+            env: project_content.env.unwrap(),
+            cursor_shape: user_content.cursor_shape.unwrap().into(),
+            blinking: user_content.blinking.unwrap(),
+            alternate_scroll: user_content.alternate_scroll.unwrap(),
+            option_as_meta: user_content.option_as_meta.unwrap(),
+            copy_on_select: user_content.copy_on_select.unwrap(),
+            keep_selection_on_copy: user_content.keep_selection_on_copy.unwrap(),
+            button: user_content.button.unwrap(),
+            dock: user_content.dock.unwrap(),
+            default_width: px(user_content.default_width.unwrap()),
+            default_height: px(user_content.default_height.unwrap()),
+            flexible: user_content.flexible.unwrap(),
+            detect_venv: project_content.detect_venv.unwrap(),
+            scroll_multiplier: user_content.scroll_multiplier.unwrap(),
+            max_scroll_history_lines: user_content.max_scroll_history_lines,
+            toolbar: Toolbar {
+                breadcrumbs: user_content.toolbar.unwrap().breadcrumbs.unwrap(),
+            },
+            scrollbar: ScrollbarSettings {
+                show: user_content.scrollbar.unwrap().show,
+            },
+            minimum_contrast: user_content.minimum_contrast.unwrap(),
+            path_hyperlink_regexes: project_content
+                .path_hyperlink_regexes
+                .unwrap()
+                .into_iter()
+                .map(|regex| match regex {
+                    PathHyperlinkRegex::SingleLine(regex) => regex,
+                    PathHyperlinkRegex::MultiLine(regex) => regex.join("\n"),
+                })
+                .collect(),
+            path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
+            show_count_badge: user_content.show_count_badge.unwrap(),
+            bell: user_content.bell.unwrap(),
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ScrollbarSettings {
