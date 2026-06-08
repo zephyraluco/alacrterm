@@ -21,20 +21,17 @@ use mappings::mouse::{
     scroll_report,
 };
 
-use async_channel::{Receiver, Sender};
-use std::collections::{HashMap, VecDeque};
+use async_channel::Sender;
 use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
-use settings::Settings;
-use task::{HideStrategy, Shell, SpawnInTerminal};
+// use settings::Settings;
+use std::collections::{HashMap, VecDeque};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
-use theme::{ActiveTheme, Theme};
+// use theme::{ActiveTheme, Theme};
 use urlencoding;
-use util::{paths::PathStyle, truncate_and_trailoff};
+use util::{paths::PathStyle, shell::Shell, truncate_and_trailoff};
 
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
 use std::{
     borrow::Cow,
     cmp::{self, min},
@@ -59,13 +56,13 @@ use gpui::{
 use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
-    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
-    append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
-    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode,
-    total_lines, update_selection as update_term_selection, update_selection_to_vi_cursor,
+    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches, apply_config,
+    clear_saved_screen, content_text, display_offset, display_only_term_config,
+    find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
+    open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
+    search_matches, selection_text, set_default_cursor_style, set_selection as set_term_selection,
+    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
@@ -614,13 +611,11 @@ const DEBUG_LINE_HEIGHT: Pixels = px(5.);
 /// Used by both local terminals and remote terminals (via SSH).
 pub fn insert_zed_terminal_env(
     env: &mut HashMap<String, String>,
-    version: &impl std::fmt::Display,
 ) {
     env.insert("ZED_TERM".to_string(), "true".to_string());
     env.insert("TERM_PROGRAM".to_string(), "zed".to_string());
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
-    env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
 }
 
 ///Upward flowing events, for changing the title and such
@@ -894,7 +889,6 @@ impl TerminalBuilder {
         let term = new_term(&config, terminal_bounds, events_tx, alternate_scroll);
 
         let terminal = Terminal {
-            task: None,
             terminal_type: TerminalType::DisplayOnly,
             completion_tx: None,
             term,
@@ -950,7 +944,6 @@ impl TerminalBuilder {
 
     pub fn new(
         working_directory: Option<PathBuf>,
-        task: Option<TaskState>,
         shell: Shell,
         mut env: HashMap<String, String>,
         cursor_shape: SettingsCursorShape,
@@ -965,7 +958,6 @@ impl TerminalBuilder {
         activation_script: Vec<String>,
         path_style: PathStyle,
     ) -> Task<Result<TerminalBuilder>> {
-        let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
         #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
@@ -988,7 +980,7 @@ impl TerminalBuilder {
                     .or_insert_with(|| "en_US.UTF-8".to_string());
             }
 
-            insert_zed_terminal_env(&mut env, &version);
+            insert_zed_terminal_env(&mut env);
 
             #[derive(Default)]
             struct ShellParams {
@@ -1070,16 +1062,9 @@ impl TerminalBuilder {
                 shell_kind.tty_escape_args(),
             );
 
-            let scrolling_history = if task.is_some() {
-                // Tasks like `cargo build --all` may produce a lot of output, ergo allow maximum scrolling.
-                // After the task finishes, we do not allow appending to that terminal, so small tasks output should not
-                // cause excessive memory usage over time.
-                MAX_SCROLL_HISTORY_LINES
-            } else {
-                max_scroll_history_lines
-                    .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
-                    .min(MAX_SCROLL_HISTORY_LINES)
-            };
+            let scrolling_history = max_scroll_history_lines
+                .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
+                .min(MAX_SCROLL_HISTORY_LINES);
             let config = pty_term_config(scrolling_history, cursor_shape);
 
             //Setup the pty...
@@ -1096,7 +1081,7 @@ impl TerminalBuilder {
                 }
             };
 
-            //Spawn a task so the Alacritty EventLoop can communicate with us
+            // Spawn a background channel so the Alacritty EventLoop can communicate with us.
             //TODO: Remove with a bounded sender which can be dispatched on &self
             let (events_tx, events_rx) = unbounded();
             //Set up the terminal...
@@ -1112,9 +1097,7 @@ impl TerminalBuilder {
             //And connect them together
             let pty_tx = spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
 
-            let no_task = task.is_none();
             let terminal = Terminal {
-                task,
                 terminal_type: TerminalType::Pty {
                     pty_tx,
                     info: Arc::new(pty_info),
@@ -1165,7 +1148,7 @@ impl TerminalBuilder {
                 input_log: Vec::new(),
             };
 
-            if !activation_script.is_empty() && no_task {
+            if !activation_script.is_empty() {
                 for activation_script in activation_script {
                     terminal.write_to_pty(activation_script.into_bytes());
                     // Simulate enter key press
@@ -1305,7 +1288,6 @@ pub struct Terminal {
     next_link_id: usize,
     selection_phase: SelectionPhase,
     hyperlink_regex_searches: RegexSearches,
-    task: Option<TaskState>,
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
     last_mouse_move_time: Instant,
@@ -1333,39 +1315,6 @@ struct CopyTemplate {
     path_hyperlink_regexes: Vec<String>,
     path_hyperlink_timeout_ms: u64,
     window_id: u64,
-}
-
-#[derive(Debug)]
-pub struct TaskState {
-    pub status: TaskStatus,
-    pub completion_rx: Receiver<Option<ExitStatus>>,
-    pub spawned_task: SpawnInTerminal,
-}
-
-/// A status of the current terminal tab's task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskStatus {
-    /// The task had been started, but got cancelled or somehow otherwise it did not
-    /// report its exit code before the terminal event loop was shut down.
-    Unknown,
-    /// The task is started and running currently.
-    Running,
-    /// After the start, the task stopped running and reported its error code back.
-    Completed { success: bool },
-}
-
-impl TaskStatus {
-    fn register_terminal_exit(&mut self) {
-        if self == &Self::Running {
-            *self = Self::Unknown;
-        }
-    }
-
-    fn register_task_exit(&mut self, error_code: i32) {
-        *self = TaskStatus::Completed {
-            success: error_code == 0,
-        };
-    }
 }
 
 const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
@@ -2456,68 +2405,44 @@ impl Terminal {
 
     pub fn title(&self, truncate: bool) -> String {
         const MAX_CHARS: usize = 25;
-        match &self.task {
-            Some(task_state) => {
-                if truncate {
-                    truncate_and_trailoff(&task_state.spawned_task.label, MAX_CHARS)
-                } else {
-                    task_state.spawned_task.full_label.clone()
-                }
-            }
-            None => self
-                .title_override
-                .as_ref()
-                .map(|title_override| title_override.to_string())
-                .unwrap_or_else(|| match &self.terminal_type {
-                    TerminalType::Pty { info, .. } => info
-                        .current
-                        .read()
-                        .as_ref()
-                        .map(|fpi| {
-                            let process_file = fpi
-                                .cwd
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_default();
+        self.title_override
+            .as_ref()
+            .map(|title_override| title_override.to_string())
+            .unwrap_or_else(|| match &self.terminal_type {
+                TerminalType::Pty { info, .. } => info
+                    .current
+                    .read()
+                    .as_ref()
+                    .map(|fpi| {
+                        let process_file = fpi
+                            .cwd
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
 
-                            let argv = fpi.argv.as_slice();
-                            let process_name = format!(
-                                "{}{}",
-                                fpi.name,
-                                if !argv.is_empty() {
-                                    format!(" {}", (argv[1..]).join(" "))
-                                } else {
-                                    "".to_string()
-                                }
-                            );
-                            let (process_file, process_name) = if truncate {
-                                (
-                                    truncate_and_trailoff(&process_file, MAX_CHARS),
-                                    truncate_and_trailoff(&process_name, MAX_CHARS),
-                                )
+                        let argv = fpi.argv.as_slice();
+                        let process_name = format!(
+                            "{}{}",
+                            fpi.name,
+                            if !argv.is_empty() {
+                                format!(" {}", (argv[1..]).join(" "))
                             } else {
-                                (process_file, process_name)
-                            };
-                            format!("{process_file} — {process_name}")
-                        })
-                        .unwrap_or_else(|| "Terminal".to_string()),
-                    TerminalType::DisplayOnly => "Terminal".to_string(),
-                }),
-        }
-    }
-
-    pub fn kill_active_task(&mut self) {
-        if let Some(task) = self.task()
-            && task.status == TaskStatus::Running
-        {
-            if let TerminalType::Pty { info, .. } = &self.terminal_type {
-                // First kill the foreground process group (the command running in the shell)
-                info.kill_current_process();
-                // Then kill the shell itself so that the terminal exits properly
-                // and wait_for_completed_task can complete
-                info.kill_child_process();
-            }
-        }
+                                "".to_string()
+                            }
+                        );
+                        let (process_file, process_name) = if truncate {
+                            (
+                                truncate_and_trailoff(&process_file, MAX_CHARS),
+                                truncate_and_trailoff(&process_name, MAX_CHARS),
+                            )
+                        } else {
+                            (process_file, process_name)
+                        };
+                        format!("{process_file} — {process_name}")
+                    })
+                    .unwrap_or_else(|| "Terminal".to_string()),
+                TerminalType::DisplayOnly => "Terminal".to_string(),
+            })
     }
 
     pub fn pid(&self) -> Option<sysinfo::Pid> {
@@ -2534,22 +2459,6 @@ impl Terminal {
         }
     }
 
-    pub fn task(&self) -> Option<&TaskState> {
-        self.task.as_ref()
-    }
-
-    pub fn wait_for_completed_task(&self, cx: &App) -> Task<Option<ExitStatus>> {
-        if let Some(task) = self.task() {
-            if task.status == TaskStatus::Running {
-                let completion_receiver = task.completion_rx.clone();
-                return cx.spawn(async move |_| completion_receiver.recv().await.ok().flatten());
-            } else if let Ok(status) = task.completion_rx.try_recv() {
-                return Task::ready(status);
-            }
-        }
-        Task::ready(None)
-    }
-
     fn register_task_finished(
         &mut self,
         exit_status: Option<ExitStatus>,
@@ -2561,65 +2470,14 @@ impl Terminal {
         if let Some(e) = exit_status {
             self.child_exited = Some(e);
         }
-        let task = match &mut self.task {
-            Some(task) => task,
-            None => {
-                // For interactive shells (no task), we need to differentiate:
-                // 1. User-initiated exits (typed "exit", Ctrl+D, etc.) - always close,
-                //    even if the shell exits with a non-zero code (e.g. after `false`).
-                // 2. Shell spawn failures (bad $SHELL) - don't close, so the user sees
-                //    the error. Spawn failures never receive keyboard input.
-                let should_close = if self.keyboard_input_sent {
-                    true
-                } else {
-                    self.child_exited.is_none_or(|e| e.code() == Some(0))
-                };
-                if should_close {
-                    cx.emit(Event::CloseTerminal);
-                }
-                return;
-            }
+        // For interactive shells, differentiate user-initiated exits from spawn failures.
+        let should_close = if self.keyboard_input_sent {
+            true
+        } else {
+            self.child_exited.is_none_or(|e| e.code() == Some(0))
         };
-        if task.status != TaskStatus::Running {
-            return;
-        }
-        match exit_status.and_then(|e| e.code()) {
-            Some(error_code) => {
-                task.status.register_task_exit(error_code);
-            }
-            None => {
-                task.status.register_terminal_exit();
-            }
-        };
-
-        let (finished_successfully, task_line, command_line) = task_summary(task, exit_status);
-        let mut lines_to_show = Vec::new();
-        if task.spawned_task.show_summary {
-            lines_to_show.push(task_line.as_str());
-        }
-        if task.spawned_task.show_command {
-            lines_to_show.push(command_line.as_str());
-        }
-        let hide = task.spawned_task.hide;
-
-        if !lines_to_show.is_empty() {
-            // SAFETY: the invocation happens on non `TaskStatus::Running` tasks, once,
-            // after either `AlacTermEvent::Exit` or `AlacTermEvent::ChildExit` events that are spawned
-            // when Zed task finishes and no more output is made.
-            // After the task summary is output once, no more text is appended to the terminal.
-            unsafe { append_text_to_term(&mut self.term.lock(), &lines_to_show) };
-        }
-
-        match hide {
-            HideStrategy::Never => {}
-            HideStrategy::Always => {
-                cx.emit(Event::CloseTerminal);
-            }
-            HideStrategy::OnSuccess => {
-                if finished_successfully {
-                    cx.emit(Event::CloseTerminal);
-                }
-            }
+        if should_close {
+            cx.emit(Event::CloseTerminal);
         }
     }
 
@@ -2631,7 +2489,6 @@ impl Terminal {
         let working_directory = self.working_directory().or_else(|| cwd);
         TerminalBuilder::new(
             working_directory,
-            None,
             self.template.shell.clone(),
             self.template.env.clone(),
             self.template.cursor_shape,
@@ -2647,46 +2504,6 @@ impl Terminal {
             self.path_style,
         )
     }
-}
-
-const TASK_DELIMITER: &str = "⏵ ";
-fn task_summary(task: &TaskState, exit_status: Option<ExitStatus>) -> (bool, String, String) {
-    let escaped_full_label = task
-        .spawned_task
-        .full_label
-        .replace("\r\n", "\r")
-        .replace('\n', "\r");
-    let task_label = |suffix: &str| format!("{TASK_DELIMITER}Task `{escaped_full_label}` {suffix}");
-    let (success, task_line) = match exit_status {
-        Some(status) => {
-            let code = status.code();
-            #[cfg(unix)]
-            let signal = status.signal();
-            #[cfg(not(unix))]
-            let signal: Option<i32> = None;
-
-            match (code, signal) {
-                (Some(0), _) => (true, task_label("finished successfully")),
-                (Some(code), _) => (
-                    false,
-                    task_label(&format!("finished with exit code: {code}")),
-                ),
-                (None, Some(signal)) => (
-                    false,
-                    task_label(&format!("terminated by signal: {signal}")),
-                ),
-                (None, None) => (false, task_label("finished")),
-            }
-        }
-        None => (false, task_label("finished")),
-    };
-    let escaped_command_label = task
-        .spawned_task
-        .command_label
-        .replace("\r\n", "\r")
-        .replace('\n', "\r");
-    let command_line = format!("{TASK_DELIMITER}Command: {escaped_command_label}");
-    (success, task_line, command_line)
 }
 
 impl Drop for Terminal {
@@ -2889,7 +2706,7 @@ mod tests {
         rgb_for_index,
     };
     use async_channel::Receiver;
-    use collections::HashMap;
+    use std::collections::HashMap;
     use gpui::MouseMoveEvent;
     use gpui::{
         ClipboardItem, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
@@ -2897,7 +2714,6 @@ mod tests {
     };
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
-    use task::{Shell, ShellBuilder};
 
     #[test]
     fn test_normalize_path_command_name() {
@@ -2963,10 +2779,12 @@ mod tests {
         command: &str,
         args: &[&str],
     ) -> (Entity<Terminal>, Receiver<Option<ExitStatus>>) {
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let (program, args) =
-            ShellBuilder::new(&Shell::System, false).build(Some(command.to_owned()), &args);
-        build_test_terminal_with_arguments(cx, program, args).await
+        build_test_terminal_with_arguments(
+            cx,
+            command.to_owned(),
+            args.iter().map(|s| s.to_string()).collect(),
+        )
+        .await
     }
 
     async fn build_test_terminal_with_arguments(
@@ -2979,8 +2797,7 @@ mod tests {
             .update(|cx| {
                 TerminalBuilder::new(
                     None,
-                    None,
-                    task::Shell::WithArguments {
+                    Shell::WithArguments {
                         program,
                         args,
                         title_override: None,
@@ -3142,8 +2959,7 @@ mod tests {
             .update(|cx| {
                 TerminalBuilder::new(
                     None,
-                    None,
-                    task::Shell::System,
+                    Shell::System,
                     HashMap::default(),
                     SettingsCursorShape::default(),
                     AlternateScroll::On,
@@ -3210,8 +3026,7 @@ mod tests {
             .update(|cx| {
                 TerminalBuilder::new(
                     None,
-                    None,
-                    task::Shell::System,
+                    Shell::System,
                     HashMap::default(),
                     SettingsCursorShape::default(),
                     AlternateScroll::On,
@@ -3266,16 +3081,13 @@ mod tests {
         cx.executor().allow_parking();
 
         let (completion_tx, completion_rx) = async_channel::unbounded();
-        let (program, args) = ShellBuilder::new(&Shell::System, false)
-            .build(Some("asdasdasdasd".to_owned()), &["@@@@@".to_owned()]);
         let builder = cx
             .update(|cx| {
                 TerminalBuilder::new(
                     None,
-                    None,
-                    task::Shell::WithArguments {
-                        program,
-                        args,
+                    Shell::WithArguments {
+                        program: "asdasdasdasd".to_owned(),
+                        args: vec!["@@@@@".to_owned()],
                         title_override: None,
                     },
                     HashMap::default(),
@@ -3308,7 +3120,7 @@ mod tests {
         .detach();
         let completion_check_task = cx.background_spawn(async move {
             // The channel may be closed if the terminal is dropped before sending
-            // the completion signal, which can happen with certain task scheduling orders.
+            // the completion signal, which can happen with certain scheduling orders.
             let exit_status = completion_rx.recv().await.ok().flatten();
             if let Some(exit_status) = exit_status {
                 assert!(
@@ -3786,77 +3598,6 @@ mod tests {
         );
     }
 
-    /// Test that kill_active_task properly terminates both the foreground process
-    /// and the shell, allowing wait_for_completed_task to complete and output to be captured.
-    #[cfg(unix)]
-    #[gpui::test]
-    async fn test_kill_active_task_completes_and_captures_output(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-
-        // Run a command that prints output then sleeps for a long time
-        // The echo ensures we have output to capture before killing
-        let (terminal, completion_rx) =
-            build_test_terminal(cx, "echo", &["test_output_before_kill; sleep 60"]).await;
-
-        assert_content_eventually(&terminal, "test_output_before_kill", cx).await;
-
-        // Kill the active task
-        terminal.update(cx, |term, _cx| {
-            term.kill_active_task();
-        });
-
-        // wait_for_completed_task should complete within a reasonable time (not hang)
-        let completion_result = completion_rx.recv().await;
-        assert!(
-            completion_result.is_ok(),
-            "wait_for_completed_task should complete after kill_active_task, but it timed out"
-        );
-
-        // The exit status should indicate the process was killed (not a clean exit)
-        let exit_status = completion_result.unwrap();
-        assert!(
-            exit_status.is_some(),
-            "Should have received an exit status after killing"
-        );
-
-        // Verify that output captured before killing is still available
-        let content = terminal.update(cx, |term, _| term.get_content());
-        assert!(
-            content.contains("test_output_before_kill"),
-            "Output from before kill should be captured, got: {content}"
-        );
-    }
-
-    /// Test that kill_active_task on a task that's not running is a no-op
-    #[gpui::test]
-    async fn test_kill_active_task_on_completed_task_is_noop(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-
-        // Run a command that exits immediately
-        let (terminal, completion_rx) = build_test_terminal(cx, "echo", &["done"]).await;
-
-        // Wait for the command to complete naturally
-        let exit_status = completion_rx
-            .recv()
-            .await
-            .expect("Should receive exit status");
-        assert_eq!(exit_status, Some(ExitStatus::default()));
-
-        assert_content_eventually(&terminal, "done", cx).await;
-
-        // Now try to kill - should be a no-op since task already completed
-        terminal.update(cx, |term, _cx| {
-            term.kill_active_task();
-        });
-
-        // Content should still be there
-        let content = terminal.update(cx, |term, _| term.get_content());
-        assert!(
-            content.contains("done"),
-            "Output should still be present after no-op kill, got: {content}"
-        );
-    }
-
     mod perf {
         use super::super::*;
         use gpui::{
@@ -3883,8 +3624,7 @@ mod tests {
                     let test_path_hyperlink_timeout_ms = 100;
                     TerminalBuilder::new(
                         None,
-                        None,
-                        task::Shell::System,
+                        Shell::System,
                         HashMap::default(),
                         SettingsCursorShape::default(),
                         AlternateScroll::On,

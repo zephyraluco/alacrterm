@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/terminal","crates/alacrterm","crates/util"
+    "crates/terminal",
+    "crates/alacrterm",
+    "crates/util",
+    "crates/settings",
 ]
 
 [workspace.package]
@@ -11,8 +14,13 @@ edition = "2024"
 [workspace.dependencies]
 terminal = { path = "crates/terminal" }
 util = { path = "crates/util" }
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+settings = { path = "crates/settings" }
+gpui = { git = "https://github.com/zed-industries/zed", features = [
+    "test-support",
+] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+    "font-kit",
+] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 anyhow = "1.0"
 async-channel = "2"
@@ -37,6 +45,13 @@ itertools = "0.14.0"
 regex = "1.5"
 vte = { version = "0.15.0", features = ["ansi"] }
 rand = "0.9"
+serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
 
 # [target.'cfg(windows)'.dependencies]
-windows = {version = "0.62", features = ["Win32_Foundation", "Win32_System_Kernel", "Win32_System_SystemInformation", "Win32_System_SystemServices","Win32_System_Threading"]}
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Kernel",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
