@@ -1,10 +1,10 @@
-use gpui::{
-    FontFeatures, FontStyle, FontWeight, Modifiers, Pixels, SharedString,
-    WindowBackgroundAppearance, px,
-};
 use crate::{
     FontFamilyName, FontFeaturesContent, FontSize, FontStyleContent, FontWeightContent,
     ModifiersContent, WindowBackgroundContent,
+};
+use gpui::{
+    FontFeatures, FontStyle, FontWeight, Modifiers, Pixels, SharedString,
+    WindowBackgroundAppearance, px,
 };
 use std::sync::Arc;
 
@@ -86,8 +86,8 @@ impl IntoGpui for FontFamilyName {
 
 #[cfg(test)]
 mod tests {
-    use gpui::FontWeight;
     use crate::FontWeightContent;
+    use gpui::FontWeight;
 
     #[test]
     fn test_font_weight_content_constants_match_gpui() {
