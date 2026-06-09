@@ -1131,7 +1131,6 @@ mod tests {
                 }
             }
         }
-
     }
 
     mod file_iri {

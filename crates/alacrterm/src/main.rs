@@ -2,19 +2,16 @@ mod assets;
 mod themes;
 
 use crate::assets::Assets;
-use crate::terminal_view::TerminalView;
 use crate::themes::set_theme;
 use gpui::*;
 use gpui_component::{Root, TitleBar, h_flex, v_flex};
+use settings::SettingsStore;
 
-pub struct TerminalApp {
-    terminal_view: Entity<TerminalView>,
-}
+pub struct TerminalApp;
 
 impl TerminalApp {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let terminal_view = cx.new(|cx| TerminalView::new(window, cx));
-        Self { terminal_view }
+    pub fn new(_: &mut Window, _: &mut Context<Self>) -> Self {
+        Self
     }
 }
 
@@ -39,7 +36,10 @@ impl Render for TerminalApp {
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
-                    .child(self.terminal_view.clone()),
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child("Alacrterm"),
             )
     }
 }
@@ -49,6 +49,10 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+        cx.set_global(SettingsStore::new().expect("failed to initialize settings store"));
+        let store = cx.global::<SettingsStore>();
+
+        println!("Default settings loaded: {:#?}", store.default_settings().terminal);
         set_theme(cx, "Tokyo Night");
 
         cx.spawn(async move |cx| {

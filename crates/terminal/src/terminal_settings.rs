@@ -5,12 +5,12 @@ use std::collections::HashMap;
 
 pub use settings::AlternateScroll;
 
-use settings::{
-    IntoGpui, PathHyperlinkRegex, ShowScrollbar, TerminalBell, TerminalBlink,
-    TerminalDockPosition, TerminalLineHeight, VenvSettings, WorkingDirectory
-};
 use settings::FontFamilyName;
 use settings::Shell;
+use settings::{
+    IntoGpui, PathHyperlinkRegex, ShowScrollbar, TerminalBell, TerminalBlink, TerminalDockPosition,
+    TerminalLineHeight, VenvSettings, WorkingDirectory,
+};
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Toolbar {

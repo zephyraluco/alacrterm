@@ -156,14 +156,12 @@ dependencies = [
 name = "alacrterm"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "gpui",
  "gpui-component",
  "gpui_platform",
- "log",
  "rust-embed",
- "terminal",
+ "settings",
 ]
 
 [[package]]

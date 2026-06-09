@@ -1657,7 +1657,6 @@ impl UrlExt for url::Url {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::rel_path::rel_path;
