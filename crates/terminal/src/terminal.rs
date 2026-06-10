@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::collections::{HashMap, VecDeque};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
-// use theme::{ActiveTheme, Theme};
+use theme::{ActiveTheme, Theme};
 use urlencoding;
 use util::{paths::PathStyle, shell::Shell, truncate_and_trailoff};
 
@@ -2680,4 +2680,56 @@ pub fn rgba_color(r: u8, g: u8, b: u8) -> Hsla {
         a: 1.,
     }
     .into()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_path_command_name() {
+        assert_eq!(normalize_path_command_name("claude"), Some("claude".into()));
+        assert_eq!(normalize_path_command_name("Cargo"), Some("cargo".into()));
+        assert_eq!(normalize_path_command_name("node.exe"), Some("node".into()));
+        assert_eq!(
+            normalize_path_command_name("my-agent_cli.1"),
+            Some("my-agent_cli.1".into())
+        );
+        assert_eq!(normalize_path_command_name("./local-agent"), None);
+        assert_eq!(normalize_path_command_name("../local-agent"), None);
+        assert_eq!(normalize_path_command_name("/usr/local/bin/cargo"), None);
+        assert_eq!(
+            normalize_path_command_name("target\\debug\\agent.exe"),
+            None
+        );
+        assert_eq!(normalize_path_command_name(".hidden-agent"), None);
+        assert_eq!(normalize_path_command_name("agent with spaces"), None);
+        assert_eq!(normalize_path_command_name("zsh"), Some("zsh".into()));
+        assert_eq!(normalize_path_command_name("-zsh"), None);
+        assert_eq!(normalize_path_command_name("pwsh.exe"), Some("pwsh".into()));
+    }
+
+    #[test]
+    fn test_foreground_process_command_from_interpreter_wrapper() {
+        assert_eq!(
+            foreground_process_command_from_argv(&[
+                "node".to_string(),
+                "/opt/homebrew/lib/node_modules/@google/gemini-cli/dist/index.js".to_string(),
+            ]),
+            Some("gemini".to_string())
+        );
+        assert_eq!(
+            foreground_process_command_from_argv(&[
+                "python3".to_string(),
+                "/Users/me/.local/bin/codex.py".to_string(),
+            ]),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            foreground_process_command_from_argv(&[
+                "node".to_string(),
+                "/Users/me/private-project/scripts/customer-data-export.js".to_string(),
+            ]),
+            Some("customer-data-export".to_string())
+        );
+    }
 }

@@ -2,43 +2,30 @@
 
 //! # Theme
 //!
-//! This crate provides the theme system for Zed.
+//! This crate provides the minimal theme API needed by the terminal.
 //!
 //! ## Overview
 //!
-//! A theme is a collection of colors used to build a consistent appearance for UI components across the application.
+//! A theme is a collection of colors used to render terminal UI consistently.
 
 mod default_colors;
 mod fallback_themes;
 mod font_family_cache;
 mod icon_theme;
-mod icon_theme_schema;
-mod registry;
 mod scale;
-mod schema;
 mod styles;
-mod theme_settings;
-mod theme_settings_provider;
 
 use std::sync::Arc;
 
-use gpui::BorrowAppContext;
-use gpui::Global;
-use gpui::{
-    App, AssetSource, Hsla, Pixels, SharedString, WindowAppearance, WindowBackgroundAppearance, px,
-};
+use gpui::{BorrowAppContext, Global};
+use gpui::{App, Hsla, Pixels, SharedString, WindowAppearance, WindowBackgroundAppearance, px};
 use serde::Deserialize;
 
 pub use crate::default_colors::*;
-// pub use crate::fallback_themes::{apply_status_color_defaults, apply_theme_color_defaults};
 pub use crate::font_family_cache::*;
 pub use crate::icon_theme::*;
-pub use crate::icon_theme_schema::*;
-pub use crate::registry::*;
 pub use crate::scale::*;
-pub use crate::schema::*;
 pub use crate::styles::*;
-pub use crate::theme_settings_provider::*;
 
 /// The name of the default dark theme.
 pub const DEFAULT_DARK_THEME: &str = "One Dark";
@@ -76,42 +63,20 @@ impl From<WindowAppearance> for Appearance {
     }
 }
 
-/// Which themes should be loaded. This is used primarily for testing.
+/// Which themes should be loaded.
 pub enum LoadThemes {
-    /// Only load the base theme.
-    ///
-    /// No user themes will be loaded.
+    /// Only load the built-in fallback theme.
     JustBase,
-
-    /// Load all of the built-in themes.
-    All(Box<dyn AssetSource>),
 }
 
-/// Initialize the theme system with default themes.
-///
-/// This sets up the [`ThemeRegistry`], [`FontFamilyCache`], [`SystemAppearance`],
-/// and [`GlobalTheme`] with the default dark theme. It does NOT load bundled
-/// themes from JSON or integrate with settings — use `theme_settings::init` for that.
-pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
+/// Initialize the minimal theme system.
+pub fn init(_themes_to_load: LoadThemes, cx: &mut App) {
     SystemAppearance::init(cx);
-    let assets = match themes_to_load {
-        LoadThemes::JustBase => Box::new(()) as Box<dyn AssetSource>,
-        LoadThemes::All(assets) => assets,
-    };
-    ThemeRegistry::set_global(assets, cx);
     FontFamilyCache::init_global(cx);
-
-    let themes = ThemeRegistry::default_global(cx);
-    let theme = themes.get(DEFAULT_DARK_THEME).unwrap_or_else(|_| {
-        themes
-            .list()
-            .into_iter()
-            .next()
-            .map(|m| themes.get(&m.name).unwrap())
-            .unwrap()
+    cx.set_global(GlobalTheme {
+        theme: Arc::new(crate::fallback_themes::zed_default_dark()),
+        icon_theme: default_icon_theme(),
     });
-    let icon_theme = themes.default_icon_theme().unwrap();
-    cx.set_global(GlobalTheme { theme, icon_theme });
 }
 
 /// Implementing this trait allows accessing the active theme.
@@ -181,27 +146,6 @@ impl SystemAppearance {
     }
 }
 
-/// A theme family is a grouping of themes under a single name.
-///
-/// For example, the "One" theme family contains the "One Light" and "One Dark" themes.
-///
-/// It can also be used to package themes with many variants.
-///
-/// For example, the "Atelier" theme family contains "Cave", "Dune", "Estuary", "Forest", "Heath", etc.
-pub struct ThemeFamily {
-    /// The unique identifier for the theme family.
-    pub id: String,
-    /// The name of the theme family. This will be displayed in the UI, such as when adding or removing a theme family.
-    pub name: SharedString,
-    /// The author of the theme family.
-    pub author: SharedString,
-    /// The [Theme]s in the family.
-    pub themes: Vec<Theme>,
-    /// The color scales used by the themes in the family.
-    /// Note: This will be removed in the future.
-    pub scales: ColorScales,
-}
-
 /// A theme is the primary mechanism for defining the appearance of the UI.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
@@ -220,6 +164,12 @@ impl Theme {
     #[inline(always)]
     pub fn system(&self) -> &SystemColors {
         &self.styles.system
+    }
+
+    /// Returns the [`PlayerColors`] for the theme.
+    #[inline(always)]
+    pub fn players(&self) -> &PlayerColors {
+        &self.styles.player
     }
 
     /// Returns the [`ThemeColors`] for the theme.
@@ -261,13 +211,6 @@ impl Theme {
         hsla.l = (hsla.l - amount).max(0.0);
         hsla
     }
-}
-
-/// Deserializes an icon theme from the given bytes.
-pub fn deserialize_icon_theme(bytes: &[u8]) -> anyhow::Result<IconThemeFamilyContent> {
-    let icon_theme_family: IconThemeFamilyContent = serde_json_lenient::from_slice(bytes)?;
-
-    Ok(icon_theme_family)
 }
 
 /// The active theme.

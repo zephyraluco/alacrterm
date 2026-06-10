@@ -1,25 +1,9 @@
-use std::sync::Arc;
-
 use gpui::{WindowBackgroundAppearance, hsla};
 
 use crate::{
-    Appearance, DEFAULT_DARK_THEME, SystemColors, Theme, ThemeColors, ThemeFamily,
-    ThemeStyles, default_color_scales,
+    Appearance, DEFAULT_DARK_THEME, PlayerColors, SystemColors, Theme, ThemeColors,
+    ThemeStyles,
 };
-
-/// The default theme family for Zed.
-///
-/// This is used to construct the default theme fallback values, as well as to
-/// have a theme available at compile time for tests.
-pub fn zed_default_themes() -> ThemeFamily {
-    ThemeFamily {
-        id: "zed-default".to_string(),
-        name: "Zed Default".into(),
-        author: "".into(),
-        themes: vec![zed_default_dark()],
-        scales: default_color_scales(),
-    }
-}
 
 pub(crate) fn zed_default_dark() -> Theme {
     let bg = hsla(215. / 360., 12. / 100., 15. / 100., 1.);
@@ -27,12 +11,7 @@ pub(crate) fn zed_default_dark() -> Theme {
     let hover = hsla(225.0 / 360., 11.8 / 100., 26.7 / 100., 1.0);
 
     let blue = hsla(207.8 / 360., 81. / 100., 66. / 100., 1.0);
-    let green = hsla(95. / 360., 38. / 100., 62. / 100., 1.0);
-    let orange = hsla(29. / 360., 54. / 100., 61. / 100., 1.0);
-    let purple = hsla(286. / 360., 51. / 100., 64. / 100., 1.0);
-    let red = hsla(355. / 360., 65. / 100., 65. / 100., 1.0);
-    let teal = hsla(187. / 360., 47. / 100., 55. / 100., 1.0);
-    let yellow = hsla(39. / 360., 67. / 100., 69. / 100., 1.0);
+    let player = PlayerColors::dark();
 
     Theme {
         id: "one_dark".to_string(),
@@ -105,6 +84,7 @@ pub(crate) fn zed_default_dark() -> Theme {
                 terminal_ansi_dim_cyan: crate::cyan().dark().step_9(),
                 terminal_ansi_dim_white: crate::neutral().dark().step_10(),
             },
+            player,
         },
     }
 }

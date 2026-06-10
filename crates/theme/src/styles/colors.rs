@@ -4,7 +4,7 @@ use gpui::{App, Hsla, SharedString, WindowBackgroundAppearance};
 // use refineable::Refineable;
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 
-use crate::{ActiveTheme, SystemColors};
+use crate::{ActiveTheme, PlayerColors, SystemColors};
 
 #[derive(Clone, Debug, PartialEq)]
 // #[refineable(Debug, serde::Deserialize)]
@@ -331,5 +331,6 @@ pub struct ThemeStyles {
     pub system: SystemColors,
 
     pub colors: ThemeColors,
+    pub player: PlayerColors,
 
 }

@@ -6042,6 +6042,7 @@ dependencies = [
  "serde",
  "settings",
  "sysinfo 0.39.2",
+ "theme",
  "thiserror 2.0.18",
  "url",
  "urlencoding",
@@ -6058,14 +6059,8 @@ dependencies = [
  "gpui",
  "palette",
  "parking_lot",
- "schemars",
  "serde",
- "serde_json",
- "serde_json_lenient",
- "settings",
  "strum",
- "thiserror 2.0.18",
- "uuid",
 ]
 
 [[package]]
