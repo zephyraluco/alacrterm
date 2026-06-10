@@ -2,10 +2,10 @@ use std::{borrow::Cow, collections::HashMap, fmt::Display, sync::Arc};
 
 use gpui::WindowButtonLayout;
 use indexmap::IndexMap;
-use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{TerminalSettingsContent, serialize_f32_with_two_decimal_places};
+use crate::{serialize_f32_with_two_decimal_places, TerminalSettingsContent};
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 // serde(transparent) 序列化和反序列化时直接使用内部字段的表示，而不是把包装结构体本身序列化出来

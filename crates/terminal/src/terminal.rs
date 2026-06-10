@@ -23,7 +23,7 @@ use async_channel::Sender;
 use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
-// use settings::Settings;
+use settings::Settings;
 use std::collections::{HashMap, VecDeque};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
 // use theme::{ActiveTheme, Theme};

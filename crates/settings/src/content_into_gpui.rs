@@ -3,8 +3,8 @@ use crate::{
     ModifiersContent, WindowBackgroundContent,
 };
 use gpui::{
-    FontFeatures, FontStyle, FontWeight, Modifiers, Pixels, SharedString,
-    WindowBackgroundAppearance, px,
+    px, FontFeatures, FontStyle, FontWeight, Modifiers, Pixels, SharedString,
+    WindowBackgroundAppearance,
 };
 use std::sync::Arc;
 

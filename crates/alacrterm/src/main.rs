@@ -1,6 +1,8 @@
 mod assets;
 mod themes;
 
+use std::{fs, path::PathBuf};
+
 use crate::assets::Assets;
 use crate::themes::set_theme;
 use gpui::*;
@@ -49,10 +51,19 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
-        cx.set_global(SettingsStore::new().expect("failed to initialize settings store"));
+        let mut store = SettingsStore::new().expect("failed to initialize settings store");
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("settings.json");
+        if !path.exists() {
+            fs::write(&path, "{}")
+                .expect("failed to create default settings.json");
+        }
+        store.load_user_settings(path).expect("failed to load user settings");
+        cx.set_global(store);
         let store = cx.global::<SettingsStore>();
 
-        println!("Default settings loaded: {:#?}", store.default_settings().terminal);
+        println!("Default settings loaded: {:#?}", store.global_settings());
         set_theme(cx, "Tokyo Night");
 
         cx.spawn(async move |cx| {

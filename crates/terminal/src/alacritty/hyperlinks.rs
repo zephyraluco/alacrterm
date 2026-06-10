@@ -483,7 +483,7 @@ fn path_match<T>(
 #[cfg(test)]
 mod tests {
     use crate::terminal_settings::TerminalSettings;
-
+    use settings::Settings;
     use super::*;
     use alacritty_terminal::{
         event::VoidListener,
