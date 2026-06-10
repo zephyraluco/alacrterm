@@ -2,6 +2,7 @@ mod content_into_gpui;
 mod serde_helper;
 mod settings_content;
 mod terminal;
+mod theme;
 
 use std::{
     borrow::Cow,
@@ -21,6 +22,7 @@ pub use content_into_gpui::*;
 pub use serde_helper::*;
 pub use settings_content::*;
 pub use terminal::*;
+pub use theme::*;
 
 pub struct SettingsStore {
     // setting_values: TypeIdHashMap<Box<dyn AnySettingValue>>,
@@ -91,7 +93,7 @@ impl SettingsStore {
 }
 pub trait Settings: 'static + Send + Sync + Sized {
     fn from_settings(content: &SettingsContent) -> Self;
-    fn get_global(cx: &mut App) -> Self {
+    fn get_global(cx: &App) -> Self {
         let store = cx.global::<SettingsStore>();
         Self::from_settings(store.global_settings())
     }

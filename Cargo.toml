@@ -5,6 +5,7 @@ members = [
     "crates/alacrterm",
     "crates/util",
     "crates/settings",
+    "crates/theme",
 ]
 
 [workspace.package]
