@@ -3,10 +3,11 @@ use std::{
     rc::Rc,
 };
 
-use gpui::{Bounds, Point, point, size};
+use gpui::{Bounds, Pixels, Point, point, px, size};
 use terminal::Terminal;
-use ui::{Pixels, ScrollableHandle, px};
 
+use crate::scrollbar::ScrollableHandle;
+// use ui::{Pixels, ScrollableHandle, px};
 #[derive(Debug)]
 struct ScrollHandleState {
     line_height: Pixels,

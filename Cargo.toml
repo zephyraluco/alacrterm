@@ -6,6 +6,7 @@ members = [
     "crates/util",
     "crates/settings",
     "crates/theme",
+    "crates/terminal_view",
 ]
 
 [workspace.package]
@@ -14,6 +15,7 @@ edition = "2024"
 
 [workspace.dependencies]
 terminal = { path = "crates/terminal" }
+terminal_view = { path = "crates/terminal_view" }
 util = { path = "crates/util" }
 settings = { path = "crates/settings" }
 theme = { path = "crates/theme" }

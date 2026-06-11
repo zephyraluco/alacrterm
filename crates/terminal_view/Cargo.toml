@@ -5,58 +5,53 @@ edition.workspace = true
 publish.workspace = true
 license = "GPL-3.0-or-later"
 
-[lints]
-workspace = true
-
-[features]
-test-support = ["editor/test-support", "gpui/test-support"]
-
 [lib]
 path = "src/terminal_view.rs"
 doctest = false
 
 [dependencies]
 anyhow.workspace = true
-async-recursion.workspace = true
-breadcrumbs.workspace = true
-collections.workspace = true
-db.workspace = true
-dirs.workspace = true
-editor.workspace = true
-futures.workspace = true
+async-recursion = "1.0.0"
+# breadcrumbs.workspace = true
+# collections.workspace = true
+# db.workspace = true
+dirs = "6.0"
+# editor.workspace = true
+futures = "0.3.32"
 gpui.workspace = true
 itertools.workspace = true
-language.workspace = true
+# language.workspace = true
 log.workspace = true
-menu.workspace = true
-pretty_assertions.workspace = true
-project.workspace = true
-regex.workspace = true
-task.workspace = true
+# menu.workspace = true
+pretty_assertions = { version = "1.3.0", features = ["unstable"] }
+# project.workspace = true
+regex = "1.5"
+# task.workspace = true
 schemars.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
-shellexpand.workspace = true
+shellexpand = "3.1"
 terminal.workspace = true
 theme.workspace = true
-theme_settings.workspace = true
-ui.workspace = true
+# theme_settings.workspace = true
+# ui.workspace = true
 util.workspace = true
-workspace.workspace = true
-zed_actions.workspace = true
+# workspace.workspace = true
+# zed_actions.workspace = true
+smallvec = "1.15"
 
 [dev-dependencies]
-editor = { workspace = true, features = ["test-support"] }
-gpui = { workspace = true, features = ["test-support"] }
-project = { workspace = true, features = ["test-support"] }
-remote = { workspace = true, features = ["test-support"] }
-release_channel.workspace = true
-rpc = { workspace = true, features = ["test-support"] }
-semver.workspace = true
-terminal = { workspace = true, features = ["test-support"] }
-workspace = { workspace = true, features = ["test-support"] }
+# editor = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true}
+# project = { workspace = true, features = ["test-support"] }
+# remote = { workspace = true, features = ["test-support"] }
+# release_channel.workspace = true
+# rpc = { workspace = true, features = ["test-support"] }
+# semver.workspace = true
+terminal = { workspace = true}
+# workspace = { workspace = true, features = ["test-support"] }
 
-[package.metadata.cargo-machete]
-ignored = ["log"]
+# [package.metadata.cargo-machete]
+# ignored = ["log"]

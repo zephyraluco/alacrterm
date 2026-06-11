@@ -1,26 +1,28 @@
-mod persistence;
+mod blink_manager;
+mod context_menu;
+pub mod scrollbar;
 pub mod terminal_element;
-pub mod terminal_panel;
 mod terminal_path_like_target;
 pub mod terminal_scrollbar;
+pub mod tooltip;
 
-use editor::{
-    Editor, EditorSettings, actions::SelectAll, blink_manager::BlinkManager,
-    ui_scrollbar_settings_from_raw,
-};
+// use editor::{
+//     Editor, EditorSettings, actions::SelectAll, blink_manager::BlinkManager,
+//     ui_scrollbar_settings_from_raw,
+// };
 use gpui::{
-    Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    Pixels, Point as GpuiPoint, Render, ScrollWheelEvent, Styled, Subscription, Task, TaskExt,
-    WeakEntity, actions, anchored, deferred, div,
+    Action, AnyElement, App, AppContext as _, ClipboardEntry, Context, DismissEvent, Entity,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, IntoElement, KeyContext,
+    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render,
+    ScrollWheelEvent, Styled, Subscription, Task, TaskExt, WeakEntity, Window, actions, anchored,
+    deferred, div, prelude::*, px,
 };
-use menu;
-use persistence::TerminalDb;
-use project::{Project, ProjectEntryId, search::SearchQuery};
+// use project::{Project, ProjectEntryId, search::SearchQuery};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{
-    SeedQuerySetting, Settings, SettingsStore, TerminalBell, TerminalBlink, WorkingDirectory,
+    Settings, SettingsStore, ShowScrollbar as SettingsShowScrollbar, TerminalBell, TerminalBlink,
+    WorkingDirectory,
 };
 use std::{
     any::Any,
@@ -31,35 +33,40 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use task::TaskId;
+// use task::TaskId;
 use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, Point, Range,
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    Search, ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds, ToggleViMode,
+    Search, SelectAll, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
-use terminal_panel::TerminalPanel;
 use terminal_path_like_target::{hover_path_like_target, open_path_like_target};
 use terminal_scrollbar::TerminalScrollHandle;
-use ui::{
-    ContextMenu, Divider, ScrollAxes, Scrollbars, Tooltip, WithScrollbar,
-    prelude::*,
-    scrollbars::{self, ScrollbarVisibility},
-};
+use theme::ActiveTheme;
+// use ui::{
+//     ContextMenu, Divider, ScrollAxes, Scrollbars, Tooltip, WithScrollbar,
+//     prelude::*,
+//     scrollbars::{self, ScrollbarVisibility},
+// };
 use util::ResultExt;
-use workspace::{
-    CloseActiveItem, DraggedSelection, DraggedTab, NewCenterTerminal, NewTerminal, Pane,
-    ToolbarItemLocation, Workspace, WorkspaceId, delete_unloaded_items,
-    item::{
-        HighlightedText, Item, ItemEvent, SerializableItem, TabContentParams, TabTooltipContent,
-    },
-    register_serializable_item,
-    searchable::{
-        Direction, SearchEvent, SearchOptions, SearchToken, SearchableItem, SearchableItemHandle,
-    },
-};
-use zed_actions::{agent::AddSelectionToThread, assistant::InlineAssist};
+
+use crate::blink_manager::BlinkManager;
+use crate::context_menu::ContextMenu;
+use crate::scrollbar::scrollbars::{ScrollbarVisibility, ShowScrollbar};
+use crate::scrollbar::{ScrollAxes, Scrollbars, WithScrollbar};
+// use workspace::{
+//     CloseActiveItem, DraggedSelection, DraggedTab, NewCenterTerminal, NewTerminal, Pane,
+//     ToolbarItemLocation, Workspace, WorkspaceId, delete_unloaded_items,
+//     item::{
+//         HighlightedText, Item, ItemEvent, SerializableItem, TabContentParams, TabTooltipContent,
+//     },
+//     register_serializable_item,
+//     searchable::{
+//         Direction, SearchEvent, SearchOptions, SearchToken, SearchableItem, SearchableItemHandle,
+//     },
+// };
+// use zed_actions::{agent::AddSelectionToThread, assistant::InlineAssist};
 
 struct ImeState {
     marked_text: String,
@@ -77,7 +84,7 @@ fn viewport_line_for_point(point: Point, display_offset: usize) -> Option<usize>
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Event to transmit the scroll from the element to the view
+/// 将滚动从元素传输到视图的事件
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScrollTerminal(pub i32);
 
@@ -105,14 +112,7 @@ actions!(
 pub struct RenameTerminal;
 
 pub fn init(cx: &mut App) {
-    terminal_panel::init(cx);
-
-    register_serializable_item::<TerminalView>(cx);
-
-    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
-        workspace.register_action(TerminalView::deploy);
-    })
-    .detach();
+    let _ = cx;
 }
 
 pub struct BlockProperties {
@@ -129,29 +129,29 @@ pub struct BlockContext<'a, 'b> {
 ///A terminal view, maintains the PTY's file handles and communicates with the terminal
 pub struct TerminalView {
     terminal: Entity<Terminal>,
-    workspace: WeakEntity<Workspace>,
-    project: WeakEntity<Project>,
+    // workspace: WeakEntity<Workspace>,
+    // project: WeakEntity<Project>,
     focus_handle: FocusHandle,
-    //Currently using iTerm bell, show bell emoji in tab until input is received
+    //当前使用 iTerm 响铃，在选项卡中显示响铃表情符号，直到收到输入
     has_bell: bool,
     context_menu: Option<(Entity<ContextMenu>, GpuiPoint<Pixels>, Subscription)>,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
     mode: TerminalMode,
     blinking_terminal_enabled: bool,
-    needs_serialize: bool,
+    // needs_serialize: bool,
     custom_title: Option<String>,
     hover: Option<HoverTarget>,
     hover_tooltip_update: Task<()>,
-    workspace_id: Option<WorkspaceId>,
-    show_breadcrumbs: bool,
+    // workspace_id: Option<WorkspaceId>,
+    // show_breadcrumbs: bool,
     block_below_cursor: Option<Rc<BlockProperties>>,
     scroll_top: Pixels,
     scroll_handle: TerminalScrollHandle,
     ime_state: Option<ImeState>,
-    self_handle: WeakEntity<Self>,
-    rename_editor: Option<Entity<Editor>>,
-    rename_editor_subscription: Option<Subscription>,
+    // self_handle: WeakEntity<Self>,
+    // rename_editor: Option<Entity<Editor>>,
+    // rename_editor_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
     _terminal_subscriptions: Vec<Subscription>,
 }
@@ -198,8 +198,8 @@ struct HoverTarget {
 }
 
 impl EventEmitter<Event> for TerminalView {}
-impl EventEmitter<ItemEvent> for TerminalView {}
-impl EventEmitter<SearchEvent> for TerminalView {}
+// impl EventEmitter<ItemEvent> for TerminalView {}
+// impl EventEmitter<SearchEvent> for TerminalView {}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -208,37 +208,7 @@ impl Focusable for TerminalView {
 }
 
 impl TerminalView {
-    ///Create a new Terminal in the current working directory or the user's home directory
-    pub fn deploy(
-        workspace: &mut Workspace,
-        action: &NewCenterTerminal,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) {
-        let local = action.local;
-        let working_directory = default_working_directory(workspace, cx);
-        TerminalPanel::add_center_terminal(workspace, window, cx, move |project, cx| {
-            if local {
-                project.create_local_terminal(cx)
-            } else {
-                project.create_terminal_shell(working_directory, cx)
-            }
-        })
-        .detach_and_log_err(cx);
-    }
-
-    pub fn new(
-        terminal: Entity<Terminal>,
-        workspace: WeakEntity<Workspace>,
-        workspace_id: Option<WorkspaceId>,
-        project: WeakEntity<Project>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let workspace_handle = workspace.clone();
-        let terminal_subscriptions =
-            subscribe_for_terminal_events(&terminal, workspace, window, cx);
-
+    pub fn new(terminal: Entity<Terminal>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let focus_in = cx.on_focus_in(&focus_handle, window, |terminal_view, window, cx| {
             terminal_view.focus_in(window, cx);
@@ -275,31 +245,23 @@ impl TerminalView {
         ];
 
         Self {
-            terminal,
-            workspace: workspace_handle,
-            project,
+            terminal: terminal.clone(),
             has_bell: false,
             focus_handle,
             context_menu: None,
             cursor_shape,
             blink_manager,
+            mode: TerminalMode::Standalone,
             blinking_terminal_enabled: false,
             hover: None,
             hover_tooltip_update: Task::ready(()),
-            mode: TerminalMode::Standalone,
-            workspace_id,
-            show_breadcrumbs: TerminalSettings::get_global(cx).toolbar.breadcrumbs,
             block_below_cursor: None,
             scroll_top: Pixels::ZERO,
             scroll_handle,
-            needs_serialize: false,
             custom_title: None,
             ime_state: None,
-            self_handle: cx.entity().downgrade(),
-            rename_editor: None,
-            rename_editor_subscription: None,
             _subscriptions: subscriptions,
-            _terminal_subscriptions: terminal_subscriptions,
+            _terminal_subscriptions: subscribe_for_terminal_events(&terminal, window, cx),
         }
     }
 
@@ -401,43 +363,19 @@ impl TerminalView {
         let label = label.filter(|l| !l.trim().is_empty());
         if self.custom_title != label {
             self.custom_title = label;
-            self.needs_serialize = true;
-            cx.emit(ItemEvent::UpdateTab);
             cx.notify();
         }
     }
 
     pub fn is_renaming(&self) -> bool {
-        self.rename_editor.is_some()
+        false
     }
 
-    pub fn rename_editor_is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.rename_editor
-            .as_ref()
-            .is_some_and(|editor| editor.focus_handle(cx).is_focused(window))
+    pub fn rename_editor_is_focused(&self, _window: &Window, _cx: &App) -> bool {
+        false
     }
 
-    fn finish_renaming(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.rename_editor.take() else {
-            return;
-        };
-        self.rename_editor_subscription = None;
-        if save {
-            let new_label = editor.read(cx).text(cx).trim().to_string();
-            let label = if new_label.is_empty() {
-                None
-            } else {
-                // Only set custom_title if the text differs from the terminal's dynamic title.
-                // This prevents subtle layout changes when clicking away without making changes.
-                let terminal_title = self.terminal.read(cx).title(true);
-                if new_label == terminal_title {
-                    None
-                } else {
-                    Some(new_label)
-                }
-            };
-            self.set_custom_title(label, cx);
-        }
+    fn finish_renaming(&mut self, _save: bool, window: &mut Window, cx: &mut Context<Self>) {
         cx.notify();
         self.focus_handle.focus(window, cx);
     }
@@ -445,47 +383,10 @@ impl TerminalView {
     pub fn rename_terminal(
         &mut self,
         _: &RenameTerminal,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.terminal.read(cx).task().is_some() {
-            return;
-        }
-
-        let current_label = self
-            .custom_title
-            .clone()
-            .unwrap_or_else(|| self.terminal.read(cx).title(true));
-
-        let rename_editor = cx.new(|cx| Editor::single_line(window, cx));
-        let rename_editor_subscription = cx.subscribe_in(&rename_editor, window, {
-            let rename_editor = rename_editor.clone();
-            move |_this, _, event, window, cx| {
-                if let editor::EditorEvent::Blurred = event {
-                    // Defer to let focus settle (avoids canceling during double-click).
-                    let rename_editor = rename_editor.clone();
-                    cx.defer_in(window, move |this, window, cx| {
-                        let still_current = this
-                            .rename_editor
-                            .as_ref()
-                            .is_some_and(|current| current == &rename_editor);
-                        if still_current && !rename_editor.focus_handle(cx).is_focused(window) {
-                            this.finish_renaming(false, window, cx);
-                        }
-                    });
-                }
-            }
-        });
-
-        self.rename_editor = Some(rename_editor.clone());
-        self.rename_editor_subscription = Some(rename_editor_subscription);
-
-        rename_editor.update(cx, |editor, cx| {
-            editor.set_text(current_label, window, cx);
-            editor.select_all(&SelectAll, window, cx);
-            editor.focus_handle(cx).focus(window, cx);
-        });
-        cx.notify();
+        let _ = cx;
     }
 
     pub fn clear_bell(&mut self, cx: &mut Context<TerminalView>) {
@@ -500,43 +401,15 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let assistant_enabled = self
-            .workspace
-            .upgrade()
-            .and_then(|workspace| workspace.read(cx).panel::<TerminalPanel>(cx))
-            .is_some_and(|terminal_panel| terminal_panel.read(cx).assistant_enabled());
         let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
-                .action("New Terminal", Box::new(NewTerminal::default()))
-                .action(
-                    "New Center Terminal",
-                    Box::new(NewCenterTerminal::default()),
-                )
-                .separator()
                 .action("Copy", Box::new(Copy))
                 .action("Paste", Box::new(Paste))
                 .action("Paste Text", Box::new(PasteText))
                 .action("Select All", Box::new(SelectAll))
                 .action("Clear", Box::new(Clear))
-                .when(
-                    assistant_enabled && !matches!(self.mode, TerminalMode::Embedded { .. }),
-                    |menu| {
-                        menu.separator()
-                            .action("Inline Assist", Box::new(InlineAssist::default()))
-                            .when(has_selection, |menu| {
-                                menu.action("Add to Agent Thread", Box::new(AddSelectionToThread))
-                            })
-                    },
-                )
-                .separator()
-                .action(
-                    "Close Terminal Tab",
-                    Box::new(CloseActiveItem {
-                        save_intent: None,
-                        close_pinned: true,
-                    }),
-                )
         });
+        let _ = has_selection;
 
         window.focus(&context_menu.focus_handle(cx), cx);
         let subscription = cx.subscribe_in(
@@ -558,9 +431,6 @@ impl TerminalView {
 
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         let settings = TerminalSettings::get_global(cx);
-        let breadcrumb_visibility_changed = self.show_breadcrumbs != settings.toolbar.breadcrumbs;
-        self.show_breadcrumbs = settings.toolbar.breadcrumbs;
-
         let should_blink = match settings.blinking {
             TerminalBlink::Off => false,
             TerminalBlink::On => true,
@@ -584,9 +454,6 @@ impl TerminalView {
             },
         );
 
-        if breadcrumb_visibility_changed {
-            cx.emit(ItemEvent::UpdateBreadcrumbs);
-        }
         cx.notify();
     }
 
@@ -619,14 +486,8 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn rerun_task(&mut self, _: &RerunTask, window: &mut Window, cx: &mut Context<Self>) {
-        let task = self
-            .terminal
-            .read(cx)
-            .task()
-            .map(|task| terminal_rerun_override(&task.spawned_task.id))
-            .unwrap_or_default();
-        window.dispatch_action(Box::new(task), cx);
+    fn rerun_task(&mut self, _: &RerunTask, _window: &mut Window, cx: &mut Context<Self>) {
+        let _ = cx;
     }
 
     fn clear(&mut self, _: &Clear, _: &mut Window, cx: &mut Context<Self>) {
@@ -862,6 +723,7 @@ impl TerminalView {
     /// Specific handler for the [`editor::actions::Copy`] action in order for
     /// the `Edit > Copy` menu item to not be disabled, as the app expects a
     /// handler for this action in order to enable/disable the menu item.
+    #[cfg(any())]
     fn editor_copy(
         &mut self,
         _: &editor::actions::Copy,
@@ -896,6 +758,7 @@ impl TerminalView {
     /// Specific handler for the [`editor::actions::Paste`] action in order for
     /// the `Edit > Paste` menu item to not be disabled, as the app expects a
     /// handler for this action in order to enable/disable the menu item.
+    #[cfg(any())]
     fn editor_paste(
         &mut self,
         _: &editor::actions::Paste,
@@ -1037,17 +900,17 @@ impl TerminalView {
         dispatch_context
     }
 
-    fn set_terminal(
+    pub fn set_terminal(
         &mut self,
         terminal: Entity<Terminal>,
         window: &mut Window,
         cx: &mut Context<TerminalView>,
     ) {
-        self._terminal_subscriptions =
-            subscribe_for_terminal_events(&terminal, self.workspace.clone(), window, cx);
+        self._terminal_subscriptions = subscribe_for_terminal_events(&terminal, window, cx);
         self.terminal = terminal;
     }
 
+    #[cfg(any())]
     fn rerun_button(task: &TaskState) -> Option<IconButton> {
         if !task.spawned_task.show_rerun {
             return None;
@@ -1068,6 +931,7 @@ impl TerminalView {
     }
 }
 
+#[cfg(any())]
 fn terminal_rerun_override(task: &TaskId) -> zed_actions::Rerun {
     zed_actions::Rerun {
         task_id: Some(task.0.clone()),
@@ -1079,7 +943,6 @@ fn terminal_rerun_override(task: &TaskId) -> zed_actions::Rerun {
 
 fn subscribe_for_terminal_events(
     terminal: &Entity<Terminal>,
-    workspace: WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut Context<TerminalView>,
 ) -> Vec<Subscription> {
@@ -1092,15 +955,12 @@ fn subscribe_for_terminal_events(
             let current_cwd = terminal.read(cx).working_directory();
             if current_cwd != previous_cwd {
                 previous_cwd = current_cwd;
-                terminal_view.needs_serialize = true;
             }
 
             match event {
                 Event::Wakeup => {
                     cx.notify();
                     cx.emit(Event::Wakeup);
-                    cx.emit(ItemEvent::UpdateTab);
-                    cx.emit(SearchEvent::MatchesInvalidated);
                 }
 
                 Event::Bell => {
@@ -1131,7 +991,7 @@ fn subscribe_for_terminal_events(
                 }
 
                 Event::TitleChanged => {
-                    cx.emit(ItemEvent::UpdateTab);
+                    cx.notify();
                 }
 
                 Event::NewNavigationTarget(maybe_navigation_target) => {
@@ -1163,7 +1023,6 @@ fn subscribe_for_terminal_events(
                             {
                                 terminal_view.hover = None;
                                 terminal_view.hover_tooltip_update = hover_path_like_target(
-                                    &workspace,
                                     hovered_word.clone(),
                                     path_like_target,
                                     cx,
@@ -1181,19 +1040,15 @@ fn subscribe_for_terminal_events(
 
                 Event::Open(maybe_navigation_target) => match maybe_navigation_target {
                     MaybeNavigationTarget::Url(url) => cx.open_url(url),
-                    MaybeNavigationTarget::PathLike(path_like_target) => open_path_like_target(
-                        &workspace,
-                        terminal_view,
-                        path_like_target,
-                        window,
-                        cx,
-                    ),
+                    MaybeNavigationTarget::PathLike(path_like_target) => {
+                        open_path_like_target(path_like_target, window, cx)
+                    }
                 },
-                Event::BreadcrumbsChanged => cx.emit(ItemEvent::UpdateBreadcrumbs),
-                Event::CloseTerminal => cx.emit(ItemEvent::CloseItem),
+                Event::BreadcrumbsChanged => cx.notify(),
+                Event::CloseTerminal => cx.notify(),
                 Event::SelectionsChanged => {
                     window.invalidate_character_coordinates();
-                    cx.emit(SearchEvent::ActiveMatchChanged)
+                    cx.notify();
                 }
             }
         },
@@ -1201,6 +1056,7 @@ fn subscribe_for_terminal_events(
     vec![terminal_subscription, terminal_events_subscription]
 }
 
+#[cfg(any())]
 fn regex_search_for_query(query: &SearchQuery) -> Option<Search> {
     let str = query.as_str();
     if query.is_regex() {
@@ -1217,12 +1073,13 @@ fn regex_search_for_query(query: &SearchQuery) -> Option<Search> {
 struct TerminalScrollbarSettingsWrapper;
 
 impl ScrollbarVisibility for TerminalScrollbarSettingsWrapper {
-    fn visibility(&self, cx: &App) -> scrollbars::ShowScrollbar {
-        TerminalSettings::get_global(cx)
-            .scrollbar
-            .show
-            .map(ui_scrollbar_settings_from_raw)
-            .unwrap_or_else(|| EditorSettings::get_global(cx).scrollbar.show)
+    fn visibility(&self, cx: &App) -> ShowScrollbar {
+        match TerminalSettings::get_global(cx).scrollbar.show {
+            Some(SettingsShowScrollbar::Auto) | None => ShowScrollbar::Auto,
+            Some(SettingsShowScrollbar::System) => ShowScrollbar::System,
+            Some(SettingsShowScrollbar::Always) => ShowScrollbar::Always,
+            Some(SettingsShowScrollbar::Never) => ShowScrollbar::Never,
+        }
     }
 }
 
@@ -1316,9 +1173,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::send_text))
             .on_action(cx.listener(TerminalView::send_keystroke))
             .on_action(cx.listener(TerminalView::copy))
-            .on_action(cx.listener(TerminalView::editor_copy))
             .on_action(cx.listener(TerminalView::paste))
-            .on_action(cx.listener(TerminalView::editor_paste))
             .on_action(cx.listener(TerminalView::paste_text))
             .on_action(cx.listener(TerminalView::clear))
             .on_action(cx.listener(TerminalView::scroll_line_up))
@@ -1330,7 +1185,6 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::toggle_vi_mode))
             .on_action(cx.listener(TerminalView::show_character_palette))
             .on_action(cx.listener(TerminalView::select_all))
-            .on_action(cx.listener(TerminalView::rerun_task))
             .on_action(cx.listener(TerminalView::rename_terminal))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_down(
@@ -1361,31 +1215,24 @@ impl Render for TerminalView {
                 div()
                     .id("terminal-view-container")
                     .size_full()
-                    .bg(cx.theme().colors().editor_background)
+                    .bg(cx.theme().colors().terminal_background)
                     .child(TerminalElement::new(
                         terminal_handle,
                         terminal_view_handle,
-                        self.workspace.clone(),
                         self.focus_handle.clone(),
                         focused,
                         self.should_show_cursor(focused, cx),
                         self.block_below_cursor.clone(),
                         self.mode.clone(),
                     ))
-                    .when(self.content_mode(window, cx).is_scrollable(), |div| {
-                        let colors = cx.theme().colors();
-                        div.custom_scrollbars(
-                            Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
-                                .show_along(ScrollAxes::Vertical)
-                                .with_stable_track_along(
-                                    ScrollAxes::Vertical,
-                                    colors.editor_background,
-                                )
-                                .tracked_scroll_handle(&self.scroll_handle),
-                            window,
-                            cx,
-                        )
-                    }),
+                    .overflow_y_scroll()
+                    .custom_scrollbars(
+                        Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
+                            .show_along(ScrollAxes::Vertical)
+                            .tracked_scroll_handle(&self.scroll_handle),
+                        window,
+                        cx,
+                    ),
             )
             .children(self.context_menu.as_ref().map(|(menu, position, _)| {
                 deferred(
@@ -1399,6 +1246,7 @@ impl Render for TerminalView {
     }
 }
 
+#[cfg(any())]
 impl Item for TerminalView {
     type Event = ItemEvent;
 
@@ -1724,16 +1572,7 @@ impl Item for TerminalView {
         cx.spawn_in(window, async move |this, cx| {
             let terminal = terminal.await.log_err()?;
             this.update_in(cx, |this, window, cx| {
-                cx.new(|cx| {
-                    TerminalView::new(
-                        terminal,
-                        this.workspace.clone(),
-                        workspace_id,
-                        this.project.clone(),
-                        window,
-                        cx,
-                    )
-                })
+                cx.new(|cx| TerminalView::new(terminal, window, cx))
             })
             .ok()
         })
@@ -1807,6 +1646,7 @@ impl Item for TerminalView {
     }
 }
 
+#[cfg(any())]
 impl SerializableItem for TerminalView {
     fn serialized_item_kind() -> &'static str {
         "Terminal"
@@ -1919,6 +1759,7 @@ impl SerializableItem for TerminalView {
     }
 }
 
+#[cfg(any())]
 impl SearchableItem for TerminalView {
     type Match = Range;
 
@@ -2082,6 +1923,7 @@ impl SearchableItem for TerminalView {
 /// For remote projects, local-only resolution (home dir fallback, shell expansion,
 /// local `is_dir` checks) is skipped -- returning `None` lets the remote shell
 /// open in the remote user's home directory by default.
+#[cfg(any())]
 pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
     let is_remote = workspace.project().read(cx).is_remote();
     let directory = match &TerminalSettings::get_global(cx).working_directory {
@@ -2107,6 +1949,7 @@ pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<Path
     }
 }
 
+#[cfg(any())]
 fn current_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
     workspace
         .project()
@@ -2118,6 +1961,7 @@ fn current_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf>
 }
 
 ///Gets the first project's home directory, or the home directory
+#[cfg(any())]
 fn first_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
     let worktree = workspace.worktrees(cx).next()?.read(cx);
     let worktree_path = worktree.abs_path();
@@ -2126,924 +1970,5 @@ fn first_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
     } else {
         // If worktree is a file, return its parent directory
         worktree_path.parent().map(|p| p.to_path_buf())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
-    use project::{Entry, Project, ProjectPath, Worktree};
-    use remote::RemoteClient;
-    use std::path::{Path, PathBuf};
-    use util::paths::PathStyle;
-    use util::rel_path::RelPath;
-    use workspace::item::test::{TestItem, TestProjectItem};
-    use workspace::{AppState, MultiWorkspace, SelectedEntry};
-
-    fn expected_drop_text(paths: &[PathBuf]) -> String {
-        let mut text = String::new();
-        for path in paths {
-            text.push(' ');
-            text.push_str(&format!("{path:?}"));
-        }
-        text.push(' ');
-        text
-    }
-
-    fn assert_drop_writes_to_terminal(
-        pane: &Entity<Pane>,
-        terminal_view_index: usize,
-        terminal: &Entity<Terminal>,
-        dropped: &dyn Any,
-        expected_text: &str,
-        window: &mut Window,
-        cx: &mut Context<MultiWorkspace>,
-    ) {
-        let _ = terminal.update(cx, |terminal, _| terminal.take_input_log());
-
-        let handled = pane.update(cx, |pane, cx| {
-            pane.item_for_index(terminal_view_index)
-                .unwrap()
-                .handle_drop(pane, dropped, window, cx)
-        });
-        assert!(handled, "handle_drop should return true for {:?}", dropped);
-
-        let mut input_log = terminal.update(cx, |terminal, _| terminal.take_input_log());
-        assert_eq!(input_log.len(), 1, "expected exactly one write to terminal");
-        let written =
-            String::from_utf8(input_log.remove(0)).expect("terminal write should be valid UTF-8");
-        assert_eq!(written, expected_text);
-    }
-
-    // DEC private mode 1049: a program writes this to enter the alternate screen buffer.
-    const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
-
-    // CSI `1;2A` = cursor-up with the xterm Shift modifier (`1 + 1` for Shift).
-    const SHIFT_UP_ESCAPE: &[u8] = b"\x1b[1;2A";
-
-    #[gpui::test]
-    async fn edit_menu_copy_and_paste_are_available_when_terminal_is_focused(
-        cx: &mut TestAppContext,
-    ) {
-        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
-        let (_pane, terminal, _terminal_view) =
-            add_display_only_terminal(&project, window_handle, true, cx);
-
-        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-            assert!(window.is_action_available(&editor::actions::Copy, cx));
-            assert!(window.is_action_available(&editor::actions::Paste, cx));
-
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string("foo".to_string()));
-            terminal.update(cx, |terminal, _| terminal.take_input_log());
-            window.dispatch_action(Box::new(editor::actions::Paste), cx);
-        });
-        cx.run_until_parked();
-
-        cx.update(|_, cx| {
-            let input_log = terminal.update(cx, |terminal, _| terminal.take_input_log());
-            assert_eq!(input_log, vec![b"foo".to_vec()]);
-        });
-    }
-
-    #[gpui::test]
-    async fn shift_up_scrolls_history_in_normal_screen(cx: &mut TestAppContext) {
-        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
-        cx.update(load_default_keymap);
-        let (_pane, terminal, _terminal_view) =
-            add_display_only_terminal(&project, window_handle, true, cx);
-
-        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.run_until_parked();
-
-        let output = (0..200)
-            .map(|line| format!("line {line}\n"))
-            .collect::<String>();
-        cx.update(|window, cx| {
-            terminal.update(cx, |terminal, cx| {
-                terminal.write_output(output.as_bytes(), cx);
-                terminal.sync(window, cx);
-            });
-        });
-        terminal.read_with(&cx, |terminal, _| {
-            assert!(!terminal.last_content.mode.contains(Modes::ALT_SCREEN));
-            assert_eq!(terminal.last_content.display_offset, 0);
-        });
-
-        cx.simulate_keystrokes("shift-up");
-        cx.update(|window, cx| {
-            terminal.update(cx, |terminal, cx| terminal.sync(window, cx));
-        });
-
-        assert_eq!(
-            terminal.read_with(&cx, |terminal, _| terminal.last_content.display_offset),
-            1,
-            "shift-up should scroll terminal history in the normal screen",
-        );
-        assert!(
-            terminal
-                .update(&mut cx, |terminal, _| terminal.take_input_log())
-                .is_empty(),
-            "shift-up in the normal screen should not be forwarded to the shell",
-        );
-    }
-
-    #[gpui::test]
-    async fn shift_up_is_forwarded_to_program_in_alt_screen(cx: &mut TestAppContext) {
-        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
-        cx.update(load_default_keymap);
-        let (_pane, terminal, _terminal_view) =
-            add_display_only_terminal(&project, window_handle, true, cx);
-
-        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.run_until_parked();
-
-        cx.update(|window, cx| {
-            terminal.update(cx, |terminal, cx| {
-                terminal.write_output(ENTER_ALT_SCREEN, cx);
-                terminal.sync(window, cx);
-            });
-        });
-        terminal.read_with(&cx, |terminal, _| {
-            assert!(terminal.last_content.mode.contains(Modes::ALT_SCREEN));
-        });
-
-        cx.simulate_keystrokes("shift-up");
-        assert_eq!(
-            terminal.update(&mut cx, |terminal, _| terminal.take_input_log()),
-            vec![SHIFT_UP_ESCAPE.to_vec()],
-            "shift-up should be forwarded to the program in the alternate screen",
-        );
-    }
-
-    // Working directory calculation tests
-
-    // No Worktrees in project -> home_dir()
-    #[gpui::test]
-    async fn no_worktree(cx: &mut TestAppContext) {
-        let (project, workspace) = init_test(cx).await;
-        cx.read(|cx| {
-            let workspace = workspace.read(cx);
-            let active_entry = project.read(cx).active_entry();
-
-            //Make sure environment is as expected
-            assert!(active_entry.is_none());
-            assert!(workspace.worktrees(cx).next().is_none());
-
-            let res = default_working_directory(workspace, cx);
-            assert_eq!(res, dirs::home_dir());
-            let res = first_project_directory(workspace, cx);
-            assert_eq!(res, None);
-        });
-    }
-
-    #[gpui::test]
-    async fn remote_no_worktree_uses_remote_shell_default_cwd(
-        cx: &mut TestAppContext,
-        server_cx: &mut TestAppContext,
-    ) {
-        let (_project, workspace) = init_remote_test(cx, server_cx).await;
-
-        cx.read(|cx| {
-            let workspace = workspace.read(cx);
-
-            assert!(workspace.project().read(cx).is_remote());
-            assert!(workspace.worktrees(cx).next().is_none());
-            assert_eq!(default_working_directory(workspace, cx), None);
-        });
-    }
-
-    // No active entry, but a worktree, worktree is a file -> parent directory
-    #[gpui::test]
-    async fn no_active_entry_worktree_is_file(cx: &mut TestAppContext) {
-        let (project, workspace) = init_test(cx).await;
-
-        create_file_wt(project.clone(), "/root.txt", cx).await;
-        cx.read(|cx| {
-            let workspace = workspace.read(cx);
-            let active_entry = project.read(cx).active_entry();
-
-            //Make sure environment is as expected
-            assert!(active_entry.is_none());
-            assert!(workspace.worktrees(cx).next().is_some());
-
-            let res = default_working_directory(workspace, cx);
-            assert_eq!(res, Some(Path::new("/").to_path_buf()));
-            let res = first_project_directory(workspace, cx);
-            assert_eq!(res, Some(Path::new("/").to_path_buf()));
-        });
-    }
-
-    // No active entry, but a worktree, worktree is a folder -> worktree_folder
-    #[gpui::test]
-    async fn no_active_entry_worktree_is_dir(cx: &mut TestAppContext) {
-        let (project, workspace) = init_test(cx).await;
-
-        let (_wt, _entry) = create_folder_wt(project.clone(), "/root/", cx).await;
-        cx.update(|cx| {
-            let workspace = workspace.read(cx);
-            let active_entry = project.read(cx).active_entry();
-
-            assert!(active_entry.is_none());
-            assert!(workspace.worktrees(cx).next().is_some());
-
-            let res = default_working_directory(workspace, cx);
-            assert_eq!(res, Some(Path::new("/root/").to_path_buf()));
-            let res = first_project_directory(workspace, cx);
-            assert_eq!(res, Some(Path::new("/root/").to_path_buf()));
-        });
-    }
-
-    // Active entry with a work tree, worktree is a file -> worktree_folder()
-    #[gpui::test]
-    async fn active_entry_worktree_is_file(cx: &mut TestAppContext) {
-        let (project, workspace) = init_test(cx).await;
-
-        let (_wt, _entry) = create_folder_wt(project.clone(), "/root1/", cx).await;
-        let (wt2, entry2) = create_file_wt(project.clone(), "/root2.txt", cx).await;
-        insert_active_entry_for(wt2, entry2, project.clone(), cx);
-
-        cx.update(|cx| {
-            let workspace = workspace.read(cx);
-            let active_entry = project.read(cx).active_entry();
-
-            assert!(active_entry.is_some());
-
-            let res = default_working_directory(workspace, cx);
-            assert_eq!(res, Some(Path::new("/root1/").to_path_buf()));
-            let res = first_project_directory(workspace, cx);
-            assert_eq!(res, Some(Path::new("/root1/").to_path_buf()));
-        });
-    }
-
-    // Active entry, with a worktree, worktree is a folder -> worktree_folder
-    #[gpui::test]
-    async fn active_entry_worktree_is_dir(cx: &mut TestAppContext) {
-        let (project, workspace) = init_test(cx).await;
-
-        let (_wt, _entry) = create_folder_wt(project.clone(), "/root1/", cx).await;
-        let (wt2, entry2) = create_folder_wt(project.clone(), "/root2/", cx).await;
-        insert_active_entry_for(wt2, entry2, project.clone(), cx);
-
-        cx.update(|cx| {
-            let workspace = workspace.read(cx);
-            let active_entry = project.read(cx).active_entry();
-
-            assert!(active_entry.is_some());
-
-            let res = default_working_directory(workspace, cx);
-            assert_eq!(res, Some(Path::new("/root2/").to_path_buf()));
-            let res = first_project_directory(workspace, cx);
-            assert_eq!(res, Some(Path::new("/root1/").to_path_buf()));
-        });
-    }
-
-    // active_entry_directory: No active entry -> returns None (used by CurrentFileDirectory)
-    #[gpui::test]
-    async fn active_entry_directory_no_active_entry(cx: &mut TestAppContext) {
-        let (project, _workspace) = init_test(cx).await;
-
-        let (_wt, _entry) = create_folder_wt(project.clone(), "/root/", cx).await;
-
-        cx.update(|cx| {
-            assert!(project.read(cx).active_entry().is_none());
-
-            let res = project.read(cx).active_entry_directory(cx);
-            assert_eq!(res, None);
-        });
-    }
-
-    // active_entry_directory: Active entry is file -> returns parent directory (used by CurrentFileDirectory)
-    #[gpui::test]
-    async fn active_entry_directory_active_file(cx: &mut TestAppContext) {
-        let (project, _workspace) = init_test(cx).await;
-
-        let (wt, _entry) = create_folder_wt(project.clone(), "/root/", cx).await;
-        let entry = create_file_in_worktree(wt.clone(), "src/main.rs", cx).await;
-        insert_active_entry_for(wt, entry, project.clone(), cx);
-
-        cx.update(|cx| {
-            let res = project.read(cx).active_entry_directory(cx);
-            assert_eq!(res, Some(Path::new("/root/src").to_path_buf()));
-        });
-    }
-
-    // active_entry_directory: Active entry is directory -> returns that directory (used by CurrentFileDirectory)
-    #[gpui::test]
-    async fn active_entry_directory_active_dir(cx: &mut TestAppContext) {
-        let (project, _workspace) = init_test(cx).await;
-
-        let (wt, entry) = create_folder_wt(project.clone(), "/root/", cx).await;
-        insert_active_entry_for(wt, entry, project.clone(), cx);
-
-        cx.update(|cx| {
-            let res = project.read(cx).active_entry_directory(cx);
-            assert_eq!(res, Some(Path::new("/root/").to_path_buf()));
-        });
-    }
-
-    /// Creates a worktree with 1 file: /root.txt
-    pub async fn init_test(cx: &mut TestAppContext) -> (Entity<Project>, Entity<Workspace>) {
-        let (project, workspace, _) = init_test_with_window(cx).await;
-        (project, workspace)
-    }
-
-    fn load_default_keymap(cx: &mut App) {
-        cx.bind_keys(
-            settings::KeymapFile::load_asset_allow_partial_failure(
-                settings::DEFAULT_KEYMAP_PATH,
-                cx,
-            )
-            .unwrap(),
-        );
-    }
-
-    fn add_display_only_terminal(
-        project: &Entity<Project>,
-        window_handle: gpui::WindowHandle<MultiWorkspace>,
-        focus: bool,
-        cx: &mut TestAppContext,
-    ) -> (Entity<Pane>, Entity<Terminal>, Entity<TerminalView>) {
-        let project = project.clone();
-        window_handle
-            .update(cx, |multi_workspace, window, cx| {
-                let workspace = multi_workspace.workspace().clone();
-                let active_pane = workspace.read(cx).active_pane().clone();
-
-                let terminal = cx.new(|cx| {
-                    terminal::TerminalBuilder::new_display_only(
-                        CursorShape::default(),
-                        terminal::terminal_settings::AlternateScroll::On,
-                        None,
-                        0,
-                        cx.background_executor(),
-                        PathStyle::local(),
-                    )
-                    .subscribe(cx)
-                });
-                let terminal_view = cx.new(|cx| {
-                    TerminalView::new(
-                        terminal.clone(),
-                        workspace.downgrade(),
-                        None,
-                        project.downgrade(),
-                        window,
-                        cx,
-                    )
-                });
-
-                active_pane.update(cx, |pane, cx| {
-                    pane.add_item(
-                        Box::new(terminal_view.clone()),
-                        true,
-                        false,
-                        None,
-                        window,
-                        cx,
-                    );
-                });
-
-                if focus {
-                    let focus_handle = terminal_view.read(cx).focus_handle.clone();
-                    focus_handle.focus(window, cx);
-                }
-
-                (active_pane, terminal, terminal_view)
-            })
-            .unwrap()
-    }
-
-    /// Creates a worktree with 1 file /root.txt and returns the project, workspace, and window handle.
-    async fn init_test_with_window(
-        cx: &mut TestAppContext,
-    ) -> (
-        Entity<Project>,
-        Entity<Workspace>,
-        gpui::WindowHandle<MultiWorkspace>,
-    ) {
-        let params = cx.update(AppState::test);
-        cx.update(|cx| {
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-        });
-
-        let project = Project::test(params.fs.clone(), [], cx).await;
-        let window_handle =
-            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = window_handle
-            .read_with(cx, |mw, _| mw.workspace().clone())
-            .unwrap();
-
-        (project, workspace, window_handle)
-    }
-
-    async fn init_remote_test(
-        cx: &mut TestAppContext,
-        server_cx: &mut TestAppContext,
-    ) -> (Entity<Project>, Entity<Workspace>) {
-        cx.update(|cx| {
-            release_channel::init(semver::Version::new(0, 0, 0), cx);
-        });
-        server_cx.update(|cx| {
-            release_channel::init(semver::Version::new(0, 0, 0), cx);
-        });
-
-        let params = cx.update(AppState::test);
-        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
-        let ping_handler = server_cx.new(|_| ());
-        server_session.add_request_handler::<rpc::proto::Ping, _, _, _>(
-            ping_handler.downgrade(),
-            |_entity, _envelope, _cx| async { Ok(rpc::proto::Ack {}) },
-        );
-        drop(connect_guard);
-
-        let remote_client = RemoteClient::connect_mock(opts, cx).await;
-        let project = cx.update(|cx| {
-            Project::remote(
-                remote_client,
-                params.client.clone(),
-                params.node_runtime.clone(),
-                params.user_store.clone(),
-                params.languages.clone(),
-                params.fs.clone(),
-                false,
-                cx,
-            )
-        });
-
-        let window_handle = cx.add_window({
-            let params = params.clone();
-            let project_for_workspace = project.clone();
-            move |window, cx| {
-                window.activate_window();
-                let workspace = cx.new(|cx| {
-                    Workspace::new(
-                        None,
-                        project_for_workspace.clone(),
-                        params.clone(),
-                        window,
-                        cx,
-                    )
-                });
-                MultiWorkspace::new(workspace, window, cx)
-            }
-        });
-        let workspace = window_handle
-            .read_with(cx, |mw, _| mw.workspace().clone())
-            .unwrap();
-
-        (project, workspace)
-    }
-
-    /// Creates a file in the given worktree and returns its entry.
-    async fn create_file_in_worktree(
-        worktree: Entity<Worktree>,
-        relative_path: impl AsRef<Path>,
-        cx: &mut TestAppContext,
-    ) -> Entry {
-        cx.update(|cx| {
-            worktree.update(cx, |worktree, cx| {
-                worktree.create_entry(
-                    RelPath::new(relative_path.as_ref(), PathStyle::local())
-                        .unwrap()
-                        .as_ref()
-                        .into(),
-                    false,
-                    None,
-                    cx,
-                )
-            })
-        })
-        .await
-        .unwrap()
-        .into_included()
-        .unwrap()
-    }
-
-    /// Creates a worktree with 1 folder: /root{suffix}/
-    async fn create_folder_wt(
-        project: Entity<Project>,
-        path: impl AsRef<Path>,
-        cx: &mut TestAppContext,
-    ) -> (Entity<Worktree>, Entry) {
-        create_wt(project, true, path, cx).await
-    }
-
-    /// Creates a worktree with 1 file: /root{suffix}.txt
-    async fn create_file_wt(
-        project: Entity<Project>,
-        path: impl AsRef<Path>,
-        cx: &mut TestAppContext,
-    ) -> (Entity<Worktree>, Entry) {
-        create_wt(project, false, path, cx).await
-    }
-
-    async fn create_wt(
-        project: Entity<Project>,
-        is_dir: bool,
-        path: impl AsRef<Path>,
-        cx: &mut TestAppContext,
-    ) -> (Entity<Worktree>, Entry) {
-        let (wt, _) = project
-            .update(cx, |project, cx| {
-                project.find_or_create_worktree(path, true, cx)
-            })
-            .await
-            .unwrap();
-
-        let entry = cx
-            .update(|cx| {
-                wt.update(cx, |wt, cx| {
-                    wt.create_entry(RelPath::empty().into(), is_dir, None, cx)
-                })
-            })
-            .await
-            .unwrap()
-            .into_included()
-            .unwrap();
-
-        (wt, entry)
-    }
-
-    pub fn insert_active_entry_for(
-        wt: Entity<Worktree>,
-        entry: Entry,
-        project: Entity<Project>,
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(|cx| {
-            let p = ProjectPath {
-                worktree_id: wt.read(cx).id(),
-                path: entry.path,
-            };
-            project.update(cx, |project, cx| project.set_active_path(Some(p), cx));
-        });
-    }
-
-    // Terminal drag/drop test
-
-    #[gpui::test]
-    async fn test_handle_drop_writes_paths_for_all_drop_types(cx: &mut TestAppContext) {
-        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
-
-        let (worktree, _) = create_folder_wt(project.clone(), "/root/", cx).await;
-        let first_entry = create_file_in_worktree(worktree.clone(), "first.txt", cx).await;
-        let second_entry = create_file_in_worktree(worktree.clone(), "second.txt", cx).await;
-
-        let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
-        let first_path = project
-            .read_with(cx, |project, cx| {
-                project.absolute_path(
-                    &ProjectPath {
-                        worktree_id,
-                        path: first_entry.path.clone(),
-                    },
-                    cx,
-                )
-            })
-            .unwrap();
-        let second_path = project
-            .read_with(cx, |project, cx| {
-                project.absolute_path(
-                    &ProjectPath {
-                        worktree_id,
-                        path: second_entry.path.clone(),
-                    },
-                    cx,
-                )
-            })
-            .unwrap();
-
-        let (active_pane, terminal, terminal_view) =
-            add_display_only_terminal(&project, window_handle, false, cx);
-
-        let tab_item = window_handle
-            .update(cx, |_, window, cx| {
-                let tab_project_item = cx.new(|_| TestProjectItem {
-                    entry_id: Some(second_entry.id),
-                    project_path: Some(ProjectPath {
-                        worktree_id,
-                        path: second_entry.path.clone(),
-                    }),
-                    is_dirty: false,
-                });
-                let tab_item =
-                    cx.new(|cx| TestItem::new(cx).with_project_items(&[tab_project_item]));
-                active_pane.update(cx, |pane, cx| {
-                    pane.add_item(Box::new(tab_item.clone()), true, false, None, window, cx);
-                });
-                tab_item
-            })
-            .unwrap();
-
-        cx.run_until_parked();
-
-        window_handle
-            .update(cx, |multi_workspace, window, cx| {
-                let workspace = multi_workspace.workspace().clone();
-                let terminal_view_index =
-                    active_pane.read(cx).index_for_item(&terminal_view).unwrap();
-                let dragged_tab_index = active_pane.read(cx).index_for_item(&tab_item).unwrap();
-
-                assert!(
-                    workspace.read(cx).pane_for(&terminal_view).is_some(),
-                    "terminal view not registered with workspace after run_until_parked"
-                );
-
-                // Dragging an external file should write its path to the terminal
-                let external_paths = ExternalPaths(vec![first_path.clone()].into());
-                assert_drop_writes_to_terminal(
-                    &active_pane,
-                    terminal_view_index,
-                    &terminal,
-                    &external_paths,
-                    &expected_drop_text(std::slice::from_ref(&first_path)),
-                    window,
-                    cx,
-                );
-
-                // Dragging a tab should write the path of the tab's item to the terminal
-                let dragged_tab = DraggedTab {
-                    pane: active_pane.clone(),
-                    item: Box::new(tab_item.clone()),
-                    ix: dragged_tab_index,
-                    detail: 0,
-                    is_active: false,
-                };
-                assert_drop_writes_to_terminal(
-                    &active_pane,
-                    terminal_view_index,
-                    &terminal,
-                    &dragged_tab,
-                    &expected_drop_text(std::slice::from_ref(&second_path)),
-                    window,
-                    cx,
-                );
-
-                // Dragging multiple selections should write both paths to the terminal
-                let dragged_selection = DraggedSelection {
-                    active_selection: SelectedEntry {
-                        worktree_id,
-                        entry_id: first_entry.id,
-                    },
-                    marked_selections: Arc::from([
-                        SelectedEntry {
-                            worktree_id,
-                            entry_id: first_entry.id,
-                        },
-                        SelectedEntry {
-                            worktree_id,
-                            entry_id: second_entry.id,
-                        },
-                    ]),
-                };
-                assert_drop_writes_to_terminal(
-                    &active_pane,
-                    terminal_view_index,
-                    &terminal,
-                    &dragged_selection,
-                    &expected_drop_text(&[first_path.clone(), second_path.clone()]),
-                    window,
-                    cx,
-                );
-
-                // Dropping a project entry should write the entry's path to the terminal
-                let dropped_entry_id = first_entry.id;
-                assert_drop_writes_to_terminal(
-                    &active_pane,
-                    terminal_view_index,
-                    &terminal,
-                    &dropped_entry_id,
-                    &expected_drop_text(&[first_path]),
-                    window,
-                    cx,
-                );
-            })
-            .unwrap();
-    }
-
-    // Terminal rename tests
-
-    #[gpui::test]
-    async fn test_custom_title_initially_none(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-
-        let (project, workspace) = init_test(cx).await;
-
-        let terminal = project
-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
-            .await
-            .unwrap();
-
-        let terminal_view = cx
-            .add_window(|window, cx| {
-                TerminalView::new(
-                    terminal,
-                    workspace.downgrade(),
-                    None,
-                    project.downgrade(),
-                    window,
-                    cx,
-                )
-            })
-            .root(cx)
-            .unwrap();
-
-        terminal_view.update(cx, |view, _cx| {
-            assert!(view.custom_title().is_none());
-        });
-    }
-
-    #[gpui::test]
-    async fn test_set_custom_title(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-
-        let (project, workspace) = init_test(cx).await;
-
-        let terminal = project
-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
-            .await
-            .unwrap();
-
-        let terminal_view = cx
-            .add_window(|window, cx| {
-                TerminalView::new(
-                    terminal,
-                    workspace.downgrade(),
-                    None,
-                    project.downgrade(),
-                    window,
-                    cx,
-                )
-            })
-            .root(cx)
-            .unwrap();
-
-        terminal_view.update(cx, |view, cx| {
-            view.set_custom_title(Some("frontend".to_string()), cx);
-            assert_eq!(view.custom_title(), Some("frontend"));
-        });
-    }
-
-    #[gpui::test]
-    async fn test_set_custom_title_empty_becomes_none(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-
-        let (project, workspace) = init_test(cx).await;
-
-        let terminal = project
-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
-            .await
-            .unwrap();
-
-        let terminal_view = cx
-            .add_window(|window, cx| {
-                TerminalView::new(
-                    terminal,
-                    workspace.downgrade(),
-                    None,
-                    project.downgrade(),
-                    window,
-                    cx,
-                )
-            })
-            .root(cx)
-            .unwrap();
-
-        terminal_view.update(cx, |view, cx| {
-            view.set_custom_title(Some("test".to_string()), cx);
-            assert_eq!(view.custom_title(), Some("test"));
-
-            view.set_custom_title(Some("".to_string()), cx);
-            assert!(view.custom_title().is_none());
-
-            view.set_custom_title(Some("  ".to_string()), cx);
-            assert!(view.custom_title().is_none());
-        });
-    }
-
-    #[gpui::test]
-    async fn test_custom_title_marks_needs_serialize(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-
-        let (project, workspace) = init_test(cx).await;
-
-        let terminal = project
-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
-            .await
-            .unwrap();
-
-        let terminal_view = cx
-            .add_window(|window, cx| {
-                TerminalView::new(
-                    terminal,
-                    workspace.downgrade(),
-                    None,
-                    project.downgrade(),
-                    window,
-                    cx,
-                )
-            })
-            .root(cx)
-            .unwrap();
-
-        terminal_view.update(cx, |view, cx| {
-            view.needs_serialize = false;
-            view.set_custom_title(Some("new_label".to_string()), cx);
-            assert!(view.needs_serialize);
-        });
-    }
-
-    #[gpui::test]
-    async fn test_tab_content_uses_custom_title(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-
-        let (project, workspace) = init_test(cx).await;
-
-        let terminal = project
-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
-            .await
-            .unwrap();
-
-        let terminal_view = cx
-            .add_window(|window, cx| {
-                TerminalView::new(
-                    terminal,
-                    workspace.downgrade(),
-                    None,
-                    project.downgrade(),
-                    window,
-                    cx,
-                )
-            })
-            .root(cx)
-            .unwrap();
-
-        terminal_view.update(cx, |view, cx| {
-            view.set_custom_title(Some("my-server".to_string()), cx);
-            let text = view.tab_content_text(0, cx);
-            assert_eq!(text.as_ref(), "my-server");
-        });
-
-        terminal_view.update(cx, |view, cx| {
-            view.set_custom_title(None, cx);
-            let text = view.tab_content_text(0, cx);
-            assert_ne!(text.as_ref(), "my-server");
-        });
-    }
-
-    #[gpui::test]
-    async fn test_tab_content_shows_terminal_title_when_custom_title_directly_set_empty(
-        cx: &mut TestAppContext,
-    ) {
-        cx.executor().allow_parking();
-
-        let (project, workspace) = init_test(cx).await;
-
-        let terminal = project
-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
-            .await
-            .unwrap();
-
-        let terminal_view = cx
-            .add_window(|window, cx| {
-                TerminalView::new(
-                    terminal,
-                    workspace.downgrade(),
-                    None,
-                    project.downgrade(),
-                    window,
-                    cx,
-                )
-            })
-            .root(cx)
-            .unwrap();
-
-        terminal_view.update(cx, |view, cx| {
-            view.custom_title = Some("".to_string());
-            let text = view.tab_content_text(0, cx);
-            assert!(
-                !text.is_empty(),
-                "Tab should show terminal title, not empty string; got: '{}'",
-                text
-            );
-        });
-
-        terminal_view.update(cx, |view, cx| {
-            view.custom_title = Some("   ".to_string());
-            let text = view.tab_content_text(0, cx);
-            assert!(
-                !text.is_empty() && text.as_ref() != "   ",
-                "Tab should show terminal title, not whitespace; got: '{}'",
-                text
-            );
-        });
     }
 }
