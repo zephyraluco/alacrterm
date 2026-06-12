@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-terminal = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
-alacritty_terminal.workspace = true
 anyhow.workspace = true
-log.workspace = true
 rust-embed = { workspace = true }
+settings = { workspace = true }
+terminal = { workspace = true }
+terminal_view = { workspace = true }
+theme = { workspace = true }
+util = { workspace = true }

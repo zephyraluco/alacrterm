@@ -1,0 +1,39 @@
+[package]
+name = "util"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "Apache-2.0"
+description = "A collection of utility structs and functions used by Zed and GPUI"
+
+
+[lib]
+path = "src/util.rs"
+doctest = true
+
+[dependencies]
+anyhow.workspace = true
+globset.workspace = true
+dunce.workspace = true
+itertools.workspace = true
+log.workspace = true
+regex.workspace = true
+schemars.workspace = true
+serde.workspace = true
+shlex.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+rust-embed.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+which.workspace = true
+dirs.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tendril.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
