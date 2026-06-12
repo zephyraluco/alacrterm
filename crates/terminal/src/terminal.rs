@@ -2104,18 +2104,36 @@ impl Terminal {
             }
 
             self.selection_phase = SelectionPhase::Selecting;
+            let (point, side) = grid_point_and_side(
+                position,
+                self.last_content.terminal_bounds,
+                self.last_content.display_offset,
+            );
+
+            let scroll_lines = if !self.last_content.mode.contains(Modes::ALT_SCREEN) {
+                self.drag_line_delta(e, region)
+            } else {
+                None
+            };
+
+            if !self.mouse_changed(point, side) && scroll_lines.is_none() {
+                return;
+            }
+
             // Alacritty has the same ordering, of first updating the selection
             // then scrolling 15ms later
+            if let Some(ix) = self
+                .events
+                .iter()
+                .rposition(|event| matches!(event, InternalEvent::UpdateSelection(_)))
+            {
+                self.events.remove(ix);
+            }
             self.events
                 .push_back(InternalEvent::UpdateSelection(position));
 
             // Doesn't make sense to scroll the alt screen
-            if !self.last_content.mode.contains(Modes::ALT_SCREEN) {
-                let scroll_lines = match self.drag_line_delta(e, region) {
-                    Some(value) => value,
-                    None => return,
-                };
-
+            if let Some(scroll_lines) = scroll_lines {
                 self.events
                     .push_back(InternalEvent::Scroll(Scroll::Delta(scroll_lines)));
             }
