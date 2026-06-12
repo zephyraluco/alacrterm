@@ -12,10 +12,10 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 gpui.workspace = true
-palette = { version = "0.7.5", default-features = false, features = ["std"] }
-parking_lot = "0.12.1"
+palette.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
-strum = { version = "0.27.2", features = ["derive"] }
+strum.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true }

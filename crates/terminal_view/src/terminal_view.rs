@@ -1,6 +1,7 @@
 mod blink_manager;
 mod context_menu;
 pub mod scrollbar;
+pub mod search_bar;
 pub mod terminal_element;
 mod terminal_path_like_target;
 pub mod terminal_scrollbar;
@@ -17,6 +18,7 @@ use gpui::{
     ScrollWheelEvent, Styled, Subscription, Task, TaskExt, WeakEntity, Window, actions, anchored,
     deferred, div, prelude::*, px,
 };
+use gpui_component::v_flex;
 // use project::{Project, ProjectEntryId, search::SearchQuery};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -55,6 +57,11 @@ use crate::blink_manager::BlinkManager;
 use crate::context_menu::ContextMenu;
 use crate::scrollbar::scrollbars::{ScrollbarVisibility, ShowScrollbar};
 use crate::scrollbar::{ScrollAxes, Scrollbars, WithScrollbar};
+use crate::search_bar::{
+    DismissTerminalSearch, SEARCH_BAR_KEY_CONTEXT, SelectNextSearchMatch,
+    SelectPreviousSearchMatch, TerminalSearchBar, TerminalSearchDirection, TerminalSearchOptions,
+    TerminalSearchQuery, TerminalSearchable, ToggleTerminalSearch, ToggleTerminalSearchRegex,
+};
 // use workspace::{
 //     CloseActiveItem, DraggedSelection, DraggedTab, NewCenterTerminal, NewTerminal, Pane,
 //     ToolbarItemLocation, Workspace, WorkspaceId, delete_unloaded_items,
@@ -112,7 +119,21 @@ actions!(
 pub struct RenameTerminal;
 
 pub fn init(cx: &mut App) {
-    let _ = cx;
+    cx.bind_keys([
+        gpui::KeyBinding::new("ctrl-f", ToggleTerminalSearch, None),
+        gpui::KeyBinding::new(
+            "escape",
+            DismissTerminalSearch,
+            Some(SEARCH_BAR_KEY_CONTEXT),
+        ),
+        gpui::KeyBinding::new("f3", SelectNextSearchMatch, None),
+        gpui::KeyBinding::new("shift-f3", SelectPreviousSearchMatch, None),
+        gpui::KeyBinding::new(
+            "ctrl-r",
+            ToggleTerminalSearchRegex,
+            Some(SEARCH_BAR_KEY_CONTEXT),
+        ),
+    ]);
 }
 
 pub struct BlockProperties {
@@ -149,6 +170,7 @@ pub struct TerminalView {
     scroll_top: Pixels,
     scroll_handle: TerminalScrollHandle,
     ime_state: Option<ImeState>,
+    search_bar: Entity<TerminalSearchBar>,
     // self_handle: WeakEntity<Self>,
     // rename_editor: Option<Entity<Editor>>,
     // rename_editor_subscription: Option<Subscription>,
@@ -237,6 +259,9 @@ impl TerminalView {
             )
         });
 
+        let terminal_view = cx.entity().downgrade();
+        let search_bar = cx.new(|cx| TerminalSearchBar::new(terminal_view, window, cx));
+
         let subscriptions = vec![
             focus_in,
             focus_out,
@@ -260,6 +285,7 @@ impl TerminalView {
             scroll_handle,
             custom_title: None,
             ime_state: None,
+            search_bar,
             _subscriptions: subscriptions,
             _terminal_subscriptions: subscribe_for_terminal_events(&terminal, window, cx),
         }
@@ -1056,8 +1082,7 @@ fn subscribe_for_terminal_events(
     vec![terminal_subscription, terminal_events_subscription]
 }
 
-#[cfg(any())]
-fn regex_search_for_query(query: &SearchQuery) -> Option<Search> {
+fn regex_search_for_query(query: &TerminalSearchQuery) -> Option<Search> {
     let str = query.as_str();
     if query.is_regex() {
         if str == "." {
@@ -1164,12 +1189,89 @@ impl Render for TerminalView {
 
         let focused = self.focus_handle.is_focused(window);
 
-        div()
+        v_flex()
             .id("terminal-view")
             .size_full()
             .relative()
             .track_focus(&self.focus_handle(cx))
             .key_context(self.dispatch_context(cx))
+            .on_action(cx.listener(|this, _: &ToggleTerminalSearch, window, cx| {
+                let search_bar = this.search_bar.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        cx.update(|window, cx| {
+                            search_bar.update(cx, |search_bar, cx| {
+                                search_bar.toggle_search(&ToggleTerminalSearch, window, cx)
+                            });
+                        })
+                        .ok();
+                    })
+                    .detach();
+            }))
+            .on_action(cx.listener(|this, _: &DismissTerminalSearch, window, cx| {
+                let search_bar = this.search_bar.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        cx.update(|window, cx| {
+                            search_bar.update(cx, |search_bar, cx| {
+                                search_bar.dismiss_search(&DismissTerminalSearch, window, cx)
+                            });
+                        })
+                        .ok();
+                    })
+                    .detach();
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleTerminalSearchRegex, window, cx| {
+                    let search_bar = this.search_bar.clone();
+                    window
+                        .spawn(cx, async move |cx| {
+                            cx.update(|window, cx| {
+                                search_bar.update(cx, |search_bar, cx| {
+                                    search_bar.toggle_regex(&ToggleTerminalSearchRegex, window, cx)
+                                });
+                            })
+                            .ok();
+                        })
+                        .detach();
+                }),
+            )
+            .on_action(cx.listener(|this, _: &SelectNextSearchMatch, window, cx| {
+                let search_bar = this.search_bar.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        cx.update(|window, cx| {
+                            search_bar.update(cx, |search_bar, cx| {
+                                search_bar.select_next_match_action(
+                                    &SelectNextSearchMatch,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        })
+                        .ok();
+                    })
+                    .detach();
+            }))
+            .on_action(
+                cx.listener(|this, _: &SelectPreviousSearchMatch, window, cx| {
+                    let search_bar = this.search_bar.clone();
+                    window
+                        .spawn(cx, async move |cx| {
+                            cx.update(|window, cx| {
+                                search_bar.update(cx, |search_bar, cx| {
+                                    search_bar.select_previous_match_action(
+                                        &SelectPreviousSearchMatch,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            })
+                            .ok();
+                        })
+                        .detach();
+                }),
+            )
             .on_action(cx.listener(TerminalView::send_text))
             .on_action(cx.listener(TerminalView::send_keystroke))
             .on_action(cx.listener(TerminalView::copy))
@@ -1210,11 +1312,14 @@ impl Render for TerminalView {
                     }
                 }),
             )
+            .child(self.search_bar.clone())
             .child(
                 // TODO: Oddly this wrapper div is needed for TerminalElement to not steal events from the context menu
                 div()
                     .id("terminal-view-container")
-                    .size_full()
+                    .flex_grow()
+                    .min_h_0()
+                    .w_full()
                     .bg(cx.theme().colors().terminal_background)
                     .child(TerminalElement::new(
                         terminal_handle,
@@ -1764,20 +1869,11 @@ impl SerializableItem for TerminalView {
     }
 }
 
-#[cfg(any())]
-impl SearchableItem for TerminalView {
+impl TerminalSearchable for TerminalView {
     type Match = Range;
 
-    fn supported_options(&self) -> SearchOptions {
-        SearchOptions {
-            case: false,
-            word: false,
-            regex: true,
-            replacement: false,
-            selection: false,
-            select_all: false,
-            find_in_results: false,
-        }
+    fn supported_options(&self) -> TerminalSearchOptions {
+        TerminalSearchOptions { regex: true }
     }
 
     /// Clear stored matches
@@ -1790,7 +1886,6 @@ impl SearchableItem for TerminalView {
         &mut self,
         matches: &[Self::Match],
         _active_match_index: Option<usize>,
-        _token: SearchToken,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1799,12 +1894,7 @@ impl SearchableItem for TerminalView {
     }
 
     /// Returns the selection content to pre-load into this search
-    fn query_suggestion(
-        &mut self,
-        _seed_query_override: Option<SeedQuerySetting>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> String {
+    fn query_suggestion(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> String {
         self.terminal()
             .read(cx)
             .last_content
@@ -1818,7 +1908,6 @@ impl SearchableItem for TerminalView {
         &mut self,
         index: usize,
         _: &[Self::Match],
-        _token: SearchToken,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1828,13 +1917,7 @@ impl SearchableItem for TerminalView {
     }
 
     /// Add selections for all matches given.
-    fn select_matches(
-        &mut self,
-        matches: &[Self::Match],
-        _token: SearchToken,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_matches(&mut self, matches: &[Self::Match], _: &mut Window, cx: &mut Context<Self>) {
         self.terminal()
             .update(cx, |term, _| term.select_matches(matches));
         cx.notify();
@@ -1843,7 +1926,7 @@ impl SearchableItem for TerminalView {
     /// Get all of the matches for this query, should be done on the background
     fn find_matches(
         &mut self,
-        query: Arc<SearchQuery>,
+        query: Arc<TerminalSearchQuery>,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Vec<Self::Match>> {
@@ -1858,9 +1941,8 @@ impl SearchableItem for TerminalView {
     /// Reports back to the search toolbar what the active match should be (the selection)
     fn active_match_index(
         &mut self,
-        direction: Direction,
+        direction: TerminalSearchDirection,
         matches: &[Self::Match],
-        _token: SearchToken,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<usize> {
@@ -1872,7 +1954,7 @@ impl SearchableItem for TerminalView {
             if let Some(selection_head) = self.terminal().read(cx).selection_head {
                 // If selection head is contained in a match. Return that match
                 match direction {
-                    Direction::Prev => {
+                    TerminalSearchDirection::Prev => {
                         // If no selection before selection head, return the first match
                         Some(
                             matches
@@ -1887,7 +1969,7 @@ impl SearchableItem for TerminalView {
                                 .unwrap_or(0),
                         )
                     }
-                    Direction::Next => {
+                    TerminalSearchDirection::Next => {
                         // If no selection after selection head, return the last match
                         Some(
                             matches
@@ -1909,16 +1991,6 @@ impl SearchableItem for TerminalView {
         } else {
             None
         }
-    }
-    fn replace(
-        &mut self,
-        _: &Self::Match,
-        _: &SearchQuery,
-        _token: SearchToken,
-        _window: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-        // Replacement is not supported in terminal view, so this is a no-op.
     }
 }
 

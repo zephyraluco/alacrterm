@@ -1147,7 +1147,7 @@ impl Element for TerminalElement {
 
                 let text_system = cx.text_system();
                 let player_color = theme.players().local();
-                let match_color = theme.colors().terminal_ansi_dim_blue;
+                let match_color = theme.colors().element_selection_background;
                 let gutter;
                 let (dimensions, line_height_px) = {
                     let rem_size = window.rem_size();
