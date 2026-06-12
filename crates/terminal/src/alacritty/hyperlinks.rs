@@ -482,9 +482,8 @@ fn path_match<T>(
 
 #[cfg(test)]
 mod tests {
-    use crate::terminal_settings::TerminalSettings;
-    use settings::Settings;
     use super::*;
+    use crate::terminal_settings::TerminalSettings;
     use alacritty_terminal::{
         event::VoidListener,
         grid::Dimensions,
@@ -493,6 +492,7 @@ mod tests {
         vte::ansi::Handler,
     };
     use regex::Regex;
+    use settings::Settings;
     use settings::{self, SettingsContent};
     use std::{cell::RefCell, ops::RangeInclusive, path::PathBuf, rc::Rc};
     use url::Url;

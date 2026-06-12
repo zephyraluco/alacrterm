@@ -7,7 +7,7 @@ use crate::assets::Assets;
 use crate::themes::set_theme;
 use gpui::*;
 use gpui_component::{Root, TitleBar, h_flex, v_flex};
-use settings::{Settings, SettingsStore};
+use settings::{IntoGpui, Settings, SettingsStore};
 use terminal::{TerminalBuilder, terminal_settings::TerminalSettings};
 use terminal_view::TerminalView;
 use util::{paths::PathStyle, shell::Shell};
@@ -30,7 +30,7 @@ impl TerminalApp {
             terminal_settings.path_hyperlink_regexes,
             terminal_settings.path_hyperlink_timeout_ms,
             false,
-            0,
+            window.window_handle().window_id().as_u64(),
             None,
             cx,
             Vec::new(),
@@ -143,6 +143,11 @@ fn main() {
             };
 
             cx.open_window(window_options, |window, cx| {
+                let settings = cx.global::<SettingsStore>().global_settings();
+                if let Some(ui_font_size) = settings.theme.ui_font_size {
+                    window.set_rem_size(ui_font_size.into_gpui());
+                }
+
                 let view = cx.new(|cx| TerminalApp::new(window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;

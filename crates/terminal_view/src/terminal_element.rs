@@ -1,14 +1,14 @@
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, DispatchPhase,
-    Element, ElementId, Entity, FocusHandle, Font, FontFeatures, FontStyle, FontWeight,
-    GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler, InteractiveElement, Interactivity,
-    IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton, MouseMoveEvent, Pixels,
-    Point as GpuiPoint, StatefulInteractiveElement, StrikethroughStyle, Styled, TextRun, TextStyle,
-    UTF16Selection, UnderlineStyle, WhiteSpace, Window, div, fill, point, prelude::*, px, relative,
-    size,
+    Element, ElementId, Entity, FocusHandle, Font, FontFallbacks, FontFeatures, FontStyle,
+    FontWeight, Global, GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler,
+    InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ModifiersChangedEvent,
+    MouseButton, MouseMoveEvent, Pixels, Point as GpuiPoint, StatefulInteractiveElement,
+    StrikethroughStyle, Styled, TextRun, TextStyle, UTF16Selection, UnderlineStyle, WhiteSpace,
+    Window, div, fill, point, prelude::*, px, relative, size,
 };
 use itertools::Itertools;
-use settings::Settings;
+use settings::{IntoGpui, Settings};
 use std::time::Instant;
 use terminal::{
     Cell, Color, Content, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
@@ -24,6 +24,86 @@ use std::{fmt::Debug, rc::Rc};
 use crate::{
     BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView, tooltip::Tooltip,
 };
+
+const MIN_FONT_SIZE: Pixels = px(6.0);
+const MAX_FONT_SIZE: Pixels = px(100.0);
+const BASE_REM_SIZE_IN_PX: f32 = 16.0;
+const DEFAULT_UI_FONT_SIZE_IN_PX: f32 = 14.0;
+
+#[derive(Clone)]
+struct ThemeFontSettings {
+    buffer_font: Font,
+    buffer_font_size: Pixels,
+}
+
+impl ThemeFontSettings {
+    fn buffer_font_size(&self, cx: &App) -> Pixels {
+        let font_size = cx
+            .try_global::<BufferFontSize>()
+            .map(|size| size.0)
+            .unwrap_or(self.buffer_font_size);
+
+        clamp_font_size(font_size)
+    }
+}
+
+#[derive(Default)]
+struct BufferFontSize(Pixels);
+
+impl Global for BufferFontSize {}
+
+impl Settings for ThemeFontSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        let theme = &content.theme;
+        Self {
+            buffer_font: Font {
+                family: theme.buffer_font_family.as_ref().map_or_else(
+                    || "JetBrainsMono Nerd Font".into(),
+                    |family| family.0.clone().into(),
+                ),
+                features: theme
+                    .buffer_font_features
+                    .clone()
+                    .map_or_else(FontFeatures::default, IntoGpui::into_gpui),
+                fallbacks: font_fallbacks_from_settings(theme.buffer_font_fallbacks.clone()),
+                weight: theme
+                    .buffer_font_weight
+                    .map_or(FontWeight::NORMAL, IntoGpui::into_gpui),
+                style: FontStyle::default(),
+            },
+            buffer_font_size: theme.buffer_font_size.map_or(px(15.0), IntoGpui::into_gpui),
+        }
+    }
+}
+
+fn font_fallbacks_from_settings(
+    fallbacks: Option<Vec<settings::FontFamilyName>>,
+) -> Option<FontFallbacks> {
+    fallbacks.map(|fallbacks| {
+        FontFallbacks::from_fonts(
+            fallbacks
+                .into_iter()
+                .map(|font_family| font_family.0.to_string())
+                .collect(),
+        )
+    })
+}
+
+fn clamp_font_size(size: Pixels) -> Pixels {
+    size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+}
+
+fn adjusted_font_size(size: Pixels, cx: &App) -> Pixels {
+    let font_settings = ThemeFontSettings::get_global(cx);
+    let adjusted_font_size = if let Some(BufferFontSize(adjusted_size)) = cx.try_global() {
+        let delta = *adjusted_size - font_settings.buffer_font_size;
+        size + delta
+    } else {
+        size
+    };
+
+    clamp_font_size(adjusted_font_size)
+}
 
 fn ensure_minimum_contrast(fg: Hsla, _bg: Hsla, _minimum_contrast: f32) -> Hsla {
     fg
@@ -916,8 +996,11 @@ impl TerminalElement {
     }
 
     fn rem_size(&self, cx: &mut App) -> Option<Pixels> {
-        let _ = cx;
-        Some(px(16.))
+        let buffer_font_size = ThemeFontSettings::get_global(cx).buffer_font_size(cx);
+        let default_font_size_scale = DEFAULT_UI_FONT_SIZE_IN_PX / BASE_REM_SIZE_IN_PX;
+        let default_font_size_delta = 1.0 - default_font_size_scale;
+
+        Some(buffer_font_size * (1.0 + default_font_size_delta))
     }
 }
 
@@ -945,7 +1028,7 @@ impl Element for TerminalElement {
                 displayed_lines,
                 total_lines: _,
             } => {
-                let rem_size = window.rem_size();
+                let rem_size = self.rem_size(cx).unwrap_or_else(|| window.rem_size());
                 let line_height = f32::from(window.text_style().font_size.to_pixels(rem_size))
                     * TerminalSettings::get_global(cx).line_height.value();
                 px(displayed_lines as f32 * line_height).into()
@@ -996,15 +1079,19 @@ impl Element for TerminalElement {
             cx,
             |_, _, hitbox, window, cx| {
                 let hitbox = hitbox.unwrap();
+                let theme_font_settings = ThemeFontSettings::get_global(cx);
                 let terminal_settings = TerminalSettings::get_global(cx);
                 let minimum_contrast = terminal_settings.minimum_contrast;
 
                 let font_family = terminal_settings.font_family.as_ref().map_or_else(
-                    || window.text_style().font_family.clone(),
+                    || theme_font_settings.buffer_font.family.clone(),
                     |font_family| font_family.0.clone().into(),
                 );
 
-                let font_fallbacks = terminal_settings.font_fallbacks.clone();
+                let font_fallbacks = terminal_settings
+                    .font_fallbacks
+                    .clone()
+                    .or_else(|| theme_font_settings.buffer_font.fallbacks.clone());
 
                 let font_features = terminal_settings
                     .font_features
@@ -1020,9 +1107,10 @@ impl Element for TerminalElement {
                     TerminalMode::Embedded { .. } => {
                         window.text_style().font_size.to_pixels(window.rem_size())
                     }
-                    TerminalMode::Standalone => terminal_settings
-                        .font_size
-                        .map_or(px(14.), |size| size.into()),
+                    TerminalMode::Standalone => terminal_settings.font_size.map_or_else(
+                        || theme_font_settings.buffer_font_size(cx),
+                        |size| adjusted_font_size(size, cx),
+                    ),
                 };
 
                 let theme = cx.theme().clone();
