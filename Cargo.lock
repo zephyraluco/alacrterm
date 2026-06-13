@@ -157,6 +157,7 @@ name = "alacrterm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "gpui",
  "gpui-component",
  "gpui_platform",
@@ -6073,6 +6074,7 @@ dependencies = [
  "dirs",
  "futures",
  "gpui",
+ "gpui-component",
  "itertools 0.14.0",
  "log",
  "pretty_assertions",
