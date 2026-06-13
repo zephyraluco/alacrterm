@@ -1,7 +1,5 @@
 use std::rc::Rc;
 
-// use crate::prelude::*;
-// use crate::{Color, KeyBinding, Label, LabelSize, StyledExt, h_flex, v_flex};
 use gpui::{
     Action, AnyElement, AnyView, App, AppContext as _, Context, Div, FocusHandle, IntoElement,
     KeyBinding, Render, RenderOnce, SharedString, Window, div, hsla, prelude::*,

@@ -1,13 +1,365 @@
-use gpui::{Hsla, Rgba};
+use gpui::{App, Global, Hsla, Rgba, SharedString};
 
-use crate::ColorScale;
-use crate::scale::{ColorScaleSet, ColorScales};
-use crate::{SystemColors, ThemeColors};
+pub trait ActiveColors {
+    fn terminal_colors(&self) -> &ThemeColors;
+}
+
+impl ActiveColors for App {
+    fn terminal_colors(&self) -> &ThemeColors {
+        self.global::<ThemeColors>()
+    }
+}
+/// A collection of colors that are used to style the UI.
+///
+/// Each step has a semantic meaning, and is used to style different parts of the UI.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+pub struct ColorScaleStep(usize);
+
+impl ColorScaleStep {
+    pub const ONE: Self = Self(1);
+    pub const TWO: Self = Self(2);
+    pub const THREE: Self = Self(3);
+    pub const FOUR: Self = Self(4);
+    pub const FIVE: Self = Self(5);
+    pub const SIX: Self = Self(6);
+    pub const SEVEN: Self = Self(7);
+    pub const EIGHT: Self = Self(8);
+    pub const NINE: Self = Self(9);
+    pub const TEN: Self = Self(10);
+    pub const ELEVEN: Self = Self(11);
+    pub const TWELVE: Self = Self(12);
+
+    /// All of the steps in a [`ColorScale`].
+    pub const ALL: [ColorScaleStep; 12] = [
+        Self::ONE,
+        Self::TWO,
+        Self::THREE,
+        Self::FOUR,
+        Self::FIVE,
+        Self::SIX,
+        Self::SEVEN,
+        Self::EIGHT,
+        Self::NINE,
+        Self::TEN,
+        Self::ELEVEN,
+        Self::TWELVE,
+    ];
+}
+
+/// A scale of colors for a given [`ColorScaleSet`].
+///
+/// Each [`ColorScale`] contains exactly 12 colors. Refer to
+/// [`ColorScaleStep`] for a reference of what each step is used for.
+pub struct ColorScale(Vec<Hsla>);
+
+impl FromIterator<Hsla> for ColorScale {
+    fn from_iter<T: IntoIterator<Item = Hsla>>(iter: T) -> Self {
+        Self(Vec::from_iter(iter))
+    }
+}
+
+impl ColorScale {
+    /// Returns the specified step in the [`ColorScale`].
+    #[inline]
+    pub fn step(&self, step: ColorScaleStep) -> Hsla {
+        // Steps are one-based, so we need convert to the zero-based vec index.
+        self.0[step.0 - 1]
+    }
+
+    /// `Step 1` - Used for main application backgrounds.
+    ///
+    /// This step provides a neutral base for any overlaying components, ideal for applications' main backdrop or empty spaces such as canvas areas.
+    ///
+    #[inline]
+    pub fn step_1(&self) -> Hsla {
+        self.step(ColorScaleStep::ONE)
+    }
+
+    /// `Step 2` - Used for both main application backgrounds and subtle component backgrounds.
+    ///
+    /// Like `Step 1`, this step allows variations in background styles, from striped tables, sidebar backgrounds, to card backgrounds.
+    #[inline]
+    pub fn step_2(&self) -> Hsla {
+        self.step(ColorScaleStep::TWO)
+    }
+
+    /// `Step 3` - Used for UI component backgrounds in their normal states.
+    ///
+    /// This step maintains accessibility by guaranteeing a contrast ratio of 4.5:1 with steps 11 and 12 for text. It could also suit hover states for transparent components.
+    #[inline]
+    pub fn step_3(&self) -> Hsla {
+        self.step(ColorScaleStep::THREE)
+    }
+
+    /// `Step 4` - Used for UI component backgrounds in their hover states.
+    ///
+    /// Also suited for pressed or selected states of components with a transparent background.
+    #[inline]
+    pub fn step_4(&self) -> Hsla {
+        self.step(ColorScaleStep::FOUR)
+    }
+
+    /// `Step 5` - Used for UI component backgrounds in their pressed or selected states.
+    #[inline]
+    pub fn step_5(&self) -> Hsla {
+        self.step(ColorScaleStep::FIVE)
+    }
+
+    /// `Step 6` - Used for subtle borders on non-interactive components.
+    ///
+    /// Its usage spans from sidebars' borders, headers' dividers, cards' outlines, to alerts' edges and separators.
+    #[inline]
+    pub fn step_6(&self) -> Hsla {
+        self.step(ColorScaleStep::SIX)
+    }
+
+    /// `Step 7` - Used for subtle borders on interactive components.
+    ///
+    /// This step subtly delineates the boundary of elements users interact with.
+    #[inline]
+    pub fn step_7(&self) -> Hsla {
+        self.step(ColorScaleStep::SEVEN)
+    }
+
+    /// `Step 8` - Used for stronger borders on interactive components and focus rings.
+    ///
+    /// It strengthens the visibility and accessibility of active elements and their focus states.
+    #[inline]
+    pub fn step_8(&self) -> Hsla {
+        self.step(ColorScaleStep::EIGHT)
+    }
+
+    /// `Step 9` - Used for solid backgrounds.
+    ///
+    /// `Step 9` is the most saturated step, having the least mix of white or black.
+    ///
+    /// Due to its high chroma, `Step 9` is versatile and particularly useful for semantic colors such as
+    /// error, warning, and success indicators.
+    #[inline]
+    pub fn step_9(&self) -> Hsla {
+        self.step(ColorScaleStep::NINE)
+    }
+
+    /// `Step 10` - Used for hovered or active solid backgrounds, particularly when `Step 9` is their normal state.
+    ///
+    /// May also be used for extremely low contrast text. This should be used sparingly, as it may be difficult to read.
+    #[inline]
+    pub fn step_10(&self) -> Hsla {
+        self.step(ColorScaleStep::TEN)
+    }
+
+    /// `Step 11` - Used for text and icons requiring low contrast or less emphasis.
+    #[inline]
+    pub fn step_11(&self) -> Hsla {
+        self.step(ColorScaleStep::ELEVEN)
+    }
+
+    /// `Step 12` - Used for text and icons requiring high contrast or prominence.
+    #[inline]
+    pub fn step_12(&self) -> Hsla {
+        self.step(ColorScaleStep::TWELVE)
+    }
+}
+
+pub struct ColorScales {
+    pub gray: ColorScaleSet,
+    pub mauve: ColorScaleSet,
+    pub slate: ColorScaleSet,
+    pub sage: ColorScaleSet,
+    pub olive: ColorScaleSet,
+    pub sand: ColorScaleSet,
+    pub gold: ColorScaleSet,
+    pub bronze: ColorScaleSet,
+    pub brown: ColorScaleSet,
+    pub yellow: ColorScaleSet,
+    pub amber: ColorScaleSet,
+    pub orange: ColorScaleSet,
+    pub tomato: ColorScaleSet,
+    pub red: ColorScaleSet,
+    pub ruby: ColorScaleSet,
+    pub crimson: ColorScaleSet,
+    pub pink: ColorScaleSet,
+    pub plum: ColorScaleSet,
+    pub purple: ColorScaleSet,
+    pub violet: ColorScaleSet,
+    pub iris: ColorScaleSet,
+    pub indigo: ColorScaleSet,
+    pub blue: ColorScaleSet,
+    pub cyan: ColorScaleSet,
+    pub teal: ColorScaleSet,
+    pub jade: ColorScaleSet,
+    pub green: ColorScaleSet,
+    pub grass: ColorScaleSet,
+    pub lime: ColorScaleSet,
+    pub mint: ColorScaleSet,
+    pub sky: ColorScaleSet,
+    pub black: ColorScaleSet,
+    pub white: ColorScaleSet,
+}
+
+impl IntoIterator for ColorScales {
+    type Item = ColorScaleSet;
+
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        vec![
+            self.gray,
+            self.mauve,
+            self.slate,
+            self.sage,
+            self.olive,
+            self.sand,
+            self.gold,
+            self.bronze,
+            self.brown,
+            self.yellow,
+            self.amber,
+            self.orange,
+            self.tomato,
+            self.red,
+            self.ruby,
+            self.crimson,
+            self.pink,
+            self.plum,
+            self.purple,
+            self.violet,
+            self.iris,
+            self.indigo,
+            self.blue,
+            self.cyan,
+            self.teal,
+            self.jade,
+            self.green,
+            self.grass,
+            self.lime,
+            self.mint,
+            self.sky,
+            self.black,
+            self.white,
+        ]
+        .into_iter()
+    }
+}
+
+/// Provides groups of [`ColorScale`]s for light and dark themes, as well as transparent versions of each scale.
+pub struct ColorScaleSet {
+    name: SharedString,
+    light: ColorScale,
+    dark: ColorScale,
+    light_alpha: ColorScale,
+    dark_alpha: ColorScale,
+}
+
+impl ColorScaleSet {
+    pub fn new(
+        name: impl Into<SharedString>,
+        light: ColorScale,
+        light_alpha: ColorScale,
+        dark: ColorScale,
+        dark_alpha: ColorScale,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            light,
+            light_alpha,
+            dark,
+            dark_alpha,
+        }
+    }
+
+    pub fn name(&self) -> &SharedString {
+        &self.name
+    }
+
+    pub fn light(&self) -> &ColorScale {
+        &self.light
+    }
+
+    pub fn light_alpha(&self) -> &ColorScale {
+        &self.light_alpha
+    }
+
+    pub fn dark(&self) -> &ColorScale {
+        &self.dark
+    }
+
+    pub fn dark_alpha(&self) -> &ColorScale {
+        &self.dark_alpha
+    }
+}
 
 pub(crate) fn neutral() -> ColorScaleSet {
     sand()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+// #[refineable(Debug, serde::Deserialize)]
+pub struct ThemeColors {
+    // ===
+    // Terminal
+    // ===
+    /// Terminal layout background color.
+    pub terminal_background: Hsla,
+    /// Terminal foreground color.
+    pub terminal_foreground: Hsla,
+    /// Bright terminal foreground color.
+    pub terminal_bright_foreground: Hsla,
+    /// Dim terminal foreground color.
+    pub terminal_dim_foreground: Hsla,
+    /// Terminal ANSI background color.
+    pub terminal_ansi_background: Hsla,
+    /// Black ANSI terminal color.
+    pub terminal_ansi_black: Hsla,
+    /// Bright black ANSI terminal color.
+    pub terminal_ansi_bright_black: Hsla,
+    /// Dim black ANSI terminal color.
+    pub terminal_ansi_dim_black: Hsla,
+    /// Red ANSI terminal color.
+    pub terminal_ansi_red: Hsla,
+    /// Bright red ANSI terminal color.
+    pub terminal_ansi_bright_red: Hsla,
+    /// Dim red ANSI terminal color.
+    pub terminal_ansi_dim_red: Hsla,
+    /// Green ANSI terminal color.
+    pub terminal_ansi_green: Hsla,
+    /// Bright green ANSI terminal color.
+    pub terminal_ansi_bright_green: Hsla,
+    /// Dim green ANSI terminal color.
+    pub terminal_ansi_dim_green: Hsla,
+    /// Yellow ANSI terminal color.
+    pub terminal_ansi_yellow: Hsla,
+    /// Bright yellow ANSI terminal color.
+    pub terminal_ansi_bright_yellow: Hsla,
+    /// Dim yellow ANSI terminal color.
+    pub terminal_ansi_dim_yellow: Hsla,
+    /// Blue ANSI terminal color.
+    pub terminal_ansi_blue: Hsla,
+    /// Bright blue ANSI terminal color.
+    pub terminal_ansi_bright_blue: Hsla,
+    /// Dim blue ANSI terminal color.
+    pub terminal_ansi_dim_blue: Hsla,
+    /// Magenta ANSI terminal color.
+    pub terminal_ansi_magenta: Hsla,
+    /// Bright magenta ANSI terminal color.
+    pub terminal_ansi_bright_magenta: Hsla,
+    /// Dim magenta ANSI terminal color.
+    pub terminal_ansi_dim_magenta: Hsla,
+    /// Cyan ANSI terminal color.
+    pub terminal_ansi_cyan: Hsla,
+    /// Bright cyan ANSI terminal color.
+    pub terminal_ansi_bright_cyan: Hsla,
+    /// Dim cyan ANSI terminal color.
+    pub terminal_ansi_dim_cyan: Hsla,
+    /// White ANSI terminal color.
+    pub terminal_ansi_white: Hsla,
+    /// Bright white ANSI terminal color.
+    pub terminal_ansi_bright_white: Hsla,
+    /// Dim white ANSI terminal color.
+    pub terminal_ansi_dim_white: Hsla,
+}
+
+impl Global for ThemeColors {}
 /// The default colors for the theme.
 ///
 /// Themes that do not specify all colors are refined off of these defaults.
@@ -16,41 +368,9 @@ impl ThemeColors {
     ///
     /// Themes that do not specify all colors are refined off of these defaults.
     pub fn light() -> Self {
-        let system = SystemColors::default();
+        // let system = SystemColors::default();
 
         Self {
-            border: neutral().light().step_6(),
-            border_variant: neutral().light().step_5(),
-            border_focused: blue().light().step_5(),
-            border_selected: blue().light().step_5(),
-            border_transparent: system.transparent,
-            border_disabled: neutral().light().step_3(),
-            elevated_surface_background: neutral().light().step_2(),
-            surface_background: neutral().light().step_2(),
-            background: neutral().light().step_1(),
-            element_background: neutral().light().step_3(),
-            element_hover: neutral().light_alpha().step_4(),
-            element_active: neutral().light_alpha().step_5(),
-            element_selected: neutral().light_alpha().step_5(),
-            element_disabled: neutral().light_alpha().step_3(),
-            element_selection_background: blue().light().step_3().alpha(0.25),
-            drop_target_background: blue().light_alpha().step_2(),
-            drop_target_border: neutral().light().step_12(),
-            ghost_element_background: system.transparent,
-            ghost_element_hover: neutral().light_alpha().step_3(),
-            ghost_element_active: neutral().light_alpha().step_4(),
-            ghost_element_selected: neutral().light_alpha().step_5(),
-            ghost_element_disabled: neutral().light_alpha().step_3(),
-            text: neutral().light().step_12(),
-            text_muted: neutral().light().step_10(),
-            text_placeholder: neutral().light().step_10(),
-            text_disabled: neutral().light().step_9(),
-            text_accent: blue().light().step_11(),
-            icon: neutral().light().step_11(),
-            icon_muted: neutral().light().step_10(),
-            icon_disabled: neutral().light().step_9(),
-            icon_placeholder: neutral().light().step_10(),
-            icon_accent: blue().light().step_11(),
             terminal_background: neutral().light().step_1(),
             terminal_foreground: black().light().step_12(),
             terminal_bright_foreground: black().light().step_11(),
@@ -87,41 +407,7 @@ impl ThemeColors {
     ///
     /// Themes that do not specify all colors are refined off of these defaults.
     pub fn dark() -> Self {
-        let system = SystemColors::default();
-
         Self {
-            border: neutral().dark().step_6(),
-            border_variant: neutral().dark().step_5(),
-            border_focused: blue().dark().step_5(),
-            border_selected: blue().dark().step_5(),
-            border_transparent: system.transparent,
-            border_disabled: neutral().dark().step_3(),
-            elevated_surface_background: neutral().dark().step_2(),
-            surface_background: neutral().dark().step_2(),
-            background: neutral().dark().step_1(),
-            element_background: neutral().dark().step_3(),
-            element_hover: neutral().dark_alpha().step_4(),
-            element_active: neutral().dark_alpha().step_5(),
-            element_selected: neutral().dark_alpha().step_5(),
-            element_disabled: neutral().dark_alpha().step_3(),
-            element_selection_background: blue().dark().step_3().alpha(0.25),
-            drop_target_background: blue().dark_alpha().step_2(),
-            drop_target_border: neutral().dark().step_12(),
-            ghost_element_background: system.transparent,
-            ghost_element_hover: neutral().dark_alpha().step_4(),
-            ghost_element_active: neutral().dark_alpha().step_5(),
-            ghost_element_selected: neutral().dark_alpha().step_5(),
-            ghost_element_disabled: neutral().dark_alpha().step_3(),
-            text: neutral().dark().step_12(),
-            text_muted: neutral().dark().step_11(),
-            text_placeholder: neutral().dark().step_10(),
-            text_disabled: neutral().dark().step_9(),
-            text_accent: blue().dark().step_11(),
-            icon: neutral().dark().step_11(),
-            icon_muted: neutral().dark().step_10(),
-            icon_disabled: neutral().dark().step_9(),
-            icon_placeholder: neutral().dark().step_10(),
-            icon_accent: blue().dark().step_11(),
             terminal_background: neutral().dark().step_1(),
             terminal_ansi_background: neutral().dark().step_1(),
             terminal_foreground: white().dark().step_12(),

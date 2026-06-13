@@ -1,7 +1,6 @@
 use gpui::{App, Context};
 use settings::SettingsStore;
 use std::time::Duration;
-// use ui::App;
 
 pub struct BlinkManager {
     blink_interval: Duration,

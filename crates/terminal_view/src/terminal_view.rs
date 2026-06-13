@@ -7,50 +7,33 @@ mod terminal_path_like_target;
 pub mod terminal_scrollbar;
 pub mod tooltip;
 
-// use editor::{
-//     Editor, EditorSettings, actions::SelectAll, blink_manager::BlinkManager,
-//     ui_scrollbar_settings_from_raw,
-// };
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardEntry, Context, DismissEvent, Entity,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, IntoElement, KeyContext,
+    EventEmitter, FocusHandle, Focusable, IntoElement, KeyContext,
     KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render,
-    ScrollWheelEvent, Styled, Subscription, Task, TaskExt, WeakEntity, Window, actions, anchored,
-    deferred, div, prelude::*, px,
+    ScrollWheelEvent, Styled, Subscription, Task, Window, actions, anchored, deferred, div,
+    prelude::*, px,
 };
 use gpui_component::v_flex;
-// use project::{Project, ProjectEntryId, search::SearchQuery};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{
     Settings, SettingsStore, ShowScrollbar as SettingsShowScrollbar, TerminalBell, TerminalBlink,
-    WorkingDirectory,
 };
 use std::{
-    any::Any,
     cmp,
     ops::Range as StdRange,
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::Rc,
     sync::Arc,
     time::Duration,
 };
-// use task::TaskId;
 use terminal::{
-    Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, Point, Range,
-    ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    Search, SelectAll, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
-    terminal_settings::{CursorShape, TerminalSettings},
+    ActiveColors, Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, Point, Range, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, Search, SelectAll, ShowCharacterPalette, Terminal, TerminalBounds, ThemeColors, ToggleViMode, terminal_settings::{CursorShape, TerminalSettings}
 };
 use terminal_element::TerminalElement;
 use terminal_path_like_target::{hover_path_like_target, open_path_like_target};
 use terminal_scrollbar::TerminalScrollHandle;
-use theme::ActiveTheme;
-// use ui::{
-//     ContextMenu, Divider, ScrollAxes, Scrollbars, Tooltip, WithScrollbar,
-//     prelude::*,
-//     scrollbars::{self, ScrollbarVisibility},
-// };
 use util::ResultExt;
 
 use crate::blink_manager::BlinkManager;
@@ -62,19 +45,6 @@ use crate::search_bar::{
     SelectPreviousSearchMatch, TerminalSearchBar, TerminalSearchDirection, TerminalSearchOptions,
     TerminalSearchQuery, TerminalSearchable, ToggleTerminalSearch, ToggleTerminalSearchRegex,
 };
-// use workspace::{
-//     CloseActiveItem, DraggedSelection, DraggedTab, NewCenterTerminal, NewTerminal, Pane,
-//     ToolbarItemLocation, Workspace, WorkspaceId, delete_unloaded_items,
-//     item::{
-//         HighlightedText, Item, ItemEvent, SerializableItem, TabContentParams, TabTooltipContent,
-//     },
-//     register_serializable_item,
-//     searchable::{
-//         Direction, SearchEvent, SearchOptions, SearchToken, SearchableItem, SearchableItemHandle,
-//     },
-// };
-// use zed_actions::{agent::AddSelectionToThread, assistant::InlineAssist};
-
 struct ImeState {
     marked_text: String,
 }
@@ -119,6 +89,7 @@ actions!(
 pub struct RenameTerminal;
 
 pub fn init(cx: &mut App) {
+    cx.set_global(ThemeColors::dark());
     cx.bind_keys([
         gpui::KeyBinding::new("ctrl-f", ToggleTerminalSearch, None),
         gpui::KeyBinding::new(
@@ -1188,6 +1159,7 @@ impl Render for TerminalView {
         let terminal_view_handle = cx.entity();
 
         let focused = self.focus_handle.is_focused(window);
+        let terminal_background = cx.terminal_colors().terminal_background;
 
         v_flex()
             .id("terminal-view")
@@ -1320,7 +1292,7 @@ impl Render for TerminalView {
                     .flex_grow()
                     .min_h_0()
                     .w_full()
-                    .bg(cx.theme().colors().terminal_background)
+                    .bg(terminal_background)
                     .child(TerminalElement::new(
                         terminal_handle,
                         terminal_view_handle,
@@ -1336,7 +1308,7 @@ impl Render for TerminalView {
                                 .show_along(ScrollAxes::Vertical)
                                 .with_stable_track_along(
                                     ScrollAxes::Vertical,
-                                    cx.theme().colors().terminal_background,
+                                    terminal_background,
                                 )
                                 .tracked_scroll_handle(&self.scroll_handle),
                             window,

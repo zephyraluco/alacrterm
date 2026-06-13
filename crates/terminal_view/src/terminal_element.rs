@@ -14,8 +14,9 @@ use terminal::{
     Cell, Color, Content, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
     TerminalBounds, is_app_chosen_exact_color as terminal_is_app_chosen_exact_color,
     is_default_background_color, terminal_settings::TerminalSettings,
+    ThemeColors
 };
-use theme::{ActiveTheme, Theme};
+use terminal::ActiveColors;
 use util::ResultExt;
 
 use std::mem;
@@ -537,7 +538,7 @@ impl TerminalElement {
         cx: &App,
     ) -> (Vec<LayoutRect>, Vec<BatchedTextRun>) {
         let start_time = Instant::now();
-        let theme = cx.theme();
+        let colors = cx.terminal_colors();
 
         // Pre-allocate with estimated capacity to reduce reallocations
         let estimated_cells = grid.size_hint().0;
@@ -574,7 +575,7 @@ impl TerminalElement {
 
                 // Collect background regions (skip default background)
                 if !is_default_background_color(bg) {
-                    let color = convert_color(&bg, theme);
+                    let color = convert_color(&bg, colors);
                     let col = point.column as i32;
 
                     // Try to extend the last region if it's on the same line with the same color
@@ -612,7 +613,7 @@ impl TerminalElement {
                             cell,
                             fg,
                             bg,
-                            theme,
+                            colors,
                             text_style,
                             hyperlink,
                             minimum_contrast,
@@ -760,7 +761,7 @@ impl TerminalElement {
         cell: &Cell,
         fg: Color,
         bg: Color,
-        colors: &Theme,
+        colors: &ThemeColors,
         text_style: &TextStyle,
         hyperlink: Option<(HighlightStyle, &Range)>,
         minimum_contrast: f32,
@@ -1113,8 +1114,8 @@ impl Element for TerminalElement {
                     ),
                 };
 
-                let theme = cx.theme().clone();
-                let link_color = theme.colors().terminal_ansi_blue;
+                let colors = cx.terminal_colors().clone();
+                let link_color = colors.terminal_ansi_blue;
 
                 let link_style = HighlightStyle {
                     color: Some(link_color),
@@ -1138,16 +1139,15 @@ impl Element for TerminalElement {
                     font_size: font_size.into(),
                     font_style: FontStyle::Normal,
                     line_height: px(line_height).into(),
-                    background_color: Some(theme.colors().terminal_ansi_background),
+                    background_color: Some(colors.terminal_ansi_background),
                     white_space: WhiteSpace::Normal,
                     // These are going to be overridden per-cell
-                    color: theme.colors().terminal_foreground,
+                    color: colors.terminal_foreground,
                     ..Default::default()
                 };
 
                 let text_system = cx.text_system();
-                let player_color = theme.players().local();
-                let match_color = theme.colors().element_selection_background;
+                let match_color = colors.terminal_foreground;
                 let gutter;
                 let (dimensions, line_height_px) = {
                     let rem_size = window.rem_size();
@@ -1220,7 +1220,7 @@ impl Element for TerminalElement {
 
                 let search_matches = self.terminal.read(cx).matches.clone();
 
-                let background_color = theme.colors().terminal_background;
+                let background_color = colors.terminal_background;
 
                 let (last_hovered_word, hover_tooltip) =
                     self.terminal.update(cx, |terminal, cx| {
@@ -1277,8 +1277,10 @@ impl Element for TerminalElement {
                     relative_highlighted_ranges.push((search_match, match_color))
                 }
                 if let Some(selection) = selection {
-                    relative_highlighted_ranges
-                        .push((selection.point_range(), player_color.selection));
+                    relative_highlighted_ranges.push((
+                        selection.point_range(),
+                        colors.terminal_ansi_blue,
+                    ));
                 }
 
                 // then have that representation be converted to the appropriate highlight data structure
@@ -1363,7 +1365,7 @@ impl Element for TerminalElement {
                         &[TextRun {
                             len,
                             font: text_style.font(),
-                            color: theme.colors().terminal_ansi_background,
+                            color: colors.terminal_ansi_background,
                             ..Default::default()
                         }],
                         None,
@@ -1405,7 +1407,7 @@ impl Element for TerminalElement {
                             bounds.origin,
                             bounds.size.width,
                             bounds.size.height,
-                            theme.players().local().cursor,
+                            colors.terminal_ansi_bright_blue,
                             shape,
                             text,
                         )
@@ -1840,8 +1842,8 @@ fn to_highlighted_range_lines(
 }
 
 /// Converts a 2, 8, or 24 bit color ANSI color to the GPUI equivalent.
-pub fn convert_color(fg: &Color, theme: &Theme) -> Hsla {
-    let colors = theme.colors();
+pub fn convert_color(fg: &Color, colors: &ThemeColors) -> Hsla {
+
     match fg {
         // Named and theme defined colors
         Color::Named(color) => match color {
@@ -1863,7 +1865,7 @@ pub fn convert_color(fg: &Color, theme: &Theme) -> Hsla {
             NamedColor::BrightWhite => colors.terminal_ansi_bright_white,
             NamedColor::Foreground => colors.terminal_foreground,
             NamedColor::Background => colors.terminal_ansi_background,
-            NamedColor::Cursor => theme.players().local().cursor,
+            NamedColor::Cursor => colors.terminal_ansi_blue,
             NamedColor::DimBlack => colors.terminal_ansi_dim_black,
             NamedColor::DimRed => colors.terminal_ansi_dim_red,
             NamedColor::DimGreen => colors.terminal_ansi_dim_green,
@@ -1878,6 +1880,6 @@ pub fn convert_color(fg: &Color, theme: &Theme) -> Hsla {
         // 'True' colors
         Color::Spec(rgb) => terminal::rgba_color(rgb.r, rgb.g, rgb.b),
         // 8 bit, indexed colors
-        Color::Indexed(i) => terminal::get_color_at_index(*i as usize, theme),
+        Color::Indexed(i) => terminal::get_color_at_index(*i as usize, &ThemeColors::dark()),
     }
 }

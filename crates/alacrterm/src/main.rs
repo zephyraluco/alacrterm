@@ -118,7 +118,6 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
-        theme::init(theme::LoadThemes::JustBase, cx);
         terminal_view::init(cx);
         let mut store = SettingsStore::new().expect("failed to initialize settings store");
         let path = std::env::current_dir()

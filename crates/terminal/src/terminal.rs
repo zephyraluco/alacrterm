@@ -1,4 +1,5 @@
 mod mappings;
+mod default_colors;
 
 mod alacritty;
 mod pty_info;
@@ -26,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::collections::{HashMap, VecDeque};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
-use theme::{ActiveTheme, Theme};
+
 use urlencoding;
 use util::{paths::PathStyle, shell::Shell, truncate_and_trailoff};
 
@@ -43,6 +44,7 @@ use std::{
 use thiserror::Error;
 use vte::ansi::{Attr, Handler, Processor, StdSyncHandler};
 pub use vte::ansi::{Color, NamedColor, Rgb};
+pub use crate::default_colors::*;
 
 use gpui::{
     App, AppContext as _, BackgroundExecutor, Bounds, ClipboardItem, Context, EventEmitter, Hsla,
@@ -1381,7 +1383,7 @@ impl Terminal {
                 // followed by a color request sequence.
 
                 let color = self.term.lock().colors()[index]
-                    .unwrap_or_else(|| to_vte_rgb(get_color_at_index(index, cx.theme().as_ref())));
+                    .unwrap_or_else(|| to_vte_rgb(get_color_at_index(index, &ThemeColors::dark())));
                 self.write_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
@@ -2613,8 +2615,8 @@ fn content_index_for_mouse(pos: GpuiPoint<Pixels>, terminal_bounds: &TerminalBou
 /// Converts an 8 bit ANSI color to its GPUI equivalent.
 /// Accepts `usize` for compatibility with the `alacritty::Colors` interface,
 /// Other than that use case, should only be called with values in the `[0,255]` range
-pub fn get_color_at_index(index: usize, theme: &Theme) -> Hsla {
-    let colors = theme.colors();
+pub fn get_color_at_index(index: usize, colors: &ThemeColors) -> Hsla {
+    // let colors = theme.colors();
 
     match index {
         // 0-15 are the same as the named colors above
@@ -2654,7 +2656,7 @@ pub fn get_color_at_index(index: usize, theme: &Theme) -> Hsla {
         // See: https://github.com/alacritty/alacritty/blob/master/alacritty_terminal/src/term/color.rs
         256 => colors.terminal_foreground,
         257 => colors.terminal_background,
-        258 => theme.players().local().cursor,
+        258 => colors.terminal_ansi_blue,
         259 => colors.terminal_ansi_dim_black,
         260 => colors.terminal_ansi_dim_red,
         261 => colors.terminal_ansi_dim_green,

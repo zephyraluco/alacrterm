@@ -16,14 +16,12 @@ use gpui::{
     size,
 };
 use smallvec::SmallVec;
-use theme::ActiveTheme as _;
+use terminal::ActiveColors;
 use util::ResultExt;
 
 use std::ops::Range;
 
 use crate::scrollbar::scrollbars::{ScrollbarAutoHide, ScrollbarVisibility, ShowScrollbar};
-
-// use crate::scrollbars::{ScrollbarAutoHide, ScrollbarVisibility, ShowScrollbar};
 
 const SCROLLBAR_HIDE_DELAY_INTERVAL: Duration = Duration::from_secs(1);
 const SCROLLBAR_HIDE_DURATION: Duration = Duration::from_millis(400);
@@ -1312,7 +1310,7 @@ impl<T: ScrollableHandle> Element for ScrollbarElement<T> {
 
         let bounds = Bounds::new(self.origin + origin, size);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            let colors = cx.theme().colors();
+            let colors = cx.terminal_colors();
 
             let capture_phase;
 
@@ -1350,7 +1348,7 @@ impl<T: ScrollableHandle> Element for ScrollbarElement<T> {
                     let blend_color = track_config
                         .as_ref()
                         .map(|(_, colors)| colors.background)
-                        .unwrap_or(colors.surface_background);
+                        .unwrap_or(colors.terminal_ansi_background);
 
                     let blending_color = if hovered || reserved_space.needs_scroll_track() {
                         blend_color
@@ -1388,7 +1386,7 @@ impl<T: ScrollableHandle> Element for ScrollbarElement<T> {
                             .unwrap_or_default();
 
                         let border_color = if has_border {
-                            cx.theme().colors().border_variant.opacity(0.6)
+                            cx.terminal_colors().terminal_ansi_background.opacity(0.6)
                         } else {
                             Hsla::transparent_black()
                         };

@@ -5,7 +5,6 @@ members = [
     "crates/alacrterm",
     "crates/util",
     "crates/settings",
-    "crates/theme",
     "crates/terminal_view",
 ]
 
@@ -18,7 +17,6 @@ terminal = { path = "crates/terminal" }
 terminal_view = { path = "crates/terminal_view" }
 util = { path = "crates/util" }
 settings = { path = "crates/settings" }
-theme = { path = "crates/theme" }
 gpui = { git = "https://github.com/zed-industries/zed", features = [
     "test-support",
 ] }

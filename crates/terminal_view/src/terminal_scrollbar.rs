@@ -7,7 +7,6 @@ use gpui::{Bounds, Pixels, Point, point, px, size};
 use terminal::Terminal;
 
 use crate::scrollbar::ScrollableHandle;
-// use ui::{Pixels, ScrollableHandle, px};
 #[derive(Debug)]
 struct ScrollHandleState {
     line_height: Pixels,

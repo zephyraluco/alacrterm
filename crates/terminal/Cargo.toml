@@ -14,7 +14,6 @@ doctest = false
 async-channel.workspace = true
 alacritty_terminal.workspace = true
 anyhow.workspace = true
-# collections.workspace = true
 futures.workspace = true
 futures-lite.workspace = true
 gpui.workspace = true
@@ -22,13 +21,10 @@ itertools.workspace = true
 libc.workspace = true
 log.workspace = true
 regex.workspace = true
-# release_channel.workspace = true
 schemars.workspace = true
 serde.workspace = true
 settings.workspace = true
 sysinfo.workspace = true
-theme.workspace = true
-# theme_settings.workspace = true
 thiserror.workspace = true
 url.workspace = true
 util.workspace = true
@@ -43,5 +39,3 @@ windows.workspace = true
 [dev-dependencies]
 gpui = { workspace = true}
 rand.workspace = true
-# settings = { workspace = true}
-# util_macros.workspace = true
