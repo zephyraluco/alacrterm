@@ -1,0 +1,15 @@
+[package]
+name = "terminal_view"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+gpui = { workspace = true }
+itertools.workspace = true
+log.workspace = true
+terminal = { workspace = true }
+util = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
