@@ -4,7 +4,6 @@ mod alacritty;
 mod pty_info;
 
 use anyhow::{Result, bail};
-use futures_lite::future::yield_now;
 use log::trace;
 
 use futures::{
@@ -12,19 +11,16 @@ use futures::{
     channel::mpsc::{UnboundedReceiver, unbounded},
 };
 
-use itertools::Itertools as _;
 use mappings::mouse::{
     alt_scroll, grid_point, grid_point_and_side, mouse_button_report, mouse_moved_report,
     scroll_report,
 };
 
-use async_channel::Sender;
 use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
-use urlencoding;
 use util::{paths::PathStyle, shell::Shell, truncate_and_trailoff};
 
 use std::{
@@ -60,6 +56,21 @@ use crate::alacritty::{
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
+
+/// Cooperative yield to the async executor so other tasks (e.g. rendering)
+/// can make progress. Replaces `futures_lite::future::yield_now`.
+fn yield_now() -> impl std::future::Future<Output = ()> {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+}
 
 #[derive(Clone, Copy, Debug)]
 enum Scroll {
@@ -794,14 +805,26 @@ impl TerminalError {
             format!(
                 "{} {} ({})",
                 self.program.as_deref().unwrap_or("<system defined shell>"),
-                self.args.as_ref().into_iter().flatten().format(" "),
+                self.args
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 title_override
             )
         } else {
             format!(
                 "{} {}",
                 self.program.as_deref().unwrap_or("<system defined shell>"),
-                self.args.as_ref().into_iter().flatten().format(" ")
+                self.args
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
             )
         }
     }
@@ -969,7 +992,6 @@ impl TerminalBuilder {
                     pty_tx,
                     info: Arc::new(pty_info),
                 },
-                completion_tx: None,
                 term,
                 term_config: config,
                 output_processor: Processor::<StdSyncHandler>::new(),
@@ -1097,7 +1119,6 @@ struct TerminalPty {
 
 pub struct Terminal {
     terminal_pty: TerminalPty,
-    completion_tx: Option<Sender<Option<ExitStatus>>>,
     term: Arc<AlacrittyTermLock>,
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
@@ -1374,7 +1395,8 @@ impl Terminal {
 
         let target = if is_url {
             if let Some(path) = maybe_url_or_path.strip_prefix("file://") {
-                let decoded_path = urlencoding::decode(path)
+                let decoded_path = percent_encoding::percent_decode_str(path)
+                    .decode_utf8()
                     .map(|decoded| decoded.into_owned())
                     .unwrap_or(path.to_owned());
 
@@ -2269,9 +2291,6 @@ impl Terminal {
         exit_status: Option<ExitStatus>,
         cx: &mut Context<Terminal>,
     ) {
-        if let Some(tx) = &self.completion_tx {
-            tx.try_send(exit_status).ok();
-        }
         if let Some(e) = exit_status {
             self.child_exited = Some(e);
         }
