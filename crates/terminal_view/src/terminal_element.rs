@@ -66,7 +66,7 @@ pub struct TerminalRenderSettings {
 impl Default for TerminalRenderSettings {
     fn default() -> Self {
         Self {
-            font_family: "Consolas".into(),
+            font_family: "JetBrainsMono Nerd Font".into(),
             font_size: px(15.0),
             font_weight: FontWeight::default(),
             line_height_multiplier: 1.3,

@@ -491,7 +491,7 @@ mod tests {
         vte::ansi::Handler,
     };
     use regex::Regex;
-    use std::{cell::RefCell, ops::RangeInclusive, path::PathBuf, rc::Rc};
+    use std::{cell::RefCell, ops::RangeInclusive, path::PathBuf};
     use url::Url;
     use util::paths::PathWithPosition;
 
