@@ -16,8 +16,10 @@ terminal = { path = "crates/terminal" }
 terminal_view = { path = "crates/terminal_view" }
 util = { path = "crates/util" }
 
-gpui = { package = "gpui", git = "https://github.com/gpui-ce/gpui-ce" }
-gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", features = ["font-kit"] }
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed",features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+
 alacritty_terminal = "0.26"
 anyhow = "1.0"
 rust-embed = { version = "8", features = ["include-exclude"] }

@@ -278,6 +278,11 @@ impl TerminalView {
         }
     }
 
+    /// 当前窗口标题（终端标题或默认文本）。
+    pub fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
     /// 计算光标是否可见（闪烁控制）。
     fn should_show_cursor(&self, focused: bool, cx: &mut gpui::Context<Self>) -> bool {
         // 未聚焦：显示空心光标
