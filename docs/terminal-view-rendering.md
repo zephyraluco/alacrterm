@@ -1,7 +1,8 @@
 # terminal_view 渲染原理分析
 
-> 生成日期:2026-08-06
-> 分析对象:`terminal_view/`(从 Zed 直接拷贝的终端视图 crate,核心为 `src/terminal_element.rs`)
+> 生成日期:2026-08-06(更新于 2026-08-09)
+> 分析对象:`crates/terminal_view`(从 Zed 的 `terminal_view` crate 移植精简的独立视图 crate)
+> 文件结构:`src/lib.rs`(TerminalView 生命周期/输入)、`src/terminal_element.rs`(三阶段渲染管线核心)、`src/contrast.rs`(APCA 对比度)
 > 关联:`crates/terminal`(Terminal 实体)与 `docs/terminal-architecture.md`
 
 ---
@@ -37,6 +38,14 @@ graph LR
     PAINT --> GPU[gpui 后端<br/>DX11/Metal/GL]
 ```
 
+**模块职责划分**(相对 Zed 原版的精简):
+
+| 文件 | 职责 |
+|---|---|
+| `lib.rs` | `TerminalView` 实体:终端创建(`TerminalBuilder`)、事件订阅、键盘输入(`try_keystroke` / 粘贴)、右键粘贴、焦点管理、IME 状态、光标闪烁相位、`title()` 访问器 |
+| `terminal_element.rs` | `TerminalElement`:三阶段渲染管线、`layout_grid` 图元转换、光标/高亮/IME 绘制、鼠标监听注册、`TerminalInputHandler` |
+| `contrast.rs` | `ensure_minimum_contrast`(APCA 0.0.98G-4g,自 Zed `ui::utils` 移植,纯 gpui `Hsla` 算法) |
+
 ---
 
 ## 2. 坐标系与网格模型
@@ -44,10 +53,11 @@ graph LR
 ### 2.1 逻辑网格 → 像素
 
 ```rust
-// TerminalBounds 定义(crates/terminal)
+// TerminalBounds 定义(crates/terminal/src/terminal.rs)
+#[derive(Clone, Debug)]
 pub struct TerminalBounds {
-    pub cell_width: Pixels,   // 一个 cell 的宽
-    pub line_height: Pixels,  // 一行的高
+    pub line_height: Pixels,    // 一个 cell 的行高
+    pub cell_width: Pixels,     // 一个 cell 的宽
     pub bounds: Bounds<Pixels>, // 终端区域的原点与尺寸
 }
 ```
@@ -57,7 +67,7 @@ pub struct TerminalBounds {
 | `num_lines()` | `floor(height / line_height)`,行数(带 `next_up()` 容差防浮点丢行) |
 | `num_columns()` | `floor(width / cell_width)`,列数 |
 | `cell_width` | 用 `text_system.advance(font, size, 'm')` 测得,即字体中 `m` 的 advance 宽度 |
-| `line_height` | `font_size × line_height_multiplier`,Zed 默认乘数来自终端设置 |
+| `line_height` | `font_size × line_height_multiplier`,默认 `15px × 1.3` |
 
 ### 2.2 滚动与行号
 
@@ -77,23 +87,20 @@ display_offset = 2 时:
 
 ## 3. 三阶段渲染管线
 
-### 3.1 `request_layout` —— 决定高度
+### 3.1 `request_layout` —— 决定尺寸
 
 ```rust
 // TerminalElement::request_layout
-let height = match content_mode {
-    ContentMode::Inline { displayed_lines, .. } => {
-        // 内嵌模式(Agent 面板等):高度 = 显示行数 × 行高(向上取整到整设备像素)
-        px((displayed_lines as f32 * line_height * scale).ceil() / scale)
-    }
-    ContentMode::Scrollable => relative(1.), // 独立终端:撑满父容器
-};
+// 独立终端(本项目的唯一模式):高度/宽度均撑满父容器
+let height: Length = relative(1.).into();
+let layout_id = self.interactivity.request_layout(..., |mut style, window, cx| {
+    style.size.width = relative(1.).into();
+    style.size.height = height;
+    window.request_layout(style, None, cx)
+});
 ```
 
-`ContentMode` 由 `TerminalView::content_mode` 决定:
-
-- `Standalone`(独立终端)→ `Scrollable`
-- `Embedded`(内嵌)→ 内容不足 1000 行时 `Inline`,否则回退 `Scrollable`;未聚焦时截断到 `max_lines_when_unfocused`
+> **相对 Zed 原版的简化**:Zed 的 `ContentMode::Inline`(Agent 面板等内嵌场景,按 `displayed_lines` 计算高度)已被移除 —— 本项目 `TerminalView` 只有 `Standalone` 独立终端一种模式,`request_layout` 恒返回 `relative(1.)`。
 
 ### 3.2 `prepaint` —— 布局(核心)
 
@@ -110,35 +117,75 @@ graph TD
     G --> H[生成 LayoutState]
 ```
 
+#### 3.2.0 字体与 cell 测量(每次 prepaint 重新计算)
+
+```rust
+let text_style = TextStyle {
+    font_family: settings.font_family,      // 默认 "JetBrainsMono Nerd Font"
+    font_features: FontFeatures::disable_ligatures(),  // 终端禁止连字(避免粘连歧义)
+    font_size: font_size.into(),            // 默认 15px
+    line_height: px(f32::from(font_size) * settings.line_height_multiplier).into(), // 1.3
+    background_color: Some(colors.terminal_background),
+    color: colors.terminal_foreground,      // 每 cell 覆盖
+    ..Default::default()
+};
+
+let font_id = text_system.resolve_font(&text_style.font());
+let cell_width = text_system.advance(font_id, font_size, 'm').unwrap().width; // 'm' 的 advance
+let line_height_px = f32::from(font_size) * line_height_multiplier;
+```
+
 #### 3.2.1 像素对齐与底部锚定
 
 ```rust
-// Standalone 模式:行高与可用高度都按设备像素取整,
-// 余出的 padding 放在顶部(锚定底部),避免 resize 时整屏抖动
-let rows = (available_height_device_px / line_height_device_px) as usize;
-let snapped_height_device_px = rows * line_height_device_px;
-let padding_device_px = available_height_device_px - snapped_height_device_px;
+// 行高与可用高度都按设备像素取整,余出的 padding 放在顶部(锚定底部),
+// 避免 resize 时整屏抖动(行数是整数,高度必须落在行边界上)
+let scale_factor = window.scale_factor();
+let line_height_device_px = (f32::from(line_height_px) * scale_factor).round().max(1.0) as i32;
+let available_height_device_px = (f32::from(available_height) * scale_factor).floor().max(0.0) as i32;
+
+let rows = ((available_height_device_px / line_height_device_px) as usize).max(1);
+let snapped_height_device_px = (rows as i32) * line_height_device_px;
+let padding_device_px = (available_height_device_px - snapped_height_device_px).max(0);
 if should_anchor_to_bottom { origin.y += padding; }
+
+// 原点也对齐到设备像素,避免缩放/滚动时字形抖动
+origin.x = snap_px(origin.x);
+origin.y = snap_px(origin.y);
 ```
 
-`should_anchor_to_bottom`:ALT_SCREEN 或 (已在底部 且 底部行有内容) 时锚定底部 —— 终端应用(如 vim、top)通常在底部输出。
+`should_anchor_to_bottom` 计算(读取 `Content` 快照):
+
+```rust
+let should_anchor_to_bottom = {
+    let content = self.terminal.read(cx).last_content();
+    content.mode.contains(Modes::ALT_SCREEN) || content.scrolled_to_bottom
+};
+```
+
+即:**ALT_SCREEN**(vim/top 等全屏 TUI,内容通常从底部向上输出)或**已滚动到底部**时锚定底部 —— 保证新输出紧贴视口底部、不跳动。
 
 #### 3.2.2 视口裁剪(性能关键)
 
 ```rust
 // 终端 bounds 与当前 content_mask(所有父级裁剪后的可见区)求交
+let content_bounds = dimensions.bounds;
 let visible_bounds = window.content_mask().bounds;
 let intersection = visible_bounds.intersect(&content_bounds);
 
-// 完全不可见 → 跳过所有 cell 处理
-// 完全可见   → 快路径,直接流式处理全部 cell
-// 部分可见   → 按屏幕行号 skip/take,只处理可见行
+// 三种路径:
+// 1. 无交集(高或宽 ≤ 0)→ 直接返回空图元,跳过全部 cell 处理
+// 2. 完全可见(intersection == content_bounds)→ 快路径,流式处理全部 cell
+// 3. 部分可见 → 按屏幕行号 skip/take,只处理可见行:
+let rows_above_viewport =
+    f32::from((intersection.top() - content_bounds.top()).max(px(0.)) / line_height_px) as usize;
+let visible_row_count = f32::from((intersection.size.height / line_height_px).ceil()) as usize + 1;
 cells.iter().chunk_by(|c| c.point.line)
     .into_iter().skip(rows_above_viewport).take(visible_row_count)
     .flat_map(|(_, line_cells)| line_cells)
 ```
 
-**注意**:裁剪按"枚举的行组索引(屏幕位置)"过滤,而不是 cell 内部行号 —— 因为滚动时行号可能是负数。
+**注意**:裁剪按"枚举的行组索引(屏幕位置)"过滤,而不是 cell 内部行号 —— 因为滚动时行号可能是负数;部分可见时还需把 `rows_above_viewport` 作为 `start_line_offset` 传给 `layout_grid` 以对齐显示行号。
 
 ### 3.3 `paint` —— 绘制
 
@@ -156,25 +203,31 @@ graph LR
 
 另外 `paint` 阶段还负责:
 
-- 注册 `InputHandler`(`window.handle_input`,**只能在 paint 阶段调用**)
-- 注册鼠标事件监听(`register_mouse_listeners`:点击/拖拽/中键/滚轮/鼠标模式)
-- 设置光标样式(悬停链接时 `PointingHand`,否则 `IBeam`)
-- 监听修饰键变化(Alt 悬停刷新超链接)
+- **内容遮罩**:`window.with_content_mask(Some(ContentMask { bounds }))` 包裹全部绘制,限制绘制区
+- 注册 `InputHandler`(`window.handle_input`,**只能在 paint 阶段调用**,debug 断言 `DrawPhase::Paint`)
+- 注册鼠标事件监听(`register_mouse_listeners`:左/中/右键、拖拽、滚轮、鼠标模式附加处理)
+- 设置光标样式(悬停链接且按 Alt 时 `PointingHand`,否则 `IBeam`)
+- 监听修饰键变化(`window.on_key_event` 在 `DispatchPhase::Bubble` 时调 `try_modifiers_change` 刷新超链接悬停状态)
+- **IME 组合文本**:绘制前先 `paint_quad` 用终端背景色覆盖底层文本,再绘制带下划线的组合文本;有 IME 文本时**跳过光标绘制**
+- **光标绘制条件**:`cursor_visible`(闪烁相位)&& 无 IME 文本 && 光标形状非 Hidden
 
 ---
 
 ## 4. `layout_grid` —— 网格→图元转换(渲染心脏)
 
 ```rust
-fn layout_grid<T: TerminalLayoutCell>(
-    grid: impl Iterator<Item = T>,
+fn layout_grid(
+    grid: impl Iterator<Item = &'a IndexedCell>,
     start_line_offset: i32,
     text_style: &TextStyle,
     hyperlink: Option<(HighlightStyle, &Range)>,
     minimum_contrast: f32,
+    colors: &TerminalColors,
     cx: &App,
 ) -> (Vec<LayoutRect>, Vec<BatchedTextRun>, Vec<BlockElementLayoutRect>)
 ```
+
+> **性能细节**:按 `grid.size_hint()` 预分配容量 —— 预估 `~10 cell/run`、`~20 cell/背景区域`,减少重分配;按行 `chunk_by(point.line)` 分组遍历,行边界处 flush 当前批。
 
 ### 4.1 第一遍:遍历 cell,积累图元
 
@@ -338,24 +391,41 @@ let cursor_width = if cursor_char.is_whitespace() {
 
 ### 5.2 光标形状
 
-`CursorShape`(Block / Underline / Bar / HollowBlock / Hidden)映射到 gpui 光标类型:
+终端 `CursorShape`(Block / Underline / Bar / HollowBlock / Hidden)在渲染层映射到本地 `CursorKind` 枚举(`terminal_element.rs`,替代 Zed 的 `editor::CursorLayout`):
+
+```rust
+enum CursorKind { Block, Underline, Bar, Hollow }   // 本地定义
+
+// 绘制实现(paint_quad 手绘):
+// Block      → 实心块 + 光标内字符(用终端背景色整形,Block 聚焦时)
+// Underline  → 底部 2px 横线
+// Bar        → 左侧 2px 竖线
+// Hollow     → 1px 空心框(四条边分别 paint_quad)
+```
 
 | 终端形状 | 聚焦 | 未聚焦 |
 |---|---|---|
-| Block | 实心块 + 字符 | Hollow(空心框) |
-| Underline | 下划线 | Hollow |
-| Bar | 竖线 | Hollow |
-| HollowBlock | Hollow | Hollow |
+| Block | `Block`(实心块 + 字符) | `Hollow`(空心框) |
+| Underline | `Underline` | `Hollow` |
+| Bar | `Bar` | `Hollow` |
+| HollowBlock | `Hollow` | `Hollow` |
 | Hidden | 不绘制 | 不绘制 |
 
-光标矩形**始终布局**(IME 需要它定位候选窗),但 `cursor_visible`(闪烁控制)为 false 时不绘制。
+光标矩形**始终布局**(IME 需要它定位候选窗,`cursor_width.ceil()` 防宽字符溢出),但 `cursor_visible`(闪烁控制)为 false 时不绘制。
 
 ### 5.3 光标闪烁
 
-`BlinkManager`(editor crate)+ 终端 `BlinkChanged` 事件:
+**本地实现**(替代 Zed 的 `editor::BlinkManager`):
 
-- 设置 `blinking`:Off → 常亮;On → 按 500ms 周期闪烁;TerminalControlled → 由终端 OSC 序列控制
-- 焦点进入/键盘输入时暂停闪烁(恢复常亮),`focus_out` 时禁用闪烁并切换空心光标
+- `TerminalView::new` 中 `cx.spawn` 一个后台循环:`background_executor().timer(500ms).await` 后翻转 `cursor_phase` 布尔并 `cx.notify()`
+- `TerminalView::should_show_cursor` 决定可见性:
+  1. 未聚焦 → 恒显示(空心)
+  2. ALT_SCREEN(vim 等全屏 TUI)→ 恒显示(避免闪烁干扰)
+  3. `settings.cursor_blinks == false` → 恒显示
+  4. 否则按 `cursor_phase` 相位闪烁
+- 焦点进入(`focus_in`)时重设光标形状为设置值并通知应用(FOCUS_IN_OUT);焦点离开(`focus_out`)时禁用闪烁并切换空心光标
+
+> 终端 `BlinkChanged` 事件(OSC 控制闪烁)在本实现中未接入 —— 闪烁完全由本地 500ms 定时器驱动。
 
 ---
 
@@ -397,42 +467,52 @@ if let Some(selection) = selection {
 ### 7.1 文本输入(InputHandler)
 
 ```rust
-// TerminalInputHandler(paint 阶段注册)
+// TerminalInputHandler { terminal_view, cursor_bounds }(paint 阶段经 window.handle_input 注册)
 impl InputHandler for TerminalInputHandler {
-    fn selected_text_range(...)   // IME 定位:始终返回 0..0
-    fn marked_text_range(...)     // IME 组合文本范围
-    fn replace_text_in_range(...) // 普通字符 → view.commit_text → terminal.input
-    fn replace_and_mark_text_in_range(...) // IME 组合 → set_marked_text
-    fn bounds_for_range(...)      // IME 候选窗锚点:cursor_bounds + 列偏移
+    fn selected_text_range(...)   // IME 定位:恒返回 Some(UTF16Selection { range: 0..0, reversed: false })
+                                  // ALT_SCREEN(vim 等)下也返回有效选择,保证候选窗能定位
+    fn marked_text_range(...)     // 读 TerminalView::marked_text_range(组合文本 UTF-16 长度)
+    fn text_for_range(...)        // None(终端没有可读文本)
+    fn replace_text_in_range(...) // 普通字符 → view.clear_marked_text + view.commit_text → terminal.input
+    fn replace_and_mark_text_in_range(...) // IME 组合 → view.set_marked_text(更新 ime_state 并 notify)
+    fn unmark_text(...)           // view.clear_marked_text
+    fn bounds_for_range(...)      // IME 候选窗锚点:cursor_bounds + range.start × cell_width(来自 terminal_bounds)
+    fn character_index_for_point(...) // None
+    fn apple_press_and_hold_enabled() // false
 }
 ```
 
-`cursor_bounds`(IME 光标矩形)在 prepaint 中计算,`bounds_for_range` 用它 + `range.start * cell_width` 定位候选窗。
+`cursor_bounds`(IME 光标矩形)在 prepaint 中计算(`CursorLayout` 的位置与尺寸),`bounds_for_range` 用它 + `range_utf16.start × cell_width` 水平偏移定位候选窗。
 
 ### 7.2 特殊键
 
-`TerminalView::key_down` → `try_keystroke`(箭头、回车、Ctrl 组合等)→ `to_esc_str` 转义序列 → `terminal.input`。
+`TerminalView::on_key_down` → Ctrl+Shift+V 直接读剪贴板 `paste`;其余按键 → `terminal.try_keystroke`(箭头、回车、Ctrl 组合等)→ `to_esc_str` 转义序列 → `terminal.input`(入队 Scroll(Bottom)+ SetSelection(None) 后 `write_to_pty`)。
 
 ### 7.3 鼠标
 
-- 普通模式:左键选择(点击定位、拖拽扩展)、右键菜单、滚轮滚动
-- 鼠标模式(应用开启 SGR/UTF8 鼠标协议):事件编码为转义序列写回 PTY
-- Alt 悬停:刷新超链接检测,命中显示 tooltip
+- 普通模式:左键选择(点击定位、拖拽扩展、右键粘贴、滚轮滚动)
+- 鼠标模式(应用开启 SGR/UTF8 鼠标协议):事件编码为转义序列写回 PTY;`register_mouse_listeners` 仅在 `mode.intersects(Modes::MOUSE_MODE)` 时注册中/右键的按下与抬起处理
+- Alt 悬停:节流刷新超链接检测(`FindHyperlink`),命中时 `paint` 阶段设置 `PointingHand` 光标样式
 
 ---
 
 ## 8. 滚动
 
-```rust
-// TerminalScrollHandle(ui::ScrollableHandle 实现)
-struct ScrollHandleState {
-    line_height, total_lines, viewport_lines, display_offset,
-}
-```
+滚轮事件经 `register_mouse_listeners` 的 `on_scroll_wheel` 回调 → `TerminalView::scroll_wheel` → `Terminal::scroll_wheel(event, 1.0)`。
 
-- `max_offset` = (总行数 - 视口行数) × 行高
-- `offset` = -(max - display_offset) × 行高(负值,向上滚)
-- `set_offset` → 换算为 `future_display_offset`,`TerminalView::render` 时应用为 `scroll_up_by/down_by`
+`Terminal::scroll_wheel` 的优先级分派:
+
+1. **鼠标协议模式**(应用开启)→ 计算滚动行数后编码为 `scroll_report` 写回 PTY
+2. **ALT_SCREEN + ALTERNATE_SCROLL**(vim/tmux 等)→ `alt_scroll` 编码为方向键/PageUp/PageDown 转义写回 PTY
+3. 否则 → 入队 `InternalEvent::Scroll(Scroll::Delta(n))` 滚动主屏幕历史
+
+滚动行数由 `determine_scroll_lines` 按 `touch_phase` 计算:
+
+- `Started` → 清零 `scroll_px` 累计值,返回 `None`
+- `Moved` → 累加 `delta.pixel_delta × multiplier`,`(scroll_px / line_height) as i32` 前后差值即为滚动行数;每次滚动后 `scroll_px %= terminal_bounds.height()`(触到边界即回绕,方向切换响应快)
+- `Ended | Cancelled` → 返回 `None`(不滚动)
+
+> 注:Zed 原版的 `TerminalScrollHandle`(`ui::ScrollableHandle` 实现)已随 UI 层裁剪移除 —— 本项目滚动完全由鼠标滚轮驱动,不提供滚动条 UI。
 
 ---
 
@@ -440,13 +520,15 @@ struct ScrollHandleState {
 
 | Zed 依赖 | 用途 | 精简替代方案 |
 |---|---|---|
-| `editor::{CursorLayout, HighlightedRange, BlinkManager}` | 光标/高亮/闪烁绘制 | 自实现:`paint_quad` 绘制光标与高亮矩形,`BackgroundExecutor::timer` 闪烁 |
-| `ui::utils::ensure_minimum_contrast` | APCA 对比度 | 移植 `apca_contrast.rs`(纯 gpui `Hsla` 算法,约 200 行) |
+| `editor::{CursorLayout, HighlightedRange, BlinkManager}` | 光标/高亮/闪烁绘制 | 自实现:`CursorKind` + `CursorLayout`(paint_quad 手绘)、`HighlightedRangeLine`、`cursor_phase` + 500ms 定时器 |
+| `ui::utils::ensure_minimum_contrast` | APCA 对比度 | 移植 `contrast.rs`(纯 gpui `Hsla` 算法) |
 | `theme::Theme` | ANSI 颜色表 | `terminal::TerminalColors`(本地已定义 XTerm 默认) |
-| `theme_settings::ThemeSettings` / `settings` | 字体/行高/对比度设置 | 本地 `TerminalRenderSettings` 结构 + 默认值 |
+| `theme_settings::ThemeSettings` / `settings` | 字体/行高/对比度设置 | 本地 `TerminalRenderSettings` 结构 + 默认值(JetBrainsMono Nerd Font / 15px / 1.3 / 对比度 45) |
 | `workspace::Workspace` | 路径/URL hover tooltip、上下文菜单 | 删除(独立终端不需要) |
 | `terminal_panel` / `persistence` | 面板管理、会话持久化 | 删除 |
 | `project` / `task` | 任务、远程 | 删除 |
+| `ContentMode::Inline` / `ScrollableHandle` | 内嵌布局 / 滚动条 UI | 删除:仅保留 `Scrollable` 撑满父容器;滚轮直接驱动滚动 |
+| `search`(编辑器搜索 UI) | 搜索高亮 | 保留 `matches` 数据结构与高亮渲染,搜索 UI 删除 |
 
 ---
 
@@ -460,14 +542,28 @@ sequenceDiagram
     participant W as gpui Window
 
     Note over T,W: 每帧
-    T-->>V: Event::Wakeup → cx.notify()
-    V->>E: render() 构建元素
-    W->>E: request_layout(计算高度)
+    T-->>V: Event::Wakeup / SelectionsChanged → cx.notify()
+    V->>E: render() 构建元素(focus 兜底 + set_window_title)
+    W->>E: request_layout(relative(1.) 撑满)
     W->>E: prepaint(bounds)
-    E->>E: 计算字体/行高/cell宽 → TerminalBounds
-    E->>T: set_size + sync(处理内部事件,刷新 Content)
-    E->>E: 视口裁剪 → layout_grid
+    E->>E: 字体/行高/cell宽测量 + 设备像素对齐 + 底部锚定
+    E->>T: set_size + sync(处理 InternalEvent,刷新 Content 快照)
+    E->>E: 视口裁剪(content_mask 求交)→ layout_grid
     E->>E: 布局光标/IME 矩形 → LayoutState
     W->>E: paint(bounds, LayoutState)
-    E->>W: 背景 → 矩形 → 高亮 → 文本 → 块字符 → IME → 光标
+    E->>W: content_mask → 背景 → 背景矩形 → 高亮 → 文本 → 块字符 → IME → 光标
+    Note over E,W: paint 中注册 InputHandler、鼠标监听、光标样式
 ```
+
+## 附录:渲染关键常量
+
+| 常量 | 值 | 位置 |
+|---|---|---|
+| 滚动历史默认/上限 | 10_000 / 100_000 行 | `terminal.rs` |
+| 事件批处理窗口 | 4ms(上限 100 条) | `terminal.rs subscribe` |
+| 光标闪烁周期 | 500ms | `lib.rs CURSOR_BLINK_INTERVAL` |
+| 行高乘数 | 1.3 | `TerminalRenderSettings::default` |
+| 字号 | 15px | `TerminalRenderSettings::default` |
+| 默认字体 | JetBrainsMono Nerd Font | `TerminalRenderSettings::default` |
+| APCA 最小对比度 | 45.0(0 关闭) | `TerminalRenderSettings::default` |
+| 块字符 subcell 网格 | 8 列 × 24 行 | `terminal_element.rs` |
