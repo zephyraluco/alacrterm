@@ -308,7 +308,13 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        if !self.focus_handle.is_focused(window) {
+        // 仅当窗口中没有任何元素持有焦点时（应用启动 / 焦点真空）才接管焦点。
+        // 不能无条件抢占：设置弹窗打开期间，对话框与其中的输入框持有焦点，而终端
+        // 会随 PTY Wakeup / 光标闪烁不断重渲染，若在此抢焦点会导致：
+        //   1. 弹窗内输入框无法保持焦点、无法输入；
+        //   2. 弹窗右上角关闭按钮（通过焦点路径分发 Cancel 动作）点击无效。
+        // 点击终端区域时 TerminalElement 的左键 on_mouse_down 会自行聚焦。
+        if window.focused(cx).is_none() {
             window.focus(&self.focus_handle, cx);
         }
 

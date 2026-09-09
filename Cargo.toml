@@ -16,9 +16,9 @@ terminal = { path = "crates/terminal" }
 terminal_view = { path = "crates/terminal_view" }
 util = { path = "crates/util" }
 
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed",features = ["font-kit"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+# alacrterm 使用 zed git 上的 gpui；这里换成 gpui-kit 同款的 gpui-pre（lib 名即 gpui，代码零改动）
+gpui = { version = "0.3", package = "gpui-pre" }
+gpui-kit = { version = "0.6", default-features = false, features = ["component"] }
 
 alacritty_terminal = "0.26"
 anyhow = "1.0"
