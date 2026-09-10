@@ -4,34 +4,47 @@
 //! - `crates/terminal`      —— 终端仿真核心（alacritty_terminal 0.26 + PTY + 事件循环）
 //! - `crates/terminal_view` —— 终端视图（自定义 gpui Element 逐 cell 渲染）
 //! - `crates/util`          —— Shell 探测 / 路径工具（来自 Zed）
-//! - 本文件                 —— gpui-kit 应用外壳：
-//!   自绘标题栏（TitleBar）+ 活动栏（直到底部）+ 侧边栏（Sidebar，多终端会话切换）+ 终端，
-//!   底部为两段式状态栏（左段属于侧边栏、右段属于终端），
-//!   活动栏底部固定设置图标，点击弹出设置对话框（Dialog）。
+//!
+//! 应用外壳按「左右两个容器」拆分为独立文件：
+//! - [`sidebar_panel`]  —— 左侧容器：活动栏 + 侧边栏 + 侧边栏状态栏
+//! - [`terminal_panel`] —— 右侧容器：标签栏 + 终端 + 终端状态栏
+//! - [`connection_dialog`] —— 「新建终端」建连对话框（IP / 端口 / 名称 / 用户名 / 密码）
+//! - [`settings_window`]  —— 独立的设置窗口（非对话框）
+//! - [`status_metrics`]   —— 状态栏指标采样（连接状态 / CPU / 内存 / 网络）
+//!
+//! 本文件只保留程序入口、根视图 [`AppRoot`]（共享状态 + 布局装配 + 设置弹窗）。
+//! 两个容器之间是可拖拽的分隔条（官方 resizable 面板组，左右拖动调整侧边栏宽度），
+//! 标题栏（TitleBar）与弹窗层也在根视图中装配。
+//!
+//! 布局装配遵循两条规则：侧边栏折叠、或**终端标签页全部关闭**时，
+//! 对应的容器与分隔条一并消失（终端容器关闭后仅剩左侧容器与空白背景，
+//! 可随时从侧边栏底部「新建终端」重新打开）。
 
 mod assets;
+mod connection_dialog;
+mod settings_window;
+mod sidebar_panel;
+mod status_metrics;
+mod terminal_panel;
 
-use assets::IconName;
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement as _, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Window,
-    WindowBounds, WindowOptions, div, point, px, size,
+    App, AppContext as _, AsyncApp, Bounds, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, WeakEntity, Window,
+    WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use gpui_kit::{
     QuitMode,
     component::{
-        ActiveTheme as _, Icon, Root, Selectable as _, Sizable as _, Theme, ThemeMode, TitleBar,
-        WindowExt as _,
-        button::{Button, ButtonVariants as _},
-        h_flex,
-        setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-        status_bar::StatusBar, tab::{Tab, TabBar}, v_flex,
-        sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem, SidebarFooter},
+        ActiveTheme as _, Root, Theme, ThemeMode, TitleBar, h_flex,
+        resizable::{ResizableState, h_resizable, resizable_panel},
+        v_flex,
     },
-    prelude::FluentBuilder as _,
 };
 use terminal_view::TerminalView;
 use util::shell::Shell;
+
+use sidebar_panel::{SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SidebarView};
+use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
 
 fn main() {
     gpui_kit::application()
@@ -62,29 +75,95 @@ fn main() {
         });
 }
 
-/// 侧边栏视图（对应活动栏图标）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SidebarView {
-    /// 终端会话列表。
-    Sessions,
-    /// 关于。
-    About,
+/// 会话的连接目标：决定状态栏「连接状态」一栏显示什么。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionTarget {
+    /// 本地系统 shell。
+    Local,
+    /// 通过 ssh 连接的远端主机。
+    Ssh {
+        user: String,
+        host: String,
+        port: String,
+    },
 }
 
-/// 应用根视图：gpui-kit 自绘标题栏 + 活动栏 + 侧边栏 + 终端 + 底部状态栏。
+impl SessionTarget {
+    /// 状态栏显示用的简短描述。
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Local => "本地".to_string(),
+            Self::Ssh { user, host, port } => {
+                if user.is_empty() {
+                    format!("SSH {host}:{port}")
+                } else {
+                    format!("SSH {user}@{host}:{port}")
+                }
+            }
+        }
+    }
+}
+
+/// 新建会话所需的参数（显示名 + 要启动的 shell + 连接目标）。
+pub(crate) struct SessionRequest {
+    /// 用户填写的显示名；`None` 表示回退到终端自身标题。
+    pub(crate) name: Option<SharedString>,
+    /// 要启动的 shell（本地系统 shell，或 `ssh` 等外部命令）。
+    pub(crate) shell: Shell,
+    /// 连接目标（用于状态栏展示）。
+    pub(crate) target: SessionTarget,
+}
+
+/// 一个终端会话：终端视图 + 显示名 + 连接目标。
+///
+/// 之所以不直接用 `TerminalView::title()`：它的标题来自终端通过 OSC 上报的内容，
+/// 而对话框里的「名称」是用户命名的连接名，需要优先展示（标签页 / 侧边栏 / 状态栏）。
+pub(crate) struct Session {
+    pub(crate) view: Entity<TerminalView>,
+    /// 用户填写的名称；`None` 表示未填写，回退到终端自身标题。
+    pub(crate) name: Option<SharedString>,
+    /// 连接目标，供状态栏显示连接状态。
+    pub(crate) target: SessionTarget,
+}
+
+impl Session {
+    /// 会话显示名：优先用户命名，否则用终端标题（无标题时为「终端」）。
+    pub(crate) fn title(&self, cx: &App) -> SharedString {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.view.read(cx).title())
+    }
+}
+
+/// 应用根视图：装配标题栏 + 左侧容器 + 右侧容器 + 弹窗层。
+///
+/// 只保存两个容器共享的状态；容器各自的渲染与逻辑见
+/// [`crate::sidebar_panel`] / [`crate::terminal_panel`]。
 struct AppRoot {
     /// 所有终端会话（保持运行，切换仅切换显示）。
-    terminals: Vec<Entity<TerminalView>>,
+    terminals: Vec<Session>,
     /// 当前显示的终端下标。
     active: usize,
-    /// 侧边栏是否可见（点击活动栏当前视图图标可隐藏/显示）。
+    /// 侧边栏是否可见（点击活动栏当前视图图标可隐藏 / 显示）。
     sidebar_visible: bool,
     /// 侧边栏当前视图（由活动栏图标切换）。
     sidebar_view: SidebarView,
-    /// 状态栏左侧展示的 shell 程序名（如 pwsh.exe）。
+    /// 侧边栏状态栏展示的 shell 程序名（如 pwsh.exe）。
     shell_name: SharedString,
-    /// 标签栏滚动句柄：跟踪 tabs 横向滚动，键盘切换时把选中标签滚入可视区。
+    /// 标签栏滚动句柄：跟踪 tabs 横向滚动，激活会话时把选中标签滚入可视区。
     tab_scroll_handle: ScrollHandle,
+    /// 侧边栏 / 终端分栏面板组的共享状态。
+    ///
+    /// 实体由根视图持有（而非交给组件内部的 keyed state），这样侧边栏折叠再展开、
+    /// 乃至窗口重绘后，用户拖出来的宽度都不会丢失。
+    resize_state: Entity<ResizableState>,
+    /// 设置窗口的句柄（见 [`AppRoot::open_settings_window`]）。
+    ///
+    /// 用于「重复点击设置图标只激活已有窗口」；窗口被关闭后该句柄会失效，
+    /// 下一次点击会重新开窗并覆盖它。
+    settings_window: Option<WindowHandle<Root>>,
+    /// 状态栏指标采样器（CPU / 内存 / 网络），由后台定时任务驱动。
+    pub(crate) monitor: SystemMonitor,
 }
 
 impl AppRoot {
@@ -102,276 +181,84 @@ impl AppRoot {
             sidebar_view: SidebarView::Sessions,
             shell_name: shell_name.into(),
             tab_scroll_handle: ScrollHandle::new(),
+            resize_state: cx.new(|_| ResizableState::default()),
+            settings_window: None,
+            monitor: SystemMonitor::new(),
         };
         this.spawn_terminal(window, cx);
+        // 启动状态栏指标采样（CPU / 内存 / 网络），窗口存活期间持续运行。
+        Self::start_metrics_sampling(cx);
         this
     }
 
-    /// 活动栏图标点击：切换视图；再次点击当前视图图标则隐藏/显示侧边栏。
-    fn set_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
-        if self.sidebar_view == view {
-            self.sidebar_visible = !self.sidebar_visible;
-        } else {
-            self.sidebar_view = view;
-            self.sidebar_visible = true;
-        }
-        cx.notify();
+    /// 启动状态栏指标采样任务：每 [`SAMPLE_INTERVAL`](status_metrics::SAMPLE_INTERVAL)
+    /// 采样一次并刷新界面，根视图销毁后自动结束。
+    fn start_metrics_sampling(cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                cx.background_executor().timer(SAMPLE_INTERVAL).await;
+                // update 返回 Err 说明根视图已销毁，退出循环即可。
+                if this
+                    .update(cx, |this, cx| this.sample_metrics(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
-    /// 活动栏底部设置图标点击：弹出设置对话框（不改变侧边栏的显隐状态）。
+    /// 采样当前会话的进程指标并刷新界面。
     ///
-    /// 设置界面参考官方组件：https://gpui-kit.com/zh-CN/component/settings/
-    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.open_dialog(cx, |dialog, _, _| {
-            dialog
-                .title("设置")
-                .w(px(720.))
-                .child(
-                    // Settings 渲染为 h_resizable，需要外部给定高度（参考官方 story 的 h(420)）。
-                    div().h(px(440.)).child(
-                        Settings::new("app-settings").page(
-                            SettingPage::new("外观")
-                                .icon(Icon::new(IconName::Moon))
-                                .default_open(true)
-                                .group(
-                                    SettingGroup::new().item(
-                                        SettingItem::new(
-                                            "深色主题",
-                                            SettingField::switch(
-                                                // 以全局 Theme 为唯一状态来源。
-                                                |cx: &App| cx.theme().mode.is_dark(),
-                                                |val: bool, cx: &mut App| {
-                                                    let mode = if val {
-                                                        ThemeMode::Dark
-                                                    } else {
-                                                        ThemeMode::Light
-                                                    };
-                                                    Theme::change(mode, None, cx);
-                                                    cx.refresh_windows();
-                                                },
-                                            ),
-                                        )
-                                        .description(
-                                            "切换深色 / 浅色界面主题，与终端背景保持一致。",
-                                        ),
-                                    ),
-                                ),
-                        ),
-                    ),
-                )
-        });
-    }
-
-    /// 新建一个终端会话（PTY 在后台启动），并订阅其事件用于刷新界面。
-    fn spawn_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| TerminalView::new(None, Shell::System, window, cx));
-        cx.observe(&view, |_, _, cx| cx.notify()).detach();
-        self.terminals.push(view);
-        self.set_active_tab(self.terminals.len() - 1, cx);
-    }
-
-    /// 激活指定的终端会话标签，并把标签栏滑动到该标签。
-    ///
-    /// `ScrollHandle::scroll_to_item` 在下一帧 prepaint 时生效：仅做最小滚动，
-    /// 让选中的标签进入可视范围（标签已在视野内时不动）。
-    /// 所有激活路径（标签点击 / 侧边栏会话项 / 新建会话）都应经由本方法。
-    fn set_active_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.active = index.min(self.terminals.len().saturating_sub(1));
-        self.tab_scroll_handle.scroll_to_item(self.active);
-        cx.notify();
-    }
-
-    /// 关闭一个终端会话（标签页 × 按钮，参考官方 Dynamic Tabs / Closeable Tabs 示例）。
-    /// 至少保留一个会话；实体移除后 `Terminal` 的 Drop 会关闭 PTY 并终止子进程。
-    fn close_terminal(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.terminals.len() <= 1 {
-            return;
-        }
-        self.terminals.remove(index);
-        // 选中下标调整逻辑与官方 close_tab 示例一致。
-        if self.active >= index && self.active > 0 {
-            self.active -= 1;
-        }
-        if self.active >= self.terminals.len() {
-            self.active = self.terminals.len() - 1;
-        }
-        self.tab_scroll_handle.scroll_to_item(self.active);
+    /// 这里用 `this.update`（不需要窗口）而不是 `update_in`：定时任务运行在
+    /// 窗口更新之外，无需借用窗口。
+    pub(crate) fn sample_metrics(&mut self, cx: &mut Context<Self>) {
+        // 无会话（标签页全部关闭）时传 None，CPU / 内存显示为未知。
+        let pid = self
+            .terminals
+            .get(self.active)
+            .and_then(|session| session.view.read(cx).pid(cx));
+        self.monitor.sample(pid);
         cx.notify();
     }
 }
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 侧边栏菜单项：每个终端会话一项，点击切换。
-        let this = cx.entity().downgrade();
-        let items = self.terminals.iter().enumerate().map(|(ix, terminal)| {
-            let this = this.clone();
-            SidebarMenuItem::new(terminal.read(cx).title())
-                .icon(IconName::SquareTerminal)
-                .active(ix == self.active)
-                .on_click(move |_, _, cx| {
-                    let _ = this.update(cx, |this, cx| this.set_active_tab(ix, cx));
+        // 左侧区域（活动栏 + 侧边栏 + 状态栏）与右侧区域（标签栏 + 终端 + 状态栏）
+        // 分别由各自的容器模块渲染；两者之间是可拖拽的分隔条。
+        let activity_bar = self.render_activity_bar(cx);
+
+        // 终端容器：所有标签页关闭后整个容器一起关闭（标签栏 / 终端 / 状态栏全部消失）。
+        let terminal_container = (!self.terminals.is_empty())
+            .then(|| self.render_terminal_container(cx));
+
+        // 侧边栏可见时始终使用分栏面板组，两栏之间保留可拖拽的分隔条；
+        // 终端容器关闭后右栏退化为空白占位——**仍保留两栏结构**，因为
+        // 单面板的分栏组会被 `adjust_to_container_size` 按比例拉伸到容器满宽，
+        // 那样既没有分隔条、侧边栏也会横向铺满整个窗口。
+        let body = if self.sidebar_visible {
+            h_resizable("main-split")
+                // 绑定根视图持有的状态实体：侧边栏折叠再展开后宽度不会丢失。
+                .with_state(&self.resize_state)
+                .child(
+                    resizable_panel()
+                        .size(SIDEBAR_DEFAULT_WIDTH)
+                        .size_range(SIDEBAR_MIN_WIDTH..SIDEBAR_MAX_WIDTH)
+                        // flex_none：宽度完全由面板状态决定，否则组件内置的
+                        // flex_grow_1 会把侧边栏撑得比设定值更宽。
+                        .flex_none()
+                        .child(self.render_sidebar_container(cx)),
+                )
+                .child(match terminal_container {
+                    Some(terminal) => resizable_panel().child(terminal),
+                    None => resizable_panel().child(div()),
                 })
-        });
-
-        // 侧边栏内容：随活动栏选中的视图切换。
-        let sidebar_content = match self.sidebar_view {
-            SidebarView::Sessions => {
-                SidebarGroup::new("会话").child(SidebarMenu::new().children(items))
-            }
-            SidebarView::About => SidebarGroup::new("关于").child(
-                SidebarMenu::new()
-                    .child(SidebarMenuItem::new("test-rs 终端").disable(true))
-                    .child(SidebarMenuItem::new("gpui-kit 0.6 · gpui-pre 0.3").disable(true))
-                    .child(
-                        SidebarMenuItem::new("alacritty_terminal 0.26 · ConPTY").disable(true),
-                    ),
-            ),
+                .into_any_element()
+        } else {
+            terminal_container.unwrap_or_else(|| div().into_any_element())
         };
-
-        // 活动栏：侧边栏左侧的图标列。上部分为视图切换图标（终端会话 / 关于），
-        // 弹性占位后，设置图标固定在最下方，点击弹出设置对话框。
-        let activity_bar = v_flex()
-            .w(px(44.))
-            .h_full()
-            .flex_shrink_0()
-            .items_center()
-            .py_2()
-            .gap_1()
-            .bg(cx.theme().tokens.sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .child(
-                Button::new("view-sessions")
-                    .ghost()
-                    .icon(IconName::SquareTerminal)
-                    .selected(self.sidebar_visible && self.sidebar_view == SidebarView::Sessions)
-                    .tooltip("终端会话")
-                    .on_click(
-                        cx.listener(|this, _, _, cx| this.set_sidebar_view(SidebarView::Sessions, cx)),
-                    ),
-            )
-            .child(
-                Button::new("view-about")
-                    .ghost()
-                    .icon(IconName::Info)
-                    .selected(self.sidebar_visible && self.sidebar_view == SidebarView::About)
-                    .tooltip("关于")
-                    .on_click(
-                        cx.listener(|this, _, _, cx| this.set_sidebar_view(SidebarView::About, cx)),
-                    ),
-            )
-            // 弹性占位：把设置图标推到活动栏最下方。
-            .child(div().flex_1())
-            .child(
-                Button::new("view-settings")
-                    .ghost()
-                    .icon(IconName::Settings)
-                    .tooltip("设置")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            );
-
-        // 侧边栏（结构参考官方文档：https://gpui-kit.com/zh-CN/component/sidebar/）
-        // 点击活动栏当前视图图标可整体隐藏/显示。
-        let sidebar = Sidebar::new("terminal-sidebar")
-            .w(px(220.))
-            // .header(
-            //     SidebarHeader::new().child(
-            //         h_flex()
-            //             .gap_2()
-            //             .child(Icon::new(IconName::SquareTerminal))
-            //             .child("终端"),
-            //     ),
-            // )
-            .child(sidebar_content)
-            .footer(
-                SidebarFooter::new().child(
-                    Button::new("new-terminal")
-                        .ghost()
-                        .icon(IconName::Plus)
-                        .label("新建终端")
-                        .tooltip("新建终端")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.spawn_terminal(window, cx);
-                            cx.notify();
-                        })),
-                ),
-            );
-
-        // 两段式状态栏：左段属于侧边栏（与侧边栏同宽对齐），右段属于终端。
-        // 两段使用同一状态栏配色（此前左段用 sidebar 背景色，明显深于终端段），
-        // 仅以左段右侧的竖线区分；侧边栏隐藏时左段随之消失，终端段占满整行。
-        let sidebar_status = StatusBar::new()
-            .left(
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(Icon::new(IconName::SquareTerminal).small())
-                    .child(self.shell_name.clone()),
-            )
-            .w(px(220.))
-            .flex_shrink_0()
-            .border_r_1();
-
-        let terminal_status = StatusBar::new()
-            .child(self.terminals[self.active].read(cx).title())
-            .right("ConPTY · alacritty_terminal 0.26")
-            .flex_1()
-            .min_w_0();
-
-        // 终端会话标签页（参考官方 Tabs 示例的「Dynamic Tabs」）：
-        // 每个标签由图标前缀 + 标题 + × 关闭后缀组成（prefix / suffix content），
-        // 新建会话入口在侧边栏 footer。
-        // w_full：与官方示例一致，显式占满父宽——否则标签栏按内容收缩，
-        // 标签一多会撑出可视区并把右侧菜单键推走；约束住后内部自动
-        // 横向裁剪/滚动（overflow_x_scroll），菜单键固定在右端兜底选择。
-        let tab_bar = TabBar::new("terminal-tabs")
-            .w_full()
-            .menu(true)
-            // 关联滚动句柄：激活会话时 scroll_to_item 精确滑动到选中标签。
-            .track_scroll(&self.tab_scroll_handle)
-            .selected_index(self.active)
-            .on_click(cx.listener(|this, index: &usize, _, cx| {
-                // 点击标签内 × 关闭会话后，事件仍会冒泡到此处且下标可能已失效，需钳制。
-                this.set_active_tab(*index, cx);
-            }))
-            .children(
-                self.terminals.iter().enumerate().map(|(ix, terminal)| {
-                    Tab::new()
-                        .px_2()
-                        .prefix(Icon::new(IconName::SquareTerminal))
-                        .label(terminal.read(cx).title())
-                        .suffix(
-                            Button::new(format!("close-tab-{ix}"))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Close)
-                                .tooltip("关闭会话")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.close_terminal(ix, cx);
-                                })),
-                        )
-                }),
-            );
-        // 滚轮滚动标签栏：TabBar 内部 lock_scroll_axis 禁用了「垂直滚轮→横向」的
-        // 自动映射，因此在外层把滚轮增量手动写入标签栏的 ScrollHandle（横向偏移）；
-        // 触摸板横向滚动仍由标签栏内部处理，不会重复。
-        let tab_scroll_handle = self.tab_scroll_handle.clone();
-        let tab_bar_area = div()
-            .id("tab-bar-area")
-            .w_full()
-            .on_scroll_wheel(move |event: &ScrollWheelEvent, window, _cx| {
-                let dy = event.delta.pixel_delta(window.line_height()).y;
-                if dy == px(0.) {
-                    return;
-                }
-                let max = tab_scroll_handle.max_offset().x;
-                // 滚轮向下 = 查看右侧标签（offset 向负方向增长）。
-                let next = (tab_scroll_handle.offset().x - dy).clamp(-max, px(0.));
-                tab_scroll_handle.set_offset(point(next, px(0.)));
-                window.refresh();
-            })
-            .child(tab_bar);
 
         v_flex()
             .id("app-root")
@@ -385,7 +272,6 @@ impl Render for AppRoot {
                         .px(px(8.))
                         .gap(px(8.))
                         .items_center()
-                        // .child(Icon::new(IconName::SquareTerminal).small())
                         .child(
                             div()
                                 .flex_1()
@@ -396,58 +282,22 @@ impl Render for AppRoot {
                         ),
                 ),
             )
-            // —— 中部：活动栏（h_full 直到底部，不设状态栏）+ 右侧区域 ——
-            // 右侧区域为「侧边栏 + 终端」行与其下方的两段式状态栏：
-            // 左段状态栏与侧边栏同宽对齐（属于侧边栏），右段属于终端。
+            // —— 中部：左侧区域（活动栏 + 侧边栏 + 状态栏）+ 右侧区域（终端容器）——
+            // 活动栏固定宽度、直到底部，不参与分栏拖拽，折叠侧边栏后靠它恢复。
             .child(
                 h_flex()
                     .flex_1()
                     .overflow_hidden()
                     .child(activity_bar)
+                    // 分栏组内部使用 size_full，需要这层 flex_1 容器提供「剩余宽度」，
+                    // 否则其 100% 宽会把活动栏的 44px 也算进去而溢出。
                     .child(
-                        // h_flex 默认交叉轴居中，满高列必须显式 h_full，
-                        // 否则该列只取内容高度并垂直居中，布局整体塌陷。
-                        v_flex()
-                            .h_full()
+                        div()
                             .flex_1()
+                            .min_w_0()
+                            .h_full()
                             .overflow_hidden()
-                            // 侧边栏（可隐藏）+ 终端卡片
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .when(self.sidebar_visible, |row| row.child(sidebar))
-                                    .child(
-                                        // 终端 pane：上方标签页 + 下方终端卡片
-                                        // overflow_hidden：pane 无 overflow 时，taffy 的自动
-                                        // 最小尺寸 = 内容宽（含所有标签的总宽），标签一多 pane
-                                        // 会被撑出可视区并把 TabBar(w_full) 与菜单键一起推走；
-                                        // 设为 hidden 后最小尺寸归零，宽度完全由行分配。
-                                        v_flex()
-                                            .flex_1()
-                                            .h_full()
-                                            .overflow_hidden()
-                                            .p_2()
-                                            .gap_2()
-                                            .child(tab_bar_area)
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .border_1()
-                                                    .border_color(cx.theme().border)
-                                                    .rounded_md()
-                                                    .overflow_hidden()
-                                                    .child(self.terminals[self.active].clone()),
-                                            ),
-                                    ),
-                            )
-                            // —— 底部：两段式状态栏 ——
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .when(self.sidebar_visible, |row| row.child(sidebar_status))
-                                    .child(terminal_status),
-                            ),
+                            .child(body),
                     ),
             )
             // —— 覆盖层：gpui-kit 0.6 的 Root 不会自动渲染 Dialog 层，

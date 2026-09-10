@@ -44,6 +44,11 @@ pub struct TerminalView {
     subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
     error: Option<String>,
+    /// 会话进程是否已结束（本地 shell 退出 / ssh 断开等）。
+    ///
+    /// 由 `CloseTerminal` 事件置位；应用据此在状态栏显示「已断开」，
+    /// 但不会因此退出程序（见 `handle_terminal_event`）。
+    exited: bool,
     settings: Arc<TerminalRenderSettings>,
     title: SharedString,
     /// IME 组合文本状态（由 `TerminalElement` 在渲染时读取）。
@@ -132,6 +137,7 @@ impl TerminalView {
             subscription: None,
             _subscriptions: vec![focus_in, focus_out],
             error: None,
+            exited: false,
             settings,
             title: "终端".into(),
             ime_state: None,
@@ -178,7 +184,17 @@ impl TerminalView {
                 }
                 cx.notify();
             }
-            TerminalEvent::CloseTerminal => cx.quit(),
+            TerminalEvent::CloseTerminal => {
+                // 会话进程结束（本地 shell 退出、ssh 连接断开等）。
+                //
+                // **不要退出应用**：这是多标签终端，一个会话结束不应带走整个程序
+                // （尤其在「连接断开」这种常见场景下，直接退出等同于闪退）。
+                // 这里只标记状态并刷新界面，由应用决定怎么展示（保留标签、状态栏显示
+                // 已断开，用户自行关闭或新建）。终端网格会保留最后的输出，
+                // 这样 ssh 报的断开原因不会被丢掉。
+                self.exited = true;
+                cx.notify();
+            }
             _ => {}
         }
     }
@@ -281,6 +297,22 @@ impl TerminalView {
     /// 当前窗口标题（终端标题或默认文本）。
     pub fn title(&self) -> SharedString {
         self.title.clone()
+    }
+
+    /// 当前终端进程（PTY 里的 shell / ssh 等）的 PID。
+    ///
+    /// 供状态栏采样该会话的 CPU / 内存使用；PTY 尚未就绪或终端已退出时为 `None`。
+    /// 这里刻意返回裸 `u32` 而不是 `sysinfo::Pid`，避免让本 crate 依赖 sysinfo。
+    pub fn pid(&self, cx: &App) -> Option<u32> {
+        self.terminal
+            .as_ref()
+            .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.pid()))
+            .map(|pid| pid.as_u32())
+    }
+
+    /// 会话进程是否已结束（本地 shell 退出 / ssh 连接断开等）。
+    pub fn has_exited(&self) -> bool {
+        self.exited
     }
 
     /// 计算光标是否可见（闪烁控制）。
