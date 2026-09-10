@@ -167,6 +167,7 @@ dependencies = [
  "gpui-pre",
  "log",
  "rust-embed",
+ "serde",
  "sysinfo 0.39.6",
  "terminal",
  "terminal_view",

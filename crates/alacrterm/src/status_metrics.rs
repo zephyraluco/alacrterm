@@ -165,3 +165,25 @@ pub(crate) fn format_rate(bytes_per_sec: f64) -> String {
     }
     format!("{}/s", format_bytes(bytes_per_sec as u64))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{format_bytes, format_rate};
+
+    #[test]
+    fn format_bytes_uses_readable_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1 KB");
+        assert_eq!(format_bytes(2048), "2 KB");
+        assert_eq!(format_bytes(103 * 1024 * 1024), "103 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn format_rate_appends_per_second_and_hides_idle() {
+        assert_eq!(format_rate(0.0), "0");
+        assert_eq!(format_rate(0.4), "0");
+        assert_eq!(format_rate(2048.0), "2 KB/s");
+    }
+}

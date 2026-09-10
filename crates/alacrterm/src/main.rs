@@ -18,8 +18,9 @@
 //!
 //! 布局装配遵循两条规则：侧边栏折叠、或**终端标签页全部关闭**时，
 //! 对应的容器与分隔条一并消失（终端容器关闭后仅剩左侧容器与空白背景，
-//! 可随时从侧边栏底部「新建终端」重新打开）。
+//! 可随时从侧边栏会话条目的右键菜单「新建终端」重新打开）。
 
+mod actions;
 mod assets;
 mod connection_dialog;
 mod settings_window;
@@ -68,6 +69,9 @@ fn main() {
                 },
                 |window, cx| {
                     let root = cx.new(|cx| AppRoot::new(window, cx));
+                    // 注册全局 action 监听器（右键菜单项会派发这些 action），
+                    // 用 `Entity<AppRoot>` 的弱引用：这里正好拿得到已构造好的实体。
+                    AppRoot::register_actions(root.downgrade(), cx);
                     cx.new(|cx| Root::new(root, window, cx))
                 },
             )
@@ -191,6 +195,28 @@ impl AppRoot {
         this
     }
 
+    /// 把一个「需要窗口 + 需要 &mut 根视图」的操作推迟到本次窗口更新之后执行。
+    ///
+    /// 用于对话框 `on_ok`、全局 action 监听器这类回调：它们执行期间目标窗口仍在
+    /// 「更新栈」上，`WeakEntity::update_in` 会因 `App::with_window` 取不到窗口而失败
+    /// （`Err("entity has no current window")`；同帧内的 `window.defer` 也一样）。
+    /// 让出一拍（异步任务 + 1ms 定时器）后窗口已放回，`update_in` 即可成功。
+    ///
+    /// 用 `App::spawn`（不依赖窗口），因此回调里即使只有 `&mut App` 也能调用。
+    pub(crate) fn defer_after_update(
+        root: WeakEntity<Self>,
+        cx: &mut App,
+        action: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1))
+                .await;
+            let _ = root.update_in(cx, |this, window, cx| action(this, window, cx));
+        })
+        .detach();
+    }
+
     /// 启动状态栏指标采样任务：每 [`SAMPLE_INTERVAL`](status_metrics::SAMPLE_INTERVAL)
     /// 采样一次并刷新界面，根视图销毁后自动结束。
     fn start_metrics_sampling(cx: &mut Context<Self>) {
@@ -209,7 +235,7 @@ impl AppRoot {
         .detach();
     }
 
-    /// 采样当前会话的进程指标并刷新界面。
+    /// 采样当前会话的进程指标；仅在**显示内容变化**时重绘界面。
     ///
     /// 这里用 `this.update`（不需要窗口）而不是 `update_in`：定时任务运行在
     /// 窗口更新之外，无需借用窗口。
@@ -219,6 +245,7 @@ impl AppRoot {
             .terminals
             .get(self.active)
             .and_then(|session| session.view.read(cx).pid(cx));
+        // 每轮采样都刷新界面：状态栏里的网络速率本就是实时值，每次采样都会变。
         self.monitor.sample(pid);
         cx.notify();
     }

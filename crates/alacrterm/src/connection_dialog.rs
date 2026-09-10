@@ -1,6 +1,7 @@
 //! 「新建终端」连接对话框：收集 IP / 端口 / 名称 / 用户名 / 密码后创建会话。
 //!
-//! 由侧边栏底部「新建终端」按钮触发（[`AppRoot::open_new_terminal_dialog`]）。
+//! 由侧边栏会话条目的右键菜单「新建终端」触发（`NewTerminal` action →
+//! [`AppRoot::open_new_terminal_dialog`]）。
 //!
 //! 行为约定：
 //! - **填了 IP** → 以 `ssh -p <端口> [用户名@]IP` 启动会话（依赖系统自带 OpenSSH 客户端）；
@@ -73,8 +74,8 @@ impl ConnectionForm {
         let host = self.trimmed(&self.host, cx);
         let port = self.trimmed(&self.port, cx);
         let user = self.trimmed(&self.user, cx);
-        // 密码目前无法传给系统 ssh，仅作收集（见模块文档）。
-        let _password = self.trimmed(&self.password, cx);
+        // 密码字段目前不参与建连（系统 ssh 不接受命令行传密码），
+        // 仅作输入收集，见模块文档。
 
         let name = (!name.is_empty()).then(|| SharedString::from(name));
 
@@ -163,7 +164,7 @@ fn field_label(text: &'static str, cx: &App) -> AnyElement {
 }
 
 impl AppRoot {
-    /// 侧边栏底部「新建终端」按钮：弹出建连对话框。
+    /// 右键菜单「新建终端」的入口：弹出建连对话框。
     pub(crate) fn open_new_terminal_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let form = ConnectionForm::new(window, cx);
         // 对话框回调只有 &mut App，拿不到 AppRoot；用弱引用回到根视图创建会话。
@@ -188,24 +189,19 @@ impl AppRoot {
                 .w(px(420.))
                 .footer(footer)
                 // 返回 true 让对话框关闭。
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_, _, cx| {
                     // `on_ok` 是 `Fn`（可多次调用），因此每次调用都克隆一份表单。
                     let form = form_for_ok.clone();
-                    let root = root_for_ok.clone();
-                    // 关键：动作回调执行期间，目标窗口仍在「更新栈」上——此时
-                    // `update_in` 会因 `App::with_window` 取不到窗口而失败
-                    // （"entity has no current window"；同帧内的 `window.defer` 也一样）。
-                    // 因此用异步任务让出一拍，等本次窗口更新结束再创建会话。
-                    window
-                        .spawn(cx, async move |cx| {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(1))
-                                .await;
-                            let _ = root.update_in(cx, move |this, window, cx| {
-                                this.spawn_session(form.build(cx), window, cx);
-                            });
-                        })
-                        .detach();
+                    // 动作回调执行期间窗口仍在更新栈上，直接 update_in 会失败
+                    // （"entity has no current window"），交给 `defer_after_update`
+                    // 让出一拍再创建会话。
+                    AppRoot::defer_after_update(
+                        root_for_ok.clone(),
+                        cx,
+                        move |this, window, cx| {
+                            this.spawn_session(form.build(cx), window, cx);
+                        },
+                    );
                     true
                 })
                 .child(form.render_fields(cx))

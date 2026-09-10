@@ -19,11 +19,12 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    sidebar::{Sidebar, SidebarFooter, SidebarGroup, SidebarMenu, SidebarMenuItem},
+    sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},
     status_bar::StatusBar,
     v_flex,
 };
 
+use crate::actions::{CloseSession, NewTerminal};
 use crate::AppRoot;
 use crate::assets::IconName;
 
@@ -111,7 +112,11 @@ impl AppRoot {
     ///
     /// 参考官方文档：<https://gpui-kit.com/zh-CN/component/sidebar/>
     pub(crate) fn render_sidebar_container(&self, cx: &mut Context<Self>) -> AnyElement {
-        // 侧边栏菜单项：每个终端会话一项，点击切换激活会话。
+        // 侧边栏菜单项：每个终端会话一项，点击切换激活会话，右键弹出上下文菜单。
+        //
+        // 菜单项用官方写法 `menu.menu(标签, Box::new(Action))`，点击后由菜单
+        // `dispatch_action` 派发，统一由 `actions.rs` 里的全局监听器接管。
+        // 注意：目前只有**条目**有右键菜单，侧边栏空白区域不弹菜单。
         let this = cx.entity().downgrade();
         let items = self.terminals.iter().enumerate().map(|(ix, session)| {
             let this = this.clone();
@@ -121,6 +126,11 @@ impl AppRoot {
                 .active(ix == self.active)
                 .on_click(move |_, _, cx| {
                     let _ = this.update(cx, |this, cx| this.set_active_tab(ix, cx));
+                })
+                .context_menu(move |menu, _, _| {
+                    menu.menu("关闭会话", Box::new(CloseSession { index: ix }))
+                        .separator()
+                        .menu("新建终端", Box::new(NewTerminal))
                 })
         });
 
@@ -163,20 +173,6 @@ impl AppRoot {
             ),
         };
 
-        // 底部「新建终端」入口：标签页全部关闭后整个终端容器会关闭，
-        // 这里是重新打开终端的常驻入口，因此始终显示。
-        // 点击弹出建连对话框（IP / 端口 / 名称 / 用户名 / 密码）。
-        let footer = SidebarFooter::new().child(
-            Button::new("new-terminal")
-                .ghost()
-                .icon(IconName::Plus)
-                .label("新建终端")
-                .tooltip("新建终端")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_new_terminal_dialog(window, cx);
-                })),
-        );
-
         // Sidebar 的 id 随视图变化：折叠状态按 element id 存在 keyed state 里，
         // 若两个视图共用同一个 id（内容都只有 1 个顶层项，index 恒为 0），
         // 收起「会话」后切到「关于」也会呈收起状态——分 id 即可各自独立。
@@ -190,7 +186,6 @@ impl AppRoot {
         let sidebar = Sidebar::new(sidebar_id)
             .w_full()
             .child(content)
-            .footer(footer)
             .flex_1()
             .min_h_0();
 
@@ -206,6 +201,8 @@ impl AppRoot {
             .w_full()
             .border_r_1();
 
+        // 整个侧边栏区域（会话列表 + 底部状态栏）。
+        // 空白区域**不挂**右键菜单，只有会话条目有自己的右键菜单。
         v_flex()
             .h_full()
             .w_full()

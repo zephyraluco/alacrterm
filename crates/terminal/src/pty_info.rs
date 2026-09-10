@@ -122,7 +122,9 @@ impl PtyProcessInfo {
         RwLockReadGuard::try_map(self.system.read(), |system| system.process(pid)).ok()
     }
 
+    // 从 Zed 移植后本仓库暂未使用（保留备用），显式允许以免每次编译都报 dead_code。
     #[cfg(unix)]
+    #[allow(dead_code)]
     pub(crate) fn kill_current_process(&self) -> bool {
         let Some(pid) = self.pid_getter.pid() else {
             return false;
@@ -131,6 +133,7 @@ impl PtyProcessInfo {
     }
 
     #[cfg(not(unix))]
+    #[allow(dead_code)]
     pub(crate) fn kill_current_process(&self) -> bool {
         self.refresh().is_some_and(|process| process.kill())
     }

@@ -1,35 +1,45 @@
 # alacrterm 终端实现分析
 
-> 生成日期:2026-08-06(更新于 2026-08-09)
+> 生成日期:2026-08-06(最近更新 2026-09-10)
 > 分析对象:工作区 `d:\WorkSpace\alacrterm` 全部源码
+>
+> 说明:§4 起为**终端核心**(仿真/渲染/事件循环),不随应用外壳变化;§3 为**应用外壳**
+> (多会话、侧边栏、标签栏、弹窗、右键菜单、状态栏指标),随功能演进更新。
 
 ---
 
 ## 1. 项目概述
 
-`alacrterm` 是一个基于 **zed 官方 `gpui`**(`zed-industries/zed` 仓库)做 UI、**`gpui-component`**(`longbridge/gpui-component`,自绘组件库)做标题栏等组件、**`alacritty_terminal 0.26`**(Alacritty 的纯终端仿真核心)做仿真的独立终端模拟器,由 Zed 的 `terminal` / `terminal_view` crate 精简而来。
+`alacrterm` 是一个基于 **`gpui-pre 0.3`**(依赖名仍为 `gpui`,由 gpui-kit 配套提供)做 UI、**`gpui-kit 0.6`**(包名 `gpui-component`,自绘组件库)做标题栏 / 侧边栏 / 标签页等组件、**`alacritty_terminal 0.26`**(Alacritty 的纯终端仿真核心)做仿真的独立终端模拟器:终端核心由 Zed 的 `terminal` / `terminal_view` crate 精简而来,应用外壳(多会话 + 远程连接)是自建部分。
 
 **核心特征:**
 
 - 移除 Zed 的 `settings` crate 依赖:`TerminalColors` 本地定义(XTerm 深色默认)、`CursorShape` / `AlternateScroll` 本地枚举
 - `TerminalBuilder::new` 精简签名:`new(working_directory, shell, env, cx) -> Task<Result<TerminalBuilder>>`,PTY 在后台线程就绪后经 `subscribe(cx)` 启动事件循环
 - 渲染完全由 gpui 的 `StyledText` / `paint_quad` 逐 cell 驱动,与 Alacritty 网格模型通过 `Content` 快照解耦
-- 集成 `gpui-component` 自绘标题栏(`TitleBar`),隐藏系统标题栏,标题随终端 OSC 0 同步
+- 集成 `gpui-kit` 自绘标题栏(`TitleBar`),隐藏系统标题栏(主窗口标题为固定文案 `Alacrterm`;终端 OSC 标题只用于标签页 / 侧边栏显示)
 - 保留完整功能:事件循环、批量事件处理、选择/复制、vi mode、超链接、鼠标协议、进程标题检测
+- **多会话外壳**:左侧活动栏 + 侧边栏(会话列表) + 右侧标签栏/终端,中间为可拖拽分栏;标签可全部关闭,关闭后整个终端容器一并消失(见 §3.2)
+- **远程连接**:「新建终端」对话框收集 IP / 端口 / 名称 / 用户名 / 密码,填了 IP 即用 `ssh -p <端口> [user@]IP` 启动(依赖本机 OpenSSH 客户端);密码字段目前只收集、不参与建连(见 §3.4)
+- **会话显示名**:用户填写的名称优先(`Session::title`),否则回退到终端 OSC 标题
+- **状态栏指标**:连接状态 / 连接目标 / 会话进程 CPU / 内存 / 系统网络速率,每 1.5s 采样(见 §3.6)
+- **独立设置窗口**:自绘标题栏的独立窗口,重复点击只激活已有窗口(见 §3.5)
+- **右键菜单**:侧边栏会话条目使用 Action 风格菜单项(见 §3.7)
+- **会话结束不退出应用**:进程结束只标记「已断开」(见 §5 事件表)
 
 **依赖栈:**
 
 | 依赖 | 用途 |
 |---|---|
-| `gpui` / `gpui_platform`(git:`zed-industries/zed`,启用 `font-kit`) | UI 框架、窗口、文本布局、事件分发 |
-| `gpui-component`(git:`longbridge/gpui-component`) | 自绘标题栏、图标(`icon_named!`)、主题系统 |
+| `gpui`(crate `gpui-pre 0.3`,lib 名仍为 `gpui`) | UI 框架、窗口、文本布局、事件分发 |
+| `gpui-kit 0.6`(`features = ["component"]`) | 自绘标题栏、Sidebar / Tabs / StatusBar / Settings / Resizable、`icon_named!` 图标、主题系统 |
 | `alacritty_terminal 0.26` | VT 序列解析、网格模型、PTY 封装(`tty` 模块) |
 | `portable-pty 0.9` | 经 alacritty `tty` 间接使用的跨平台 PTY |
-| `sysinfo 0.39` | 前台进程信息 / 工作目录 / 标题检测 |
+| `sysinfo 0.39` | `terminal`:前台进程信息 / 工作目录 / 标题检测;`alacrterm`:状态栏指标的 CPU / 内存 / 网络采样 |
 | `rust-embed` | 内嵌 `assets/icons` 资源(图标、主题等) |
 | `windows 0.62`(Windows) | `SearchPathW` 路径解析、`GetProcessId` |
 | `futures 0.3` / `parking_lot 0.12` | 事件循环 `select_biased!` 批处理、`FairMutex` Term 锁 |
-| `schemars` / `serde` | `TerminalColors` 等配置结构的 JSON Schema 支持 |
+| `schemars` / `serde` | `TerminalColors` 等配置结构的 JSON Schema 支持;`serde` 另供 `alacrterm` 自定义 Action 派生 `Deserialize` |
 
 ---
 
@@ -38,7 +48,13 @@
 ```mermaid
 graph TB
     subgraph app层[crates/alacrterm]
-        MAIN[main.rs<br/>gpui 应用入口 + AppRoot 自绘标题栏]
+        MAIN[main.rs<br/>入口 + AppRoot:共享状态/布局装配/指标采样任务]
+        SIDE[sidebar_panel.rs<br/>左侧容器:活动栏 + 侧边栏 + 状态栏]
+        TPANEL[terminal_panel.rs<br/>右侧容器:标签栏 + 终端 + 状态栏]
+        DIALOG[connection_dialog.rs<br/>「新建终端」对话框(ssh)]
+        SETWIN[settings_window.rs<br/>独立设置窗口]
+        METRICS[status_metrics.rs<br/>CPU / 内存 / 网络采样]
+        ACT[actions.rs<br/>自定义 Action + 全局监听器]
         ASSET[assets.rs<br/>rust-embed 图标 + icon_named! 宏]
     end
 
@@ -62,7 +78,13 @@ graph TB
     end
 
     MAIN --> VIEW
-    MAIN -->|gpui-component TitleBar/Icon| GPUIC[gpui-component<br/>longbridge]
+    MAIN --> SIDE
+    MAIN --> TPANEL
+    MAIN --> DIALOG
+    MAIN --> SETWIN
+    MAIN -->|注册全局监听器| ACT
+    TPANEL -->|读采样值| METRICS
+    MAIN -->|gpui-kit TitleBar 等组件| GPUIC[gpui-kit 0.6<br/>gpui-component]
     VIEW --> TERM
     TERM --> ALAC
     ALAC --> PTYINFO
@@ -81,7 +103,16 @@ assets/
   icons/                        # rust-embed 内嵌的图标资源(含 SquareTerminal 等)
   keymaps/ settings/            # 保留自 Zed 的配置模板(当前未使用)
 crates/
-  alacrterm/                    # 应用层:main.rs(AppRoot + 窗口) / assets.rs / build.rs
+  alacrterm/                    # 应用层(见 §3):入口 + 多会话外壳 + 弹窗 + 状态栏指标
+    src/
+      main.rs                   # 入口 + AppRoot:共享状态、布局装配、指标采样任务、defer 辅助
+      sidebar_panel.rs          # 左侧容器:活动栏 + 侧边栏(会话列表 + 右键菜单) + 状态栏
+      terminal_panel.rs         # 右侧容器:标签栏 + 终端卡片 + 状态栏(显示指标)
+      connection_dialog.rs      # 「新建终端」对话框:表单 + ssh 参数组装 + 页脚按钮
+      settings_window.rs        # 独立设置窗口(自绘标题栏、窗口句柄复用)
+      status_metrics.rs         # sysinfo 采样:连接状态 / CPU / 内存 / 网络 + 字节格式化
+      actions.rs                # 自定义 Action(NewTerminal / CloseSession) + 全局监听器
+      assets.rs / build.rs      # 图标资产 / Windows 版本资源
   terminal_view/                # 视图层(独立 crate):
     src/
       lib.rs                    # TerminalView:终端创建/事件订阅/键盘输入/焦点/IME/滚动
@@ -99,89 +130,105 @@ crates/
 
 ---
 
-## 3. 启动与初始化流程
+## 3. 应用外壳:启动、布局与会话
 
 ### 3.1 应用入口(`main.rs`)
 
 ```rust
 fn main() {
-    gpui_platform::application()
-        .with_assets(assets::Assets)          // rust-embed 嵌入 assets/icons
+    gpui_kit::application()
+        .with_assets(assets::Assets)                 // rust-embed 嵌入 assets/icons
+        .with_quit_mode(QuitMode::LastWindowClosed)  // 全部窗口关闭即退出
         .run(|cx: &mut App| {
-            gpui_component::init(cx);                    // 初始化组件库(主题、图标等)
-            Theme::change(ThemeMode::Dark, None, cx);    // 终端为深色背景,标题栏跟随暗色主题
+            gpui_kit::init(cx);                      // 初始化组件库(主题、图标等)
+            Theme::change(ThemeMode::Dark, None, cx); // 终端为深色背景,界面跟随暗色主题
 
-            let bounds = Bounds::centered(None, size(px(900.), px(600.)), cx);
+            let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    // 隐藏系统标题栏(macOS/Windows),改用 gpui_component 自绘标题栏
-                    titlebar: Some(TitleBar::title_bar_options()),
-                    #[cfg(target_os = "linux")]
-                    window_decorations: Some(gpui::WindowDecorations::Client),
-                    ..Default::default()
+                    // 隐藏系统标题栏,改用 gpui-kit 的 TitleBar 自绘(拖拽/双击最大化由它处理)
+                    ..TitleBar::window_options()
                 },
                 |window, cx| {
-                    let terminal_view =
-                        cx.new(|cx| TerminalView::new(None, Shell::System, window, cx));
-                    cx.new(|cx| AppRoot::new(terminal_view, cx))   // 根视图 = 标题栏 + 终端
+                    // 建窗即新建一个本地会话(PTY 在后台启动)
+                    let root = cx.new(|cx| AppRoot::new(window, cx));
+                    // 注册全局 action 监听器(右键菜单项会派发这些 action)
+                    AppRoot::register_actions(root.downgrade(), cx);
+                    // 外层包 gpui-kit Root(弹窗/通知/焦点恢复的宿主)
+                    cx.new(|cx| Root::new(root, window, cx))
                 },
             )
             .expect("failed to open window");
-
-            cx.on_window_closed(|cx, _| { if cx.windows().is_empty() { cx.quit(); } }).detach();
-            cx.activate(true);
         });
-}
-```
-
-**`AppRoot`(根视图)**:
-
-```rust
-struct AppRoot {
-    terminal_view: Entity<TerminalView>,
-    title: SharedString,
-}
-
-impl AppRoot {
-    fn new(terminal_view: Entity<TerminalView>, cx: &mut Context<Self>) -> Self {
-        let title = terminal_view.read_with(cx, |view, _| view.title());
-        // 终端标题变化(OSC 0 等)时同步更新标题栏文本
-        cx.observe(&terminal_view, |this, terminal_view, cx| {
-            let title = terminal_view.read_with(cx, |view, _| view.title());
-            if title != this.title {
-                this.title = title;
-                cx.notify();
-            }
-        }).detach();
-        Self { terminal_view, title }
-    }
-}
-
-impl Render for AppRoot {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().v_flex().size_full()
-            .child(TitleBar::new().child(          // 自绘标题栏(拖拽窗口/按钮由组件库处理)
-                h_flex().w_full().px(px(8.)).gap(px(8.)).items_center()
-                    .child(Icon::new(IconName::SquareTerminal).small())  // 终端图标
-                    .child(div().text_size(px(13.))
-                        .text_color(cx.theme().secondary_foreground)
-                        .child(self.title.clone())),
-            ))
-            .child(self.terminal_view.clone())
-    }
 }
 ```
 
 要点:
 
-- 窗口 900×600,默认 shell 为 `Shell::System`;`gpui_component::init` 必须先于任何组件渲染调用
-- `TitleBar::title_bar_options()` 返回隐藏系统标题栏的 `WindowOptions` 片段;Linux 额外用 `WindowDecorations::Client` 走客户端装饰
+- 窗口 1100×700;`gpui_kit::init` 必须先于任何组件渲染调用
+- `TitleBar::window_options()` 返回「隐藏系统标题栏」的 `WindowOptions` 片段(内部 `appears_transparent` + `app_owns_titlebar_drag`)
+- 根视图外层包一层 gpui-kit `Root`(弹窗 / 通知 / 焦点恢复的宿主);**`Root` 不会自动渲染 Dialog 层**,需在渲染树里显式 `.children(Root::render_dialog_layer(window, cx))`
 - `assets.rs` 中 `icon_named!(IconName, "../../assets/icons")` 宏扫描 `assets/icons` 生成图标枚举,并实现 `From<IconName> for AnyElement` / `RenderOnce` 使其可作组件渲染
-- `AppRoot` 通过 `cx.observe(&terminal_view)` 监听 `TerminalView` 的标题变化(`TerminalView::title()` 返回 `SharedString`),OSC 0 设置标题时标题栏同步刷新
-- 全部窗口关闭即退出应用
+- 建窗即新建一个本地会话;退出策略交给 `QuitMode::LastWindowClosed`
 
-### 3.2 Terminal 异步创建(`TerminalView::new`)
+### 3.2 布局装配(活动栏 / 侧边栏 / 分栏 / 终端容器)
+
+根视图 `AppRoot::render` 只负责装配;两个容器各自在独立模块里渲染:
+
+- **活动栏**(`sidebar_panel::render_activity_bar`):固定 44px、不参与分栏——侧边栏折叠后仍靠它恢复;上部分是视图切换图标,弹性占位后设置图标固定在底部
+- **侧边栏**:宽度由分栏面板状态决定;`ResizableState` 存在 `AppRoot` 上(而非组件内部 keyed state),侧边栏折叠再展开后宽度不丢
+- **终端容器**(`terminal_panel::render_terminal_container`):标签栏 + 终端卡片 + 状态栏;**标签全部关闭后整个容器不再渲染**(`AppRoot::render` 用 `(!self.terminals.is_empty()).then(..)` 判断)
+- **新建会话入口**:侧边栏会话条目的右键菜单「新建终端」(派发 `NewTerminal`,见 §3.7);侧边栏底部**已无常驻按钮**、空白区也**不挂**右键菜单——因此全部会话关闭后(列表为空)当前缺少可点击的恢复入口(已知限制)
+- 侧边栏折叠时,右栏用 `resizable_panel().child(div())` 占位:**必须保留两栏结构**,否则单面板会被 `adjust_to_container_size` 拉伸到容器满宽(分隔条消失、侧边栏铺满窗口)
+- 容器渲染方法统一返回 `AnyElement`:edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,装箱可避免同一渲染树里连续调用多个 `&mut cx` 方法时的借用冲突
+
+### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)
+
+```rust
+struct Session { view: Entity<TerminalView>, name: Option<SharedString>, target: SessionTarget }
+enum SessionTarget { Local, Ssh { user: String, host: String, port: String } }
+struct SessionRequest { name: Option<SharedString>, shell: Shell, target: SessionTarget }
+```
+
+- `Session::title(cx)`:用户填写的名称优先,否则回退 `TerminalView::title()`。注意后者取自终端 **OSC 标题**(`breadcrumb_text`),**不是** `Shell::WithArguments` 的 `title_override`——所以自定义名称必须自己存
+- 新建会话统一走 `AppRoot::spawn_session(SessionRequest { .. })`;`spawn_terminal` 只是「本地系统 shell」的快捷封装
+- 生命周期:`set_active_tab` / `close_terminal`(移除实体 → `Terminal` 的 Drop 关闭 PTY 并终止子进程);所有下标访问先 `get()`(允许标签为空)
+- **会话结束不退出应用**:进程结束时 `TerminalView` 只标记 `exited` 并 `notify`,由状态栏显示「已断开」,标签与终端内容都保留(见 §5)
+
+### 3.4 新建终端对话框(`connection_dialog.rs`)
+
+- 触发路径:侧边栏会话条目右键菜单「新建终端」→ `NewTerminal` action → 全局监听器 → `AppRoot::open_new_terminal_dialog`
+- 表单 5 个字段:IP / 端口(默认 22) / 名称 / 用户名 / 密码(`.masked(true)`,**只影响渲染**,`value()` 仍返回明文)
+- 建连规则:**IP 留空 → 本地系统 shell;填了 IP → `ssh -p <端口> [user@]IP`**(依赖本机 OpenSSH 客户端);名称作为会话显示名
+- 密码字段目前**只收集不参与建连**——系统 ssh 不接受命令行传密码(需改用 SSH 库或 `sshpass` 才能免交互)
+- 输入框实体必须在打开对话框**之前**创建:对话框构建闭包是 `Fn`(每帧调用),在闭包内创建会每帧重置输入
+- 页脚按钮用 `DialogFooter` + `DialogClose`(取消) / `DialogAction`(连接):**`Dialog` 不会自动生成确定/取消按钮**(`button_props` 只被 `AlertDialog` 使用),不设 footer 就没有按钮
+
+### 3.5 设置窗口(`settings_window.rs`)
+
+- 用**独立窗口**而不是对话框:`cx.open_window` + `TitleBar::window_options()`
+- **暗色应用不要用系统标题栏**:Windows 下系统标题栏颜色跟随系统「浅色/深色」设置,会出现一条白条;只用 `appears_transparent` + 自绘 `TitleBar`
+- 窗口句柄存在 `AppRoot::settings_window`:重复点击设置图标只 `activate_window`,窗口被用户关闭后下次点击重新开窗
+- 内容为 gpui-kit `Settings` 组件(外观 / 深色主题开关);主题是全局状态,切换后 `cx.refresh_windows()` 刷新所有窗口
+
+### 3.6 状态栏指标(`status_metrics.rs`)
+
+- `SystemMonitor` 持有 sysinfo 的 `System` + `Networks`,每 1.5s 采样一次;`SessionMetrics` 是渲染只读快照
+- 驱动:`AppRoot::start_metrics_sampling` 里的 `cx.spawn` 循环(用 `update` 即可,不需要窗口)
+- **CPU / 内存 = 当前会话那个进程**(PID 由 `TerminalView::pid()` 提供);存活状态是三态(`None` 未采样 / `Some(true)` 运行中 / `Some(false)` 已结束),避免启动初期误报「已断开」
+- **网络 = 系统整体速率**(`Networks` 累计值差分);按进程统计流量需要平台 API(如 Windows ETW),sysinfo 不提供
+- 每轮采样都 `cx.notify()`:网络速率本就是实时值、每轮都在变,「无变化不重绘」的门控实测无效(已否决)
+
+### 3.7 右键菜单与 Action(`actions.rs`)
+
+- 菜单项按官方写法 `menu.menu("标签", Box::new(SomeAction))`,点击后由菜单 `dispatch_action` 派发
+- 自定义 Action:`actions!(alacrterm, [NewTerminal])`(零字段);带数据的 `CloseSession { index }` 需派生 `Deserialize`(`#[action(namespace = .., no_json)]` 免掉 schemars)
+- 接收方用**全局监听器** `App::on_action`:在 action 冒泡阶段必然触发,不依赖焦点(菜单是同一窗口内的浮层)
+- 需要窗口的操作(如打开对话框)配合 `defer_after_update`;不需要窗口的直接 `root.update(cx, ..)`
+- **不要嵌套 `context_menu`**:gpui 的 hitbox 默认是 `Normal`(只有 `.occlude()` 才阻断),父容器与子条目都挂会**同时弹出两个菜单**——因此目前只有会话条目有右键菜单,侧边栏空白区不弹
+
+### 3.8 Terminal 异步创建(`TerminalView::new`)
 
 采用**后台任务 + 异步事件订阅**模式:
 
@@ -208,11 +255,14 @@ cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
 6. `open_pty` 打开 PTY(滚动历史 `DEFAULT_SCROLL_HISTORY_LINES = 10_000`)→ `new_term` 创建 `Term<ZedListener>` → `spawn_event_loop` 启动 IO 线程(返回 `pty_tx`)
 7. 组装 `Terminal` 结构(含 `TerminalPty`、`PtyProcessInfo`、`CopyTemplate` 等),返回 `TerminalBuilder { terminal, events_rx }`
 
-### 3.3 关键异步约定
+### 3.9 关键异步约定与 gpui 坑
 
 - `cx.spawn` 中必须**先在闭包内 `clone` 再进 `async` 块**,否则 lifetime 报错
 - 错误路径:`builder.await` 失败时通过 `this.update` 写回 `error` 字段并 `cx.notify()`,UI 显示红色错误文本
 - `TerminalBuilder::subscribe(cx)` 启动事件循环后返回 `Terminal` 实体;事件循环 task 存在 `event_loop_task` 字段中
+- **回调里不要直接 `update_in`**:对话框 `on_ok`、全局 action 监听器执行期间,目标窗口仍在「更新栈」上,`WeakEntity::update_in` 会返回 `Err("entity has no current window")`(**同帧内的 `window.defer` 也一样**)→ 统一用 `AppRoot::defer_after_update`(`App::spawn` + 1ms 定时器 + `update_in`),让出后窗口已放回
+- `sample_metrics` 这类定时任务用 `update`(不需窗口)即可,不必用 `update_in`
+- gpui-kit 的 `h_flex()` 默认交叉轴居中:放在 `h_flex` 里的满高列必须显式 `.h_full()`,否则只取内容高度并垂直居中
 
 ---
 
@@ -257,8 +307,10 @@ terminal.process_pty_event(event, cx)?;
 
 ```rust
 fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    if !self.focus_handle.is_focused(window) { window.focus(&self.focus_handle, cx); }  // 聚焦兜底
-    window.set_window_title(&self.title);    // 同步原生窗口标题(与自绘标题栏双轨)
+    // 仅当窗口内没有任何元素持有焦点时(启动 / 焦点真空)才接管——不能无条件抢占,
+    // 否则会打断设置弹窗输入框、以及靠焦点路径分发 Cancel 的弹窗关闭按钮(见 §6 焦点)
+    if window.focused(cx).is_none() { window.focus(&self.focus_handle, cx); }
+    window.set_window_title(&self.title);    // 同步原生窗口标题(自绘标题栏固定显示 Alacrterm)
     let focused = self.focus_handle.is_focused(window);
     let cursor_visible = self.should_show_cursor(focused, cx);   // 闪烁相位判断
     // 根 div:bg(terminal_background) + track_focus + on_key_down + on_mouse_down(右键)
@@ -266,7 +318,7 @@ fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoEl
 }
 ```
 
-> `set_window_title`(不是 `set_title`)在视图层同步原生标题;`AppRoot` 的 `TitleBar` 则通过 `cx.observe` 读取 `TerminalView::title()` 显示同一份文本。
+> `set_window_title`(不是 `set_title`)在视图层同步**原生窗口标题**;自绘 `TitleBar` 固定显示文案 `Alacrterm`,终端 OSC 标题只作标签页 / 侧边栏的**会话显示名**——`AppRoot::spawn_session` 里对每个 `TerminalView` 做 `cx.observe(.., |_, _, cx| cx.notify())`,标题变化时重绘标签页与侧边栏。
 
 **`TerminalElement::prepaint` 内(`self.terminal.update`)执行**:
 
@@ -386,8 +438,8 @@ graph LR
 | Event | 处理 |
 |---|---|
 | `Wakeup` / `SelectionsChanged` | 仅 `cx.notify()` 触发重绘 |
-| `TitleChanged` / `BreadcrumbsChanged` | 读 `terminal.breadcrumb_text`(空则回退 `"终端"`)写入 `self.title` 并 `notify` → 原生标题 + 自绘标题栏同步 |
-| `CloseTerminal` | `cx.quit()` 退出应用 |
+| `TitleChanged` / `BreadcrumbsChanged` | 读 `terminal.breadcrumb_text`(空则回退 `"终端"`)写入 `self.title` 并 `notify` → 原生窗口标题刷新、标签页 / 侧边栏的会话显示名同步更新 |
+| `CloseTerminal` | 标记 `exited = true` 并 `notify()`(**不退出应用**)→ 状态栏显示「已断开」,标签与终端内容保留 |
 
 ---
 
@@ -403,9 +455,9 @@ graph LR
 | **退格差异** | `backspace → \x7f`(DEL),`ctrl+backspace → \x08`(BS),对齐 Alacritty 行为 |
 | **颜色体系** | `TerminalColors::dark()` 本地 XTerm 深色默认;256 色映射含 6×6×6 立方体(公式 `index = 16+36r+6g+b` 求逆)与 24 级灰阶(8..238 步长 10);NamedColor 变体来自 vte 0.15(Black..BrightWhite / Foreground / Background / Cursor / Dim* / BrightForeground / DimForeground) |
 | **vi mode** | `Terminal::vi_motion` 支持 `h/j/k/l/w/b/e/%/$/0/^/H/M/L` 移动;`g→Top`、`G→Bottom`、`ctrl+b/f→PageUp/PageDown`、`ctrl+d/u→半页滚动`;`v` 进入选择、`y` 复制、`i` 退出。每次移动先入队 `UpdateSelection(cursor_pos)`(把光标换算成像素坐标)再入队 `ViMotion`,保证选择起点正确 |
-| **焦点** | 每次 render 检查 `focus_handle.is_focused` 再 `window.focus()`,比首次设置一次可靠;焦点进出经 `FOCUS_IN_OUT` 模式向应用发 `\x1b[I` / `\x1b[O` |
-| **窗口标题** | `window.set_window_title(&str)`(不是 `set_title`);自绘标题栏文本通过 `TerminalView::title()` + `cx.observe` 双轨同步 |
-| **标题栏集成** | `TitleBar::title_bar_options()` 用于 `WindowOptions`;Linux 需配合 `window_decorations: Client`;`gpui_component::init` 必须在 `run` 回调开头调用,`Theme::change(Dark)` 保证终端深色背景与标题栏配色一致 |
+| **焦点** | render 中**仅当 `window.focused(cx).is_none()`**(启动 / 焦点真空)才 `window.focus()` 兜底;不能无条件抢占——终端会随 PTY Wakeup / 光标闪烁频繁重渲染,抢占会打断设置弹窗输入框与靠焦点路径分发 `Cancel` 的弹窗关闭按钮。点击终端区域由 `TerminalElement` 左键 `on_mouse_down` 聚焦;焦点进出经 `FOCUS_IN_OUT` 模式向应用发 `\x1b[I` / `\x1b[O` |
+| **窗口标题** | `window.set_window_title(&str)`(不是 `set_title`)同步原生窗口标题;自绘标题栏固定显示 `Alacrterm`,终端 OSC 标题只用于标签页 / 侧边栏的会话显示名 |
+| **标题栏集成** | 用 `TitleBar::window_options()` 作为 `WindowOptions` 基础(内部 `appears_transparent` + `app_owns_titlebar_drag`,隐藏系统标题栏);`gpui_kit::init` 必须在 `run` 回调开头调用,`Theme::change(Dark)` 保证终端深色背景与标题栏配色一致 |
 | **Shell 关闭判定** | `register_task_finished`:用户输入过(`keyboard_input_sent`)或退出码为 0 才 `CloseTerminal`(区分用户主动退出与 spawn 失败) |
 | **Drop 清理** | `pty_tx.shutdown()` + `terminate_child_process()`(Unix `killpg(SIGTERM)`),100ms 后 `kill_child_process()` 兜底强杀 |
 | **OSC 52 剪贴板** | `ClipboardStore` → `cx.write_to_clipboard`;`ClipboardLoad` → 读剪贴板经格式化回调写回 PTY |
@@ -458,19 +510,19 @@ flowchart TD
     N --> L
 
     E -->|window.set_window_title| T[原生标题]
-    E -.cx.observe.-> B2[AppRoot TitleBar 自绘标题栏]
+    E -.cx.observe.-> B2[AppRoot → 标签栏 / 侧边栏显示会话名]
 ```
 
 ---
 
 ## 9. 总结
 
-该终端本质上是 **Zed terminal 的"最小可用裁剪版 + 自绘标题栏"**:
+该终端本质上是 **Zed terminal 的「最小可用裁剪版」+ 自建多会话应用外壳**:
 
 - **保留**:完整的事件循环、4ms 批量事件处理、选择/复制(含自动复制)、vi mode、超链接(OSC 8 + 正则 + 路径猜测)、鼠标协议(SGR/X10)、滚动(含 alternate scroll)、进程标题检测、OSC 52 剪贴板、颜色查询
-- **砍掉**:settings 依赖、主题系统、搜索 UI、多标签、远程终端
+- **砍掉**:settings 依赖、主题系统、搜索 UI
 - **替换**:本地 `TerminalColors`(XTerm 深色默认)+ 手写 Windows shell 探测替代 Zed 的 settings 依赖;`BlinkManager` / `HighlightedRange` 等 editor 依赖用本地 `paint_quad` 实现替代
-- **新增**:`gpui-component` 自绘标题栏(`AppRoot` + `TitleBar`),标题随 OSC 0 同步;隐藏系统标题栏(Windows/macOS `titlebar` 选项,Linux `WindowDecorations::Client`)
+- **新增**:自建应用外壳 —— gpui-kit 自绘标题栏、活动栏 + 侧边栏 + 可拖拽分栏、多会话标签栏、`ssh` 建连对话框、独立设置窗口、状态栏指标(连接状态 / CPU / 内存 / 网络)、Action 风格右键菜单(见 §3)
 
 **架构精髓**:`Term` 网格与 UI 渲染通过 `Content` 快照解耦 —— UI 线程每次 render 只做一次 `make_content` 快照克隆,`sync()` 中消费 `InternalEvent` 队列,后台 IO 线程与 UI 线程通过 unbounded channel + 4ms 批处理窗口通信,使 UI 线程几乎不阻塞在仿真器锁上。
 
@@ -480,18 +532,18 @@ flowchart TD
 
 ```bash
 cargo run -p alacrterm        # 运行终端
+cargo test -p alacrterm       # 单元测试(格式化等纯函数)
 cargo check --workspace       # 编译检查
 cargo build -p alacrterm      # 构建(Windows 下 build.rs 生成版本资源)
 ```
 
 ## 附录:仓库记忆要点(历史修复)
 
-- 渲染重叠修复:行高 = (ascent+descent)×1.2;行 div 需 `.h(line_height).line_height(line_height)`
+- 行高与 cell 宽:行高 = `font_size × line_height_multiplier`(默认 15×1.3),cell 宽 = `text_system.advance(font, size, 'm')`;早期「(ascent+descent)×1.2 + 行 div `.h/.line_height` 防重叠」的做法已废弃(改由 `TerminalElement` 内部统一处理)
 - 宽字符 spacer cell 跳过渲染只 `col+1`
 - `window.handle_input` 只能在 paint 阶段调用 → 自定义 Element 在 `paint()` 注册
 - `terminal.input` 参数是 `impl Into<Cow<'static, [u8]>>`,`String` 需 `.into_bytes()`
-- zed 源码本地缓存:`D:\Compilers\Rust\.cargo\git\checkouts\zed-*`(gpui/gpui_platform 来自 `zed-industries/zed`)
-- gpui-component 源码缓存:`D:\Compilers\Rust\.cargo\git\checkouts\gpui-component-*`(来自 `longbridge/gpui-component`)
-- 标题栏集成三要素:`gpui_component::init` → `Theme::change(ThemeMode::Dark)` → `WindowOptions.titlebar = Some(TitleBar::title_bar_options())`(Linux 加 `window_decorations: Client`)
-- 标题同步双轨:`window.set_window_title`(原生)+ `AppRoot` 经 `cx.observe(&terminal_view)` 读 `TerminalView::title()`(自绘标题栏)
+- `gpui`(包名 `gpui-pre`)、`gpui-kit` 均来自 crates.io;本地 registry 源码:`D:\Toolchains\Rust\cargo\registry\src\rsproxy.cn-e3de039b2554c837\`
+- 标题栏集成三要素:`gpui_kit::init` → `Theme::change(ThemeMode::Dark)` → `WindowOptions` 用 `TitleBar::window_options()` 片段(隐藏系统标题栏;Windows 下系统标题栏颜色跟随系统浅色/深色设置,暗色应用必须自绘)
+- 窗口标题双轨:`window.set_window_title`(原生) + 标签页 / 侧边栏显示 `Session::title()`(用户命名优先,否则终端 OSC 标题);自绘 `TitleBar` 固定显示 `Alacrterm`
 - 滚动 `touch_phase`:`Ended | Cancelled` 均返回 `None`,只 `Moved` 计算滚动增量
