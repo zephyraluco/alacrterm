@@ -15,12 +15,12 @@
 **核心特征:**
 
 - 移除 Zed 的 `settings` crate 依赖:`TerminalColors` 本地定义(XTerm 深色默认)、`CursorShape` / `AlternateScroll` 本地枚举
-- `TerminalBuilder::new` 精简签名:`new(working_directory, shell, env, cx) -> Task<Result<TerminalBuilder>>`,PTY 在后台线程就绪后经 `subscribe(cx)` 启动事件循环
+- `TerminalBuilder` 精简签名:`new(working_directory, shell, env, cx)`(本地 PTY)/ `new_ssh(options, env, cx)`(russh 直连),两者共用同一套建终端流程与 `subscribe(cx)` 事件循环
 - 渲染完全由 gpui 的 `StyledText` / `paint_quad` 逐 cell 驱动,与 Alacritty 网格模型通过 `Content` 快照解耦
 - 集成 `gpui-kit` 自绘标题栏(`TitleBar`),隐藏系统标题栏(主窗口标题为固定文案 `Alacrterm`;终端 OSC 标题只用于标签页 / 侧边栏显示)
 - 保留完整功能:事件循环、批量事件处理、选择/复制、vi mode、超链接、鼠标协议、进程标题检测
 - **多会话外壳**:左右两条可拖拽侧边栏(左:会话列表 / 右:会话信息)夹着中间的标签栏 + 终端;标签可全部关闭,关闭后中间容器一并消失;任一侧折叠时该侧让位给终端。**窗口底部是三条并列的状态栏**:左右两条各属于对应侧边栏(宽度随侧边栏,内含各自的折叠按钮与图标),中间那条是公共状态栏(会话指标;某侧折叠时暂代它的「展开」按钮)(见 §3.2)
-- **远程连接**:「新建终端」对话框收集 IP / 端口 / 名称 / 用户名 / 密码,填了 IP 即用 `ssh -p <端口> [user@]IP` 启动(依赖本机 OpenSSH 客户端);密码字段目前只收集、不参与建连(见 §3.4)
+- **远程连接**:「新建终端」对话框收集 IP / 端口 / 名称 / 用户名 / 密码,填了 IP 即用 **`russh` 直连**(密码就是认证凭据,主机密钥 TOFU),不再调用系统 `ssh` 客户端(见 §3.4 与 `docs/ssh-remote-terminal.md`)
 - **会话显示名**:用户填写的名称优先(`Session::title`),否则回退到终端 OSC 标题
 - **状态栏指标**:连接状态 / 连接目标 / 会话进程 CPU / 内存 / 系统网络速率,每 1.5s 采样(见 §3.6)
 - **独立设置窗口**:自绘标题栏的独立窗口,重复点击只激活已有窗口(见 §3.5)
@@ -34,6 +34,8 @@
 | `gpui`(crate `gpui-pre 0.3`,lib 名仍为 `gpui`) | UI 框架、窗口、文本布局、事件分发 |
 | `gpui-kit 0.6`(`features = ["component"]`) | 自绘标题栏、Sidebar / Tabs / StatusBar / Settings / Resizable、`icon_named!` 图标、主题系统 |
 | `alacritty_terminal 0.26` | VT 序列解析、网格模型、PTY 封装(`tty` 模块) |
+| `russh 0.63`(`default-features = false` + `ring`) | SSH 客户端:远端终端的建连 / 认证 / 通道(`crates/terminal/src/ssh.rs`)。⚠️ 不能用默认的 `aws-lc-rs`:其 `aws-lc-sys` 在 Windows 上需要 NASM |
+| `tokio 1`(`rt` / `net` / `time` / `io-util` / `macros`) | 仅供 SSH 会话专属线程里的 current-thread 运行时使用(gpui 的执行器不是 tokio) |
 | `portable-pty 0.9` | 经 alacritty `tty` 间接使用的跨平台 PTY |
 | `sysinfo 0.39` | `terminal`:前台进程信息 / 工作目录 / 标题检测;`alacrterm`:状态栏指标的 CPU / 内存 / 网络采样 |
 | `rust-embed` | 内嵌 `assets/icons` 资源(图标、主题等) |
@@ -53,7 +55,7 @@ graph TB
         SIDE[sidebar_panel.rs<br/>左/右侧边栏]
         TPANEL[terminal_panel.rs<br/>中间容器:自绘标签栏 + 终端]
         TBAR[tab_bar.rs<br/>自绘标签栏(不用 gpui-kit 的 TabBar/Tab)]
-        DIALOG[connection_dialog.rs<br/>「新建终端」对话框(ssh)]
+        DIALOG[connection_dialog.rs<br/>「新建终端」对话框(本地 / SSH)]
         SETWIN[settings_window.rs<br/>独立设置窗口]
         METRICS[status_metrics.rs<br/>CPU / 内存 / 网络采样]
         ACT[actions.rs<br/>自定义 Action + 全局监听器]
@@ -68,7 +70,8 @@ graph TB
 
     subgraph core层[crates/terminal]
         TERM[terminal.rs<br/>Terminal 实体 + 事件循环]
-        ALAC[alacritty.rs<br/>封装 alacritty_terminal]
+        ALAC[alacritty.rs<br/>封装 alacritty_terminal + 后端抽象]
+        SSH[ssh.rs + ssh_tests.rs<br/>russh 远端后端 + 端到端测试]
         PTYINFO[pty_info.rs<br/>sysinfo 前台进程查询]
         HYPER[alacritty/hyperlinks.rs<br/>URL/路径检测]
         MAP[ mappings/<br/>keys.rs mouse.rs colors.rs]
@@ -92,10 +95,12 @@ graph TB
     TERM --> ALAC
     ALAC --> PTYINFO
     ALAC --> HYPER
+    ALAC --> SSH
     TERM --> MAP
     TERM --> SHELL
     HYPER --> PATH
     ALAC -.tty::Pty.-> OS[OS 伪终端<br/>conpty/winpty]
+    SSH -.russh/tokio.-> NET[远端主机的 SSH 服务] 
 ```
 
 ### 目录结构
@@ -114,7 +119,7 @@ crates/
       terminal_panel.rs         # 中间容器:自绘标签栏(见 tab_bar.rs) + 终端区(无边框卡片)
       tab_bar.rs                # 自绘标签栏:只用 gpui 原语(div/svg)绘制的标签、关闭按钮与右端「+」
       welcome.rs                # 终端容器关闭后的欢迎页(空态背景板:logo + 标题 + 开始使用)
-      connection_dialog.rs      # 「新建终端」对话框:表单 + ssh 参数组装 + 页脚按钮
+      connection_dialog.rs      # 「新建终端」对话框:表单 + 建连请求(本地 shell 或 SshOptions)
       settings_window.rs        # 独立设置窗口(自绘标题栏、窗口句柄复用)
       status_metrics.rs         # sysinfo 采样:连接状态 / CPU / 内存 / 网络 + 字节格式化
       actions.rs                # 自定义 Action(NewTerminal / CloseSession) + 全局监听器
@@ -127,9 +132,11 @@ crates/
   terminal/                     # 核心层:终端仿真 + PTY + 事件循环
     src/
       terminal.rs               # Terminal 实体、事件系统、输入/鼠标/滚动逻辑(约 2600 行)
-      alacritty.rs              # alacritty_terminal 的桥接层(类型别名 + 转换函数)
+      alacritty.rs              # alacritty_terminal 的桥接层(类型别名 + 转换函数 + TerminalInput 后端抽象)
+      ssh.rs                    # SSH 远端后端:russh 连接/认证/通道 + 网格 I/O(专属线程 + tokio)
+      ssh_tests.rs              # SSH 端到端测试:本地起 russh 服务端跑完整链路
       alacritty/hyperlinks.rs   # OSC 8 / URL 正则 / 路径猜测
-      pty_info.rs               # sysinfo 进程信息查询
+      pty_info.rs               # sysinfo 进程信息查询(PidSource::None = 无本地子进程,如 SSH)
       mappings/                 # keys.rs(按键→转义) mouse.rs(鼠标协议) colors.rs
   util/                         # shell 探测、路径工具(shell.rs / paths.rs / rel_path.rs / util.rs)
 ```
@@ -204,10 +211,17 @@ fn main() {
 
 ```rust
 struct Session { view: Entity<TerminalView>, name: Option<SharedString>, target: SessionTarget }
-enum SessionTarget { Local, Ssh { user: String, host: String, port: String } }
-struct SessionRequest { name: Option<SharedString>, shell: Shell, target: SessionTarget }
+enum SessionTarget { Local, Ssh { user: String, host: String, port: String } }   // 只给状态栏展示
+enum SessionRequest {                        // 「怎么把会话建出来」
+    Local { name: Option<SharedString>, shell: Shell },
+    Ssh   { name: Option<SharedString>, options: SshOptions },   // russh 直连,见 docs/ssh-remote-terminal.md
+}
 ```
 
+- `SessionRequest` 是**枚举**:本地 / 远端两条建连路径在 `AppRoot::spawn_session` 里分叉
+  (`TerminalView::new` vs `TerminalView::new_ssh`),`SessionTarget` 由请求推导,只用于状态栏
+- SSH 会话名称留空时回退 `user@host`(不等终端的 OSC 标题:远端不一定上报,而标签页 / 侧边栏 /
+  状态栏都需要一个稳定标识);本地会话仍回退终端自身标题
 - `Session::title(cx)`:用户填写的名称优先,否则回退 `TerminalView::title()`。注意后者取自终端 **OSC 标题**(`breadcrumb_text`),**不是** `Shell::WithArguments` 的 `title_override`——所以自定义名称必须自己存
 - 新建会话统一走 `AppRoot::spawn_session(SessionRequest { .. })`;`spawn_terminal` 只是「本地系统 shell」的快捷封装
 - 生命周期:`set_active_tab` / `close_terminal`(移除实体 → `Terminal` 的 Drop 关闭 PTY 并终止子进程);所有下标访问先 `get()`(允许标签为空)
@@ -217,8 +231,11 @@ struct SessionRequest { name: Option<SharedString>, shell: Shell, target: Sessio
 
 - 触发路径:侧边栏会话条目右键菜单「新建终端」→ `NewTerminal` action → 全局监听器 → `AppRoot::open_new_terminal_dialog`
 - 表单 5 个字段:IP / 端口(默认 22) / 名称 / 用户名 / 密码(`.masked(true)`,**只影响渲染**,`value()` 仍返回明文)
-- 建连规则:**IP 留空 → 本地系统 shell;填了 IP → `ssh -p <端口> [user@]IP`**(依赖本机 OpenSSH 客户端);名称作为会话显示名
-- 密码字段目前**只收集不参与建连**——系统 ssh 不接受命令行传密码(需改用 SSH 库或 `sshpass` 才能免交互)
+- 建连规则:**IP 留空 → 本地系统 shell;填了 IP → `russh` 直连远端**(不再调用系统 `ssh` 客户端,
+  见 `docs/ssh-remote-terminal.md`);名称作为会话显示名
+- 密码字段就是这次连接的**认证凭据**(填了就先试密码,失败即报错、不再偷偷试私钥);
+  密码不填时后端按「免密 → `~/.ssh/id_ed25519` / `id_ecdsa` / `id_rsa`」的顺序尝试
+- 用户名留空 → 取本机 `USERNAME` / `USER`;端口为空 / 非数字 / 0 → 回退 22 并打 warn 日志
 - 输入框实体必须在打开对话框**之前**创建:对话框构建闭包是 `Fn`(每帧调用),在闭包内创建会每帧重置输入
 - 页脚按钮用 `DialogFooter` + `DialogClose`(取消) / `DialogAction`(连接):**`Dialog` 不会自动生成确定/取消按钮**(`button_props` 只被 `AlertDialog` 使用),不设 footer 就没有按钮
 
@@ -324,6 +341,11 @@ terminal.process_pty_event(event, cx)?;
 ```
 
 > 批处理窗口默认 4ms,事件上限 100 条。`Wakeup` 与其他事件分两条路径处理,保证渲染通知不因批量堆积而延迟。
+
+> **SSH 远端会话走同一条路径**:只是把「alacritty 事件循环 IO 线程」换成
+> `crates/terminal/src/ssh.rs` 里的专属会话线程——它用同一个 `Processor::advance` 写同一个
+> `Term`,发同一个 `Wakeup`,`Term` 与 `subscribe` 事件循环完全不知道数据来自哪个后端
+> (见 `docs/ssh-remote-terminal.md`)。
 
 ### 4.2 渲染路径(网格 → 屏幕)
 
@@ -453,7 +475,11 @@ graph LR
 
 **后端事件**(`TerminalBackendEvent`,alacritty 回调 → channel):
 
-`MouseCursorDirty` / `Title` / `ResetTitle` / `ClipboardStore` / `ClipboardLoad` / `ColorRequest` / `PtyWrite` / `TextAreaSizeRequest` / `CursorBlinkingChange` / `Wakeup` / `Bell` / `Exit` / `ChildExit`
+`MouseCursorDirty` / `Title` / `ResetTitle` / `ClipboardStore` / `ClipboardLoad` / `ColorRequest` / `PtyWrite` / `TextAreaSizeRequest` / `CursorBlinkingChange` / `Wakeup` / `Bell` / `Connected` / `Exit` / `ChildExit`
+
+> `Connected` 是 SSH 后端新增的(本地 PTY 建出来即为已连):它**不**转成 `Event`,只置位
+> `Terminal::connected`,状态栏通过 `TerminalView::is_connected(cx)` 直接读实体
+> (紧随其后的 `Wakeup` 就会触发重绘)。远端 shell 不在本机进程表里,没有它就只能永远显示「启动中」。
 
 > **顺序敏感设计**:`ColorRequest`(OSC 4/10/11 颜色查询)必须在事件循环里处理而不是 `sync()`,否则响应乱序 —— 例如应用发送 `OSC 11;?ST`(颜色请求)后紧跟 `CSI c`(设备属性请求),后者的响应会先到。
 
@@ -557,7 +583,8 @@ flowchart TD
 - **保留**:完整的事件循环、4ms 批量事件处理、选择/复制(含自动复制)、vi mode、超链接(OSC 8 + 正则 + 路径猜测)、鼠标协议(SGR/X10)、滚动(含 alternate scroll)、进程标题检测、OSC 52 剪贴板、颜色查询
 - **砍掉**:settings 依赖、主题系统、搜索 UI
 - **替换**:本地 `TerminalColors`(XTerm 深色默认)+ 手写 Windows shell 探测替代 Zed 的 settings 依赖;`BlinkManager` / `HighlightedRange` 等 editor 依赖用本地 `paint_quad` 实现替代
-- **新增**:自建应用外壳 —— gpui-kit 自绘标题栏、活动栏 + 侧边栏 + 可拖拽分栏、多会话标签栏、`ssh` 建连对话框、独立设置窗口、状态栏指标(连接状态 / CPU / 内存 / 网络)、Action 风格右键菜单(见 §3)
+- **新增**:自建应用外壳 —— gpui-kit 自绘标题栏、活动栏 + 侧边栏 + 可拖拽分栏、多会话标签栏、`connection_dialog`(本地 shell / SSH)、独立设置窗口、状态栏指标(连接状态 / CPU / 内存 / 网络)、Action 风格右键菜单(见 §3)
+- **新增**:SSH 远端后端 —— `russh` 直连(密码 / 免密 / 本地私钥、主机密钥 TOFU、PTY + shell、通道拆半双向转发),与本地 PTY 共用同一套 `Term` / 事件循环 / 渲染(见 `docs/ssh-remote-terminal.md`)
 
 **架构精髓**:`Term` 网格与 UI 渲染通过 `Content` 快照解耦 —— UI 线程每次 render 只做一次 `make_content` 快照克隆,`sync()` 中消费 `InternalEvent` 队列,后台 IO 线程与 UI 线程通过 unbounded channel + 4ms 批处理窗口通信,使 UI 线程几乎不阻塞在仿真器锁上。
 
@@ -568,9 +595,12 @@ flowchart TD
 ```bash
 cargo run -p alacrterm        # 运行终端
 cargo test -p alacrterm       # 单元测试(格式化等纯函数)
+cargo test -p terminal ssh_tests -- --test-threads=1   # SSH 端到端测试(本地起 russh 服务端)
 cargo check --workspace       # 编译检查
 cargo build -p alacrterm      # 构建(Windows 下 build.rs 生成版本资源)
 ```
+
+> 注:`cargo test -p terminal` 里 23 个 `alacritty::hyperlinks::tests::path::*` 是**既有失败**,与本节改动无关。
 
 ## 附录:仓库记忆要点(历史修复)
 

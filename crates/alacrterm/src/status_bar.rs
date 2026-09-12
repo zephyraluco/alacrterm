@@ -65,18 +65,32 @@ fn metric_separator(cx: &App) -> AnyElement {
 /// `exited` 来自 [`TerminalView::has_exited`](terminal_view::TerminalView::has_exited)：
 /// 会话进程结束的事件一到就能立刻显示「已断开」，不必等下一次指标采样
 /// （最多 1.5s）才发现进程没了。
+///
+/// `connected` 来自 [`TerminalView::is_connected`](terminal_view::TerminalView::is_connected)：
+/// 远端会话的 shell 不在本机进程表里，靠采样判断不出「是否活着」，
+/// 只能用后端自己上报的「通道已就绪」（见 `crate::status_metrics` 的边界说明）。
 fn render_session_metrics(
     target: &SessionTarget,
     metrics: SessionMetrics,
     exited: bool,
+    connected: bool,
     cx: &App,
 ) -> AnyElement {
-    let (state_text, state_color) = match (exited, metrics.alive) {
-        // 会话结束事件已到达（最及时），或采样发现进程已消失。
-        (true, _) | (false, Some(false)) => ("已断开", cx.theme().muted_foreground),
-        (false, Some(true)) => ("运行中", cx.theme().success),
-        // 还没采样到（刚启动 / PTY 未就绪）：显示中性状态，避免误报断开。
-        (false, None) => ("启动中", cx.theme().muted_foreground),
+    let (state_text, state_color) = match target {
+        // 远端会话：只看会话自身的事件（本地采样的 CPU / 内存对它是无关的，
+        // 进程一栏显示 `--`）。
+        SessionTarget::Ssh { .. } => match (exited, connected) {
+            (true, _) => ("已断开", cx.theme().muted_foreground),
+            (false, true) => ("运行中", cx.theme().success),
+            (false, false) => ("连接中", cx.theme().muted_foreground),
+        },
+        SessionTarget::Local => match (exited, metrics.alive) {
+            // 会话结束事件已到达（最及时），或采样发现进程已消失。
+            (true, _) | (false, Some(false)) => ("已断开", cx.theme().muted_foreground),
+            (false, Some(true)) => ("运行中", cx.theme().success),
+            // 还没采样到（刚启动 / PTY 未就绪）：显示中性状态，避免误报断开。
+            (false, None) => ("启动中", cx.theme().muted_foreground),
+        },
     };
 
     let cpu = metrics
@@ -134,12 +148,16 @@ impl AppRoot {
         // 当前会话指标：没有会话（标签页全部关闭）时给一句占位文案——
         // 此时这条状态栏本身仍要在，因为折叠侧的「展开」按钮挂在这里。
         let metrics = match self.terminals.get(self.active) {
-            Some(session) => render_session_metrics(
-                &session.target,
-                self.monitor.metrics(),
-                session.view.read(cx).has_exited(),
-                cx,
-            ),
+            Some(session) => {
+                let view = session.view.read(cx);
+                render_session_metrics(
+                    &session.target,
+                    self.monitor.metrics(),
+                    view.has_exited(),
+                    view.is_connected(cx),
+                    cx,
+                )
+            }
             None => div()
                 .flex_shrink_0()
                 .child("无会话")

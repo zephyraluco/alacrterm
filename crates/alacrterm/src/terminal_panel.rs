@@ -20,7 +20,8 @@
 //! 侧边栏的会话列表经由 [`AppRoot::set_active_tab`] 复用同一套逻辑。
 
 use gpui::{
-    AnyElement, AppContext as _, Context, IntoElement, ParentElement as _, Styled as _, Window, div,
+    AnyElement, AppContext as _, Context, IntoElement, ParentElement as _, SharedString,
+    Styled as _, Window, div,
 };
 use gpui_kit::component::v_flex;
 use terminal_view::TerminalView;
@@ -32,32 +33,48 @@ impl AppRoot {
     /// 新建一个本地终端会话（默认系统 shell）。
     pub(crate) fn spawn_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.spawn_session(
-            SessionRequest {
+            SessionRequest::Local {
                 name: None,
                 shell: Shell::System,
-                target: SessionTarget::Local,
             },
             window,
             cx,
         );
     }
 
-    /// 按给定参数新建会话（PTY 在后台启动），并订阅其事件用于刷新界面。
+    /// 按给定参数新建会话（PTY / SSH 连接在后台启动），并订阅其事件用于刷新界面。
     ///
     /// 参数来自 [`ConnectionForm`](crate::connection_dialog::ConnectionForm)：
-    /// 显示名、要启动的 shell（本地 shell 或 `ssh`）、连接目标（状态栏展示用）。
+    /// 显示名 + 本地 shell 或 SSH 连接参数；
+    /// 连接目标（[`SessionTarget`]）由参数推导，供状态栏展示。
     pub(crate) fn spawn_session(
         &mut self,
         request: SessionRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let SessionRequest {
-            name,
-            shell,
-            target,
-        } = request;
-        let view = cx.new(|cx| TerminalView::new(None, shell, window, cx));
+        let (view, name, target) = match request {
+            SessionRequest::Local { name, shell } => (
+                cx.new(|cx| TerminalView::new(None, shell, window, cx)),
+                name,
+                SessionTarget::Local,
+            ),
+            SessionRequest::Ssh { name, options } => {
+                let target = SessionTarget::Ssh {
+                    user: options.user().to_string(),
+                    host: options.host().to_string(),
+                    port: options.port().to_string(),
+                };
+                // 名称留空时用 `user@host`：远端不一定上报窗口标题（OSC），
+                // 但标签页 / 侧边栏 / 状态栏都需要一个稳定的标识。
+                let name = Some(name.unwrap_or_else(|| SharedString::from(options.endpoint())));
+                (
+                    cx.new(|cx| TerminalView::new_ssh(options, window, cx)),
+                    name,
+                    target,
+                )
+            }
+        };
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         self.terminals.push(Session {
             view,

@@ -4,13 +4,15 @@
 //! [`AppRoot::open_new_terminal_dialog`]）。
 //!
 //! 行为约定：
-//! - **填了 IP** → 以 `ssh -p <端口> [用户名@]IP` 启动会话（依赖系统自带 OpenSSH 客户端）；
+//! - **填了 IP** → 用 `russh` 直连远端主机（不调用系统 `ssh` 客户端，见
+//!   `crates/terminal/src/ssh.rs`）；密码字段就是这次连接的认证凭据；
 //! - **IP 留空** → 启动本地系统 shell（等同于原来的「新建终端」）；
-//! - **名称** 作为会话显示名（标签页 / 侧边栏 / 状态栏），留空则回退到终端自身标题。
+//! - **名称** 作为会话显示名（标签页 / 侧边栏 / 状态栏），留空时 SSH 会话回退到
+//!   `user@host`、本地会话回退到终端自身标题；
+//! - **用户名** 留空时取本机当前用户名（与 OpenSSH 的默认行为一致）。
 //!
-//! 关于密码字段：本机 OpenSSH 客户端不接受命令行传入的密码（这是 ssh 的刻意设计），
-//! 因此这里只做收集与掩码输入，实际认证仍需在终端里按提示交互输入。
-//! 后续若要真正免交互登录，需要改用 SSH 库或 `sshpass` 之类的辅助程序。
+//! 认证顺序由后端决定：填了密码先用密码，否则先试免密、再依次试 `~/.ssh` 下的
+//! 常用私钥；主机密钥采用 TOFU（首次连接记入 `known_hosts`，之后不一致即拒绝）。
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _,
@@ -24,9 +26,10 @@ use gpui_kit::component::{
     input::{Input, InputState},
     v_flex,
 };
+use terminal::SshOptions;
 use util::shell::Shell;
 
-use crate::{AppRoot, SessionRequest, SessionTarget};
+use crate::{AppRoot, SessionRequest};
 
 /// 端口留空时使用的默认 SSH 端口。
 const DEFAULT_SSH_PORT: &str = "22";
@@ -66,48 +69,49 @@ impl ConnectionForm {
         input.read(cx).value().trim().to_string()
     }
 
-    /// 依据表单内容得出「建连请求」（显示名 + 要启动的 shell + 连接目标）。
+    /// 依据表单内容得出「建连请求」。
     ///
-    /// 名称留空返回 `None`，由 [`crate::Session`] 回退到终端自身标题。
+    /// 名称留空返回 `None`：SSH 会话由 [`crate::AppRoot::spawn_session`] 回退到
+    /// `user@host`，本地会话回退到终端自身标题。
     pub(crate) fn build(&self, cx: &App) -> SessionRequest {
         let name = self.trimmed(&self.name, cx);
         let host = self.trimmed(&self.host, cx);
-        let port = self.trimmed(&self.port, cx);
+        let port_text = self.trimmed(&self.port, cx);
         let user = self.trimmed(&self.user, cx);
-        // 密码字段目前不参与建连（系统 ssh 不接受命令行传密码），
-        // 仅作输入收集，见模块文档。
+        let password = self.trimmed(&self.password, cx);
 
         let name = (!name.is_empty()).then(|| SharedString::from(name));
 
-        // IP 留空 → 本地系统 shell；否则走 ssh。
+        // IP 留空 → 本地系统 shell；否则走 russh 直连。
         if host.is_empty() {
-            return SessionRequest {
+            return SessionRequest::Local {
                 name,
                 shell: Shell::System,
-                target: SessionTarget::Local,
             };
         }
 
-        let port = if port.is_empty() {
-            DEFAULT_SSH_PORT.to_string()
+        // 端口非法（空 / 非数字 / 0）时回退到 22：SSH 端口没有合理的自动纠正手段，
+        // 静默回退比拒绝建连更符合这里的预期。
+        let port: u16 = port_text.parse().unwrap_or_default();
+        let port = if port == 0 {
+            log::warn!("端口 {port_text:?} 不是合法端口，回退到 {DEFAULT_SSH_PORT}");
+            DEFAULT_SSH_PORT.parse().unwrap_or(22)
         } else {
             port
         };
-        let target_host = if user.is_empty() {
-            host.clone()
-        } else {
-            format!("{user}@{host}")
-        };
 
-        SessionRequest {
+        SessionRequest::Ssh {
             name,
-            shell: Shell::WithArguments {
-                program: "ssh".to_string(),
-                args: vec!["-p".to_string(), port.clone(), target_host],
-                // 显示名由 Session 统一管理，这里不再重复指定。
-                title_override: None,
-            },
-            target: SessionTarget::Ssh { user, host, port },
+            options: SshOptions::new(
+                host,
+                port,
+                if user.is_empty() {
+                    current_username()
+                } else {
+                    user
+                },
+                (!password.is_empty()).then_some(password),
+            ),
         }
     }
 
@@ -143,6 +147,13 @@ impl ConnectionForm {
             .child(field("密码", &self.password, cx))
             .into_any_element()
     }
+}
+
+/// 用户名为空时使用的默认值：本机当前用户名（与 OpenSSH 的默认行为一致）。
+fn current_username() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "root".to_string())
 }
 
 /// 单个字段：标题 + 输入框。

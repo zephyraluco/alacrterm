@@ -10,37 +10,70 @@ use sysinfo::{Pid, Process, ProcessRefreshKind, RefreshKind, System, UpdateKind}
 use crate::{Event, Terminal};
 
 #[derive(Clone, Copy)]
-pub struct ProcessIdGetter {
-    handle: i32,
-    fallback_pid: u32,
+pub struct ProcessIdGetter(PidSource);
+
+/// 会话进程信息的来源。
+#[derive(Clone, Copy)]
+enum PidSource {
+    /// 本地 PTY：子进程 pid 已知，前台进程组从 PTY 句柄查询。
+    Pty { handle: i32, fallback_pid: u32 },
+    /// 没有本地子进程（SSH 远端会话）。
+    ///
+    /// 远端的 shell 不在本机进程表里，任何「本机进程」都是无关的，因此一律报告 `None`：
+    /// 状态栏的 CPU / 内存显示 `--`，标题回退到会话名，也不会误杀无关进程。
+    None,
 }
 
 impl ProcessIdGetter {
     pub(crate) fn new(handle: i32, fallback_pid: u32) -> ProcessIdGetter {
-        ProcessIdGetter {
+        ProcessIdGetter(PidSource::Pty {
             handle,
             fallback_pid,
-        }
+        })
+    }
+
+    /// 用于 SSH 等没有本地子进程的后端。
+    pub(crate) fn none() -> ProcessIdGetter {
+        ProcessIdGetter(PidSource::None)
     }
 
     pub fn fallback_pid(&self) -> Pid {
-        Pid::from_u32(self.fallback_pid)
+        match self.0 {
+            PidSource::Pty { fallback_pid, .. } => Pid::from_u32(fallback_pid),
+            PidSource::None => Pid::from_u32(0),
+        }
+    }
+
+    /// 是否指向本机上真实存在的子进程（`PtySource::None` 时为假）。
+    ///
+    /// [`PtyProcessInfo::terminate_child_process`] 用它避免把 pid 0 送进
+    /// `killpg(0, ..)`（那会作用到**本进程所在的整个进程组**）。
+    #[cfg(unix)]
+    fn is_local(&self) -> bool {
+        matches!(self.0, PidSource::Pty { .. })
     }
 }
 
 #[cfg(unix)]
 impl ProcessIdGetter {
     fn pid(&self) -> Option<Pid> {
+        let PidSource::Pty {
+            handle,
+            fallback_pid,
+        } = self.0
+        else {
+            return None;
+        };
         // Negative pid means error.
         // Zero pid means no foreground process group is set on the PTY yet.
         // Avoid killing the current process by returning a zero pid.
-        let pid = unsafe { libc::tcgetpgrp(self.handle) };
+        let pid = unsafe { libc::tcgetpgrp(handle) };
         if pid > 0 {
             return Some(Pid::from_u32(pid as u32));
         }
 
-        if self.fallback_pid > 0 {
-            return Some(Pid::from_u32(self.fallback_pid));
+        if fallback_pid > 0 {
+            return Some(Pid::from_u32(fallback_pid));
         }
 
         None
@@ -50,16 +83,23 @@ impl ProcessIdGetter {
 #[cfg(windows)]
 impl ProcessIdGetter {
     fn pid(&self) -> Option<Pid> {
-        let pid = unsafe { GetProcessId(HANDLE(self.handle as _)) };
+        let PidSource::Pty {
+            handle,
+            fallback_pid,
+        } = self.0
+        else {
+            return None;
+        };
+        let pid = unsafe { GetProcessId(HANDLE(handle as _)) };
         // the GetProcessId may fail and returns zero, which will lead to a stack overflow issue
         if pid == 0 {
             // in the builder process, there is a small chance, almost negligible,
             // that this value could be zero, which means child_watcher returns None,
             // GetProcessId returns 0.
-            if self.fallback_pid == 0 {
+            if fallback_pid == 0 {
                 return None;
             }
-            return Some(Pid::from_u32(self.fallback_pid));
+            return Some(Pid::from_u32(fallback_pid));
         }
         Some(Pid::from_u32(pid))
     }
@@ -144,6 +184,11 @@ impl PtyProcessInfo {
 
     #[cfg(unix)]
     pub(crate) fn terminate_child_process(&self) -> bool {
+        // 没有本地子进程时 `fallback_pid()` 是 0，`killpg(0, ..)` 会作用到本进程所在的
+        // 整个进程组（等于把自己也杀掉），必须先挡住。
+        if !self.pid_getter.is_local() {
+            return false;
+        }
         let pid = self.pid_getter.fallback_pid();
         unsafe { libc::killpg(pid.as_u32() as i32, libc::SIGTERM) == 0 }
     }

@@ -79,33 +79,64 @@ impl From<&AlacrittyPty> for ProcessIdGetter {
     }
 }
 
-pub(super) struct PtySender {
+/// 终端后端的「下行」通道：用户输入 / 窗口尺寸 / 关闭请求。
+///
+/// 本地 PTY 与 SSH 远端共用一个抽象，[`PtySender`] 因此不必知道数据最终去了哪里
+/// （本地是 alacritty 事件循环的消息队列，SSH 是专属会话线程的通道）。
+pub(super) trait TerminalInput: Send + 'static {
+    fn write(&self, input: Cow<'static, [u8]>);
+    fn resize(&self, size: WindowSize);
+    fn shutdown(&self);
+}
+
+/// 本地 PTY：投递到 `alacritty_terminal` 的事件循环。
+struct LocalInput {
     notifier: Notifier,
 }
 
-impl PtySender {
-    pub(super) fn notify(&self, input: impl Into<Cow<'static, [u8]>>) {
+impl TerminalInput for LocalInput {
+    fn write(&self, input: Cow<'static, [u8]>) {
         self.notifier.notify(input);
     }
 
-    pub(super) fn resize(&self, bounds: TerminalBounds) {
-        if let Err(error) = self
-            .notifier
-            .0
-            .send(Msg::Resize(window_size_from_terminal_bounds(bounds)))
-        {
+    fn resize(&self, size: WindowSize) {
+        if let Err(error) = self.notifier.0.send(Msg::Resize(size)) {
             log::error!("failed to resize alacritty pty: {error}");
         }
     }
 
-    pub(super) fn shutdown(&self) {
+    fn shutdown(&self) {
         if let Err(error) = self.notifier.0.send(Msg::Shutdown) {
             log::debug!("failed to shut down alacritty pty loop: {error}");
         }
     }
 }
 
-fn window_size_from_terminal_bounds(bounds: TerminalBounds) -> WindowSize {
+pub(super) struct PtySender {
+    input: Box<dyn TerminalInput>,
+}
+
+impl PtySender {
+    pub(super) fn new(input: impl TerminalInput) -> Self {
+        Self {
+            input: Box::new(input),
+        }
+    }
+
+    pub(super) fn notify(&self, input: impl Into<Cow<'static, [u8]>>) {
+        self.input.write(input.into());
+    }
+
+    pub(super) fn resize(&self, bounds: TerminalBounds) {
+        self.input.resize(window_size_from_terminal_bounds(bounds));
+    }
+
+    pub(super) fn shutdown(&self) {
+        self.input.shutdown();
+    }
+}
+
+pub(super) fn window_size_from_terminal_bounds(bounds: TerminalBounds) -> WindowSize {
     WindowSize {
         num_lines: bounds.num_lines() as u16,
         num_cols: bounds.num_columns() as u16,
@@ -179,9 +210,9 @@ pub(super) fn spawn_event_loop(
     let pty_tx = event_loop.channel();
     let _io_thread = event_loop.spawn();
 
-    Ok(PtySender {
+    Ok(PtySender::new(LocalInput {
         notifier: Notifier(pty_tx),
-    })
+    }))
 }
 
 pub(super) fn resize(term: &mut AlacrittyTerm, bounds: TerminalBounds) {

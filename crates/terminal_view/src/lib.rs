@@ -19,12 +19,15 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Result;
 use gpui::{
     App, AppContext as _, AsyncApp, Entity, FocusHandle, IntoElement, InteractiveElement,
     KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollWheelEvent,
-    SharedString, Styled, Subscription, WeakEntity, Window, div, rgb,
+    SharedString, Styled, Subscription, Task, WeakEntity, Window, div, rgb,
 };
-use terminal::{Event as TerminalEvent, Modes, Terminal, TerminalBounds, TerminalBuilder};
+use terminal::{
+    Event as TerminalEvent, Modes, SshOptions, Terminal, TerminalBounds, TerminalBuilder,
+};
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
 use util::shell::Shell;
@@ -65,6 +68,30 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
+        let env = std::env::vars().collect();
+        let builder = TerminalBuilder::new(working_directory, shell, env, cx);
+        Self::with_builder(builder, window, cx)
+    }
+
+    /// 创建终端视图并异步启动一个 **SSH 远端会话**（russh 直连，不经系统 `ssh`）。
+    ///
+    /// 连接失败不会让视图进入错误态：原因会由终端后端写进网格（见 `terminal::ssh`）。
+    pub fn new_ssh(
+        options: SshOptions,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
+        let env = std::env::vars().collect();
+        let builder = TerminalBuilder::new_ssh(options, env, cx);
+        Self::with_builder(builder, window, cx)
+    }
+
+    /// `new` / `new_ssh` 的公共实现：只有「终端是怎么建出来的」不同。
+    fn with_builder(
+        builder: Task<Result<TerminalBuilder>>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
 
         let settings = Arc::new(TerminalRenderSettings::default());
@@ -91,9 +118,6 @@ impl TerminalView {
             }
         })
         .detach();
-
-        let env = std::env::vars().collect();
-        let builder = TerminalBuilder::new(working_directory, shell, env, cx);
 
         cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
@@ -323,6 +347,16 @@ impl TerminalView {
     /// 会话进程是否已结束（本地 shell 退出 / ssh 连接断开等）。
     pub fn has_exited(&self) -> bool {
         self.exited
+    }
+
+    /// 数据通道是否已就绪。
+    ///
+    /// 本地终端建出 PTY 即为真；SSH 会话要等认证与通道建立完成（见 `terminal::ssh`）。
+    /// 终端实体还没建好时也返回假（此刻确实还用不了）。
+    pub fn is_connected(&self, cx: &App) -> bool {
+        self.terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.read_with(cx, |terminal, _| terminal.is_connected()))
     }
 
     /// 计算光标是否可见（闪烁控制）。

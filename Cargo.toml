@@ -33,6 +33,11 @@ url = "2.2"
 parking_lot = "0.12"
 percent-encoding = "2.3"
 futures = "0.3.32"
+# SSH 远端终端：客户端库 + 它要求的 tokio 运行时（只用在专属线程里，见 crates/terminal/src/ssh.rs）
+# ⚠️ 关掉默认的 aws-lc-rs 加密后端并换成 ring：aws-lc-sys 在 Windows 上需要 NASM，
+#    本机工具链没有（`NASM command not found` → 构建直接失败）；ring 自带预生成汇编。
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros"] }
 itertools = "0.15.0"
 regex = "1.5"
 dirs = "6.0"

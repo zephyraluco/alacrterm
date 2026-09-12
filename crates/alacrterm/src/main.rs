@@ -56,6 +56,7 @@ use gpui_kit::{
     },
 };
 use terminal_view::TerminalView;
+use terminal::SshOptions;
 use util::shell::Shell;
 
 use sidebar_panel::{
@@ -150,14 +151,20 @@ impl SessionTarget {
     }
 }
 
-/// 新建会话所需的参数（显示名 + 要启动的 shell + 连接目标）。
-pub(crate) struct SessionRequest {
-    /// 用户填写的显示名；`None` 表示回退到终端自身标题。
-    pub(crate) name: Option<SharedString>,
-    /// 要启动的 shell（本地系统 shell，或 `ssh` 等外部命令）。
-    pub(crate) shell: Shell,
-    /// 连接目标（用于状态栏展示）。
-    pub(crate) target: SessionTarget,
+/// 新建会话所需的参数：本地 shell，或 `russh` 直连的 SSH 远端会话。
+pub(crate) enum SessionRequest {
+    /// 本地系统 shell（对话框里 IP 留空）。
+    Local {
+        /// 用户填写的显示名；`None` 表示回退到终端自身标题。
+        name: Option<SharedString>,
+        shell: Shell,
+    },
+    /// SSH 远端会话（对话框里填了 IP）：详见 `crates/terminal/src/ssh.rs`。
+    Ssh {
+        /// 用户填写的显示名；`None` 表示用 `user@host`。
+        name: Option<SharedString>,
+        options: SshOptions,
+    },
 }
 
 /// 一个终端会话：终端视图 + 显示名 + 连接目标。

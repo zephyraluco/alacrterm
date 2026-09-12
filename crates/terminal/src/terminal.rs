@@ -2,6 +2,9 @@ mod mappings;
 
 mod alacritty;
 mod pty_info;
+mod ssh;
+
+pub use ssh::SshOptions;
 
 use anyhow::{Result, bail};
 use log::trace;
@@ -686,6 +689,8 @@ pub(crate) enum TerminalBackendEvent {
     CursorBlinkingChange,
     Wakeup,
     Bell,
+    /// 远端会话已连通（SSH 后端专用；本地 PTY 建出来就算连通）。
+    Connected,
     Exit,
     ChildExit(ExitStatus),
 }
@@ -704,6 +709,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::CursorBlinkingChange => f.write_str("CursorBlinkingChange"),
             Self::Wakeup => f.write_str("Wakeup"),
             Self::Bell => f.write_str("Bell"),
+            Self::Connected => f.write_str("Connected"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
         }
@@ -860,6 +866,15 @@ pub struct TerminalBuilder {
     events_rx: UnboundedReceiver<TerminalBackendEvent>,
 }
 
+/// 终端的后端：本地 PTY，或 `russh` 直连的 SSH 远端会话。
+enum Transport {
+    Local {
+        working_directory: Option<PathBuf>,
+        shell: Shell,
+    },
+    Ssh(SshOptions),
+}
+
 impl TerminalBuilder {
     /// Create a new terminal with the given working directory and shell.
     ///
@@ -868,6 +883,35 @@ impl TerminalBuilder {
     pub fn new(
         working_directory: Option<PathBuf>,
         shell: Shell,
+        env: HashMap<String, String>,
+        cx: &App,
+    ) -> Task<Result<TerminalBuilder>> {
+        Self::build(
+            Transport::Local {
+                working_directory,
+                shell,
+            },
+            env,
+            cx,
+        )
+    }
+
+    /// 创建一个 **SSH 远端终端**：用 [`SshOptions`] 直连远端主机（不调用系统 `ssh`）。
+    ///
+    /// 与本地终端唯一的差别是数据通道（见 `crates/terminal/src/ssh.rs`）；不接受工作目录——远端
+    /// shell 的起始目录由服务端决定。连接失败**不会**让建终端失败，原因会作为文本
+    /// 写进终端网格。
+    pub fn new_ssh(
+        options: SshOptions,
+        env: HashMap<String, String>,
+        cx: &App,
+    ) -> Task<Result<TerminalBuilder>> {
+        Self::build(Transport::Ssh(options), env, cx)
+    }
+
+    /// `new` / `new_ssh` 的公共实现：上游的建终端流程只在「数据通道从哪来」上分叉。
+    fn build(
+        transport: Transport,
         mut env: HashMap<String, String>,
         cx: &App,
     ) -> Task<Result<TerminalBuilder>> {
@@ -889,100 +933,9 @@ impl TerminalBuilder {
 
             insert_zed_terminal_env(&mut env);
 
-            #[derive(Default)]
-            struct ShellParams {
-                program: String,
-                args: Option<Vec<String>>,
-                title_override: Option<String>,
-            }
-
-            impl ShellParams {
-                fn new(
-                    program: String,
-                    args: Option<Vec<String>>,
-                    title_override: Option<String>,
-                ) -> Self {
-                    log::debug!("Using {program} as shell");
-                    Self {
-                        program,
-                        args,
-                        title_override,
-                    }
-                }
-            }
-
-            let shell_params = match shell.clone() {
-                Shell::System => {
-                    if cfg!(windows) {
-                        Some(ShellParams::new(
-                            util::shell::get_windows_system_shell(),
-                            None,
-                            None,
-                        ))
-                    } else {
-                        None
-                    }
-                }
-                Shell::Program(program) => Some(ShellParams::new(program, None, None)),
-                Shell::WithArguments {
-                    program,
-                    args,
-                    title_override,
-                } => Some(ShellParams::new(program, Some(args), title_override)),
-            };
-            let terminal_title_override =
-                shell_params.as_ref().and_then(|e| e.title_override.clone());
-
-            #[cfg(windows)]
-            let shell_program = shell_params.as_ref().map(|params| {
-                use util::ResultExt;
-
-                Self::resolve_path(&params.program)
-                    .log_err()
-                    .unwrap_or(params.program.clone())
-            });
-
-            // Note: when remoting, this shell_kind will scrutinize `ssh` or
-            // `wsl.exe` as a shell and fall back to posix or powershell based on
-            // the compilation target. This is fine right now due to the restricted
-            // way we use the return value, but would become incorrect if we
-            // supported remoting into windows.
-            let shell_kind = shell.shell_kind(cfg!(windows));
-
-            let alacritty_shell = shell_params.as_ref().map(|params| {
-                (
-                    params.program.clone(),
-                    params.args.clone().unwrap_or_default(),
-                )
-            });
-            let pty_options = pty_options(
-                alacritty_shell,
-                working_directory.clone(),
-                env.clone(),
-                // We pass in the foreground thread's signal mask to the child process via pty_options,
-                // so terminal construction can run on a background thread without breaking Ctrl-C and other signals
-                // otherwise the terminal would inherit the background executor's signal mask which blocks
-                // some terminal signals
-                #[cfg(windows)]
-                shell_kind.tty_escape_args(),
-            );
-
             let scrolling_history = DEFAULT_SCROLL_HISTORY_LINES;
             let config = pty_term_config(scrolling_history);
-
-            //Setup the pty...
-            let pty = match open_pty(&pty_options, TerminalBounds::default(), 0) {
-                Ok(pty) => pty,
-                Err(error) => {
-                    bail!(TerminalError {
-                        directory: working_directory,
-                        program: shell_params.as_ref().map(|params| params.program.clone()),
-                        args: shell_params.as_ref().and_then(|params| params.args.clone()),
-                        title_override: terminal_title_override,
-                        source: error,
-                    });
-                }
-            };
+            let is_remote = matches!(transport, Transport::Ssh(_));
 
             // Spawn a background channel so the Alacritty EventLoop can communicate with us.
             //TODO: Remove with a bounded sender which can be dispatched on &self
@@ -990,20 +943,152 @@ impl TerminalBuilder {
             //Set up the terminal...
             let term = new_term(&config, TerminalBounds::default(), events_tx.clone());
 
-            let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
+            /// 后端分叉的产物：下行句柄 + 进程信息 + 标题覆盖 + 复制模板用的 shell。
+            struct Backend {
+                pty_tx: PtySender,
+                info: Arc<PtyProcessInfo>,
+                title_override: Option<String>,
+                template_shell: Shell,
+                #[cfg(windows)]
+                shell_program: Option<String>,
+            }
 
-            //And connect them together
-            let pty_tx = spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+            let backend = match transport {
+                Transport::Local {
+                    working_directory,
+                    shell,
+                } => {
+                    #[derive(Default)]
+                    struct ShellParams {
+                        program: String,
+                        args: Option<Vec<String>>,
+                        title_override: Option<String>,
+                    }
+
+                    impl ShellParams {
+                        fn new(
+                            program: String,
+                            args: Option<Vec<String>>,
+                            title_override: Option<String>,
+                        ) -> Self {
+                            log::debug!("Using {program} as shell");
+                            Self {
+                                program,
+                                args,
+                                title_override,
+                            }
+                        }
+                    }
+
+                    let shell_params = match shell.clone() {
+                        Shell::System => {
+                            if cfg!(windows) {
+                                Some(ShellParams::new(
+                                    util::shell::get_windows_system_shell(),
+                                    None,
+                                    None,
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        Shell::Program(program) => Some(ShellParams::new(program, None, None)),
+                        Shell::WithArguments {
+                            program,
+                            args,
+                            title_override,
+                        } => Some(ShellParams::new(program, Some(args), title_override)),
+                    };
+                    let title_override =
+                        shell_params.as_ref().and_then(|e| e.title_override.clone());
+
+                    #[cfg(windows)]
+                    let shell_program = shell_params.as_ref().map(|params| {
+                        use util::ResultExt;
+
+                        Self::resolve_path(&params.program)
+                            .log_err()
+                            .unwrap_or(params.program.clone())
+                    });
+
+                    // Note: when remoting, this shell_kind will scrutinize `ssh` or
+                    // `wsl.exe` as a shell and fall back to posix or powershell based on
+                    // the compilation target. This is fine right now due to the restricted
+                    // way we use the return value, but would become incorrect if we
+                    // supported remoting into windows.
+                    let shell_kind = shell.shell_kind(cfg!(windows));
+
+                    let alacritty_shell = shell_params.as_ref().map(|params| {
+                        (
+                            params.program.clone(),
+                            params.args.clone().unwrap_or_default(),
+                        )
+                    });
+                    let pty_options = pty_options(
+                        alacritty_shell,
+                        working_directory.clone(),
+                        env.clone(),
+                        // We pass in the foreground thread's signal mask to the child process via pty_options,
+                        // so terminal construction can run on a background thread without breaking Ctrl-C and other signals
+                        // otherwise the terminal would inherit the background executor's signal mask which blocks
+                        // some terminal signals
+                        #[cfg(windows)]
+                        shell_kind.tty_escape_args(),
+                    );
+
+                    //Setup the pty...
+                    let pty = match open_pty(&pty_options, TerminalBounds::default(), 0) {
+                        Ok(pty) => pty,
+                        Err(error) => {
+                            bail!(TerminalError {
+                                directory: working_directory,
+                                program: shell_params
+                                    .as_ref()
+                                    .map(|params| params.program.clone()),
+                                args: shell_params
+                                    .as_ref()
+                                    .and_then(|params| params.args.clone()),
+                                title_override,
+                                source: error,
+                            });
+                        }
+                    };
+                    let info = Arc::new(PtyProcessInfo::new(ProcessIdGetter::from(&pty)));
+
+                    //And connect them together
+                    let pty_tx =
+                        spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+
+                    Backend {
+                        pty_tx,
+                        info,
+                        title_override,
+                        template_shell: shell,
+                        #[cfg(windows)]
+                        shell_program,
+                    }
+                }
+                // SSH 远端：连接与 IO 全在 russh 会话线程里，这里只拿到下行句柄。
+                // 远端 shell 不在本机进程表里，故进程信息用 `none()`（状态栏显示 `--`）。
+                Transport::Ssh(options) => Backend {
+                    pty_tx: PtySender::new(ssh::spawn(options, term.clone(), events_tx)),
+                    info: Arc::new(PtyProcessInfo::new(ProcessIdGetter::none())),
+                    title_override: None,
+                    template_shell: Shell::System,
+                    #[cfg(windows)]
+                    shell_program: None,
+                },
+            };
 
             let terminal = Terminal {
                 terminal_pty: TerminalPty {
-                    pty_tx,
-                    info: Arc::new(pty_info),
+                    pty_tx: backend.pty_tx,
+                    info: backend.info,
                 },
                 term,
                 term_config: config,
                 output_processor: Processor::<StdSyncHandler>::new(),
-                title_override: terminal_title_override,
+                title_override: backend.title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
                 last_content: Default::default(),
                 last_mouse: None,
@@ -1016,14 +1101,18 @@ impl TerminalBuilder {
                 selection_phase: SelectionPhase::Ended,
                 hyperlink_regex_searches: RegexSearches::new(&Vec::<String>::new(), 5_000),
                 vi_mode_enabled: false,
-                is_remote_terminal: false,
+                is_remote_terminal: is_remote,
+                connected: !is_remote,
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
                 mouse_down_position: None,
                 #[cfg(windows)]
-                shell_program,
-                template: CopyTemplate { shell, env },
+                shell_program: backend.shell_program,
+                template: CopyTemplate {
+                    shell: backend.template_shell,
+                    env,
+                },
                 child_exited: None,
                 keyboard_input_sent: false,
                 event_loop_task: Task::ready(Ok(())),
@@ -1146,6 +1235,8 @@ pub struct Terminal {
     hyperlink_regex_searches: RegexSearches,
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
+    /// 数据通道是否已就绪（本地 PTY 建出来即为真；SSH 要等认证 + 开通道完成）。
+    connected: bool,
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
@@ -1231,6 +1322,9 @@ impl Terminal {
             TerminalBackendEvent::Bell => {
                 cx.emit(Event::Bell);
             }
+            // 只更新状态：状态栏通过 `Terminal::is_connected` 读它，
+            // 不单独发 UI 事件（紧随其后的 Wakeup 就会触发重绘）。
+            TerminalBackendEvent::Connected => self.connected = true,
             TerminalBackendEvent::Exit => self.register_task_finished(None, cx),
             TerminalBackendEvent::MouseCursorDirty => {
                 //NOOP, Handled in render
@@ -2320,6 +2414,14 @@ impl Terminal {
 
     pub fn pid(&self) -> Option<sysinfo::Pid> {
         self.terminal_pty.info.pid()
+    }
+
+    /// 数据通道是否已就绪：本地 PTY 建出来即为真，SSH 要等认证并开好通道。
+    ///
+    /// 状态栏据此把远端会话显示为「连接中 / 运行中」——远端 shell 不在本机进程表里，
+    /// 靠 [`Self::pid`] 是判断不出来的。
+    pub fn is_connected(&self) -> bool {
+        self.connected
     }
 
     pub fn pid_getter(&self) -> Option<&ProcessIdGetter> {

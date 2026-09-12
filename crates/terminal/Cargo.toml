@@ -13,15 +13,18 @@ doctest = false
 [dependencies]
 alacritty_terminal.workspace = true
 anyhow.workspace = true
+dirs.workspace = true
 futures.workspace = true
 gpui.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
+russh.workspace = true
 serde.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 url.workspace = true
 util.workspace = true
 
