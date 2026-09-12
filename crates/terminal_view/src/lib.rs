@@ -265,6 +265,16 @@ impl TerminalView {
                 return;
             }
 
+            // 可打印字符交给 InputHandler（`TerminalElement::paint` 里的 `window.handle_input`），
+            // 这里提前返回，避免同一字符被 `try_keystroke` 与 InputHandler 各处理一次。
+            // 与 zed 上游一致；vi 模式下字符要当动作处理，所以不走这条捷径。
+            if e.prefer_character_input
+                && e.keystroke.key_char.is_some()
+                && !terminal.read(cx).vi_mode_enabled()
+            {
+                return;
+            }
+
             let handled =
                 terminal.update(cx, |terminal, _cx| terminal.try_keystroke(&e.keystroke, false));
             if handled {

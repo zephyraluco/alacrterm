@@ -472,6 +472,9 @@ pub struct Content {
     pub last_hovered_word: Option<HoveredWord>,
     pub scrolled_to_top: bool,
     pub scrolled_to_bottom: bool,
+    /// 视口最下面那一行是否被内容占用（光标已在/越过它，或该行有非空格字符）。
+    /// 渲染层据此决定是否把网格「底部锚定」，见 `terminal_element.rs::prepaint`。
+    pub bottom_row_occupied: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -498,6 +501,7 @@ impl Default for Content {
             last_hovered_word: None,
             scrolled_to_top: false,
             scrolled_to_bottom: false,
+            bottom_row_occupied: false,
         }
     }
 }
@@ -768,6 +772,10 @@ impl Default for TerminalBounds {
     }
 }
 
+/// 与 zed 上游一致：只保证「至少一个 cell」，**不设任何最小行列下限**。
+///
+/// ⚠️ 别再往这里加尺寸下限（曾加过 `MIN_CONSOLE_ROWS`）：丢内容的根因是 Windows PTY
+/// 后端，已用随包的 WT `conpty.dll` 解决，见 `crates/alacrterm/src/conpty_backend.rs`。
 fn normalize_terminal_bounds(mut bounds: TerminalBounds) -> TerminalBounds {
     bounds.bounds.size.height = cmp::max(bounds.line_height, bounds.height());
     bounds.bounds.size.width = cmp::max(bounds.cell_width, bounds.width());
@@ -1012,6 +1020,7 @@ impl TerminalBuilder {
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
+                mouse_down_position: None,
                 #[cfg(windows)]
                 shell_program,
                 template: CopyTemplate { shell, env },
@@ -1140,6 +1149,8 @@ pub struct Terminal {
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
+    /// 最近一次左键在**窗口坐标**下按下的位置，用于 [`SELECTION_DRAG_THRESHOLD`] 判定。
+    mouse_down_position: Option<GpuiPoint<Pixels>>,
     #[cfg(windows)]
     shell_program: Option<String>,
     template: CopyTemplate,
@@ -1161,6 +1172,12 @@ const KEEP_SELECTION_ON_COPY: bool = true;
 const COPY_ON_SELECT: bool = true;
 
 const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
+
+/// 左键按下后，指针至少移动这么多逻辑像素才开始拖拽选择。
+///
+/// 防的是「点击窗口让它获得焦点时抖 1~2px 就进入选择」—— 配合 `COPY_ON_SELECT`
+/// 会直接把剪贴板覆盖掉。取值对齐 gpui `div` 的拖拽阈值（zed 上游同为 `2.0`）。
+const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 
 impl Terminal {
     fn process_pty_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
@@ -1942,6 +1959,16 @@ impl Terminal {
                 }
             }
 
+            // 忽略微小的指针移动：点击窗口使其获得焦点的那个点击常常会抖 1~2px，
+            // 如果就此开始选择，配上 `COPY_ON_SELECT` 会把剪贴板直接覆盖掉。
+            // 与 gpui `div` 的拖拽阈值保持一致（zed 上游同上）。
+            if self.selection_phase != SelectionPhase::Selecting
+                && let Some(mouse_down_position) = self.mouse_down_position
+                && (e.position - mouse_down_position).magnitude() <= SELECTION_DRAG_THRESHOLD
+            {
+                return;
+            }
+
             self.selection_phase = SelectionPhase::Selecting;
             let (point, side) = grid_point_and_side(
                 position,
@@ -2027,6 +2054,7 @@ impl Terminal {
         } else {
             match e.button {
                 MouseButton::Left => {
+                    self.mouse_down_position = Some(e.position);
                     let (point, side) = grid_point_and_side(
                         position,
                         self.last_content.terminal_bounds,
@@ -2042,8 +2070,18 @@ impl Terminal {
                     };
 
                     if selection_type == Some(SelectionType::Simple) && e.modifiers.shift {
-                        self.events
-                            .push_back(InternalEvent::UpdateSelection(position));
+                        if self.last_content.selection.is_some() {
+                            // 已有选区：Shift+点击 = 把选区延伸到该点
+                            self.events
+                                .push_back(InternalEvent::UpdateSelection(position));
+                        } else {
+                            // 还没有选区：程序开启了鼠标追踪时，Shift 是「绕过程序、
+                            // 直接选文本」的逃生通道，所以先在这里锚一个选区，
+                            // 交给后续拖拽去延伸。
+                            self.events.push_back(InternalEvent::SetSelection(Some(
+                                Selection::new(SelectionType::Simple, point, side),
+                            )));
+                        }
                         return;
                     }
 
@@ -2100,6 +2138,7 @@ impl Terminal {
                             .push_back(InternalEvent::ProcessHyperlink(mouse_up_hyperlink, true));
                         self.selection_phase = SelectionPhase::Ended;
                         self.last_mouse = None;
+                        self.mouse_down_position = None;
                         return;
                     }
                 }
@@ -2125,6 +2164,7 @@ impl Terminal {
 
         self.selection_phase = SelectionPhase::Ended;
         self.last_mouse = None;
+        self.mouse_down_position = None;
     }
 
     ///Scroll the terminal

@@ -1227,15 +1227,24 @@ impl Element for TerminalElement {
                 let line_height_px = f32::from(font_size) * line_height_multiplier;
 
                 let mut grid_size = bounds.size;
+                // https://github.com/zed-industries/zed/issues/2750
+                // 1 列宽时渲染 🦀 会让 alacritty 出错（上游同样在视图层钳制）
+                if grid_size.width < cell_width * 2.0 {
+                    grid_size.width = cell_width * 2.0;
+                }
                 let available_height = grid_size.height;
                 let mut origin = bounds.origin;
 
-                // Standalone 模式：按设备像素对齐行高与可用高度，
-                // 余出的 padding 放在顶部（锚定底部），避免 resize 时整屏抖动
+                // 独立终端：行高与可用高度按设备像素对齐；「底部锚定」时把不足一行的
+                // padding 加在网格**顶部**，否则顶端固定（同 zed 上游 prepaint，那边
+                // 整段包在 `TerminalMode::Standalone` 里）。锚定条件见下：ALT_SCREEN，
+                // 或停在最新内容且视口最后一行被占用 —— 后者不能省，否则短内容时余量
+                // 会随窗口高度上下移动。详见 `docs/terminal-view-rendering.md` §3.2.1。
                 {
                     let should_anchor_to_bottom = {
                         let content = self.terminal.read(cx).last_content();
-                        content.mode.contains(Modes::ALT_SCREEN) || content.scrolled_to_bottom
+                        content.mode.contains(Modes::ALT_SCREEN)
+                            || (content.scrolled_to_bottom && content.bottom_row_occupied)
                     };
                     let scale_factor = window.scale_factor();
                     let line_height_px = px(line_height_px);

@@ -159,11 +159,16 @@ origin.y = snap_px(origin.y);
 ```rust
 let should_anchor_to_bottom = {
     let content = self.terminal.read(cx).last_content();
-    content.mode.contains(Modes::ALT_SCREEN) || content.scrolled_to_bottom
+    content.mode.contains(Modes::ALT_SCREEN)
+        || (content.scrolled_to_bottom && content.bottom_row_occupied)
 };
 ```
 
-即:**ALT_SCREEN**(vim/top 等全屏 TUI,内容通常从底部向上输出)或**已滚动到底部**时锚定底部 —— 保证新输出紧贴视口底部、不跳动。
+即:**ALT_SCREEN**(vim/top 等全屏 TUI,内容通常从底部向上输出),或**停在最新内容(`display_offset == 0`)且视口最下面那一行确实被占用**时锚定底部 —— 保证新输出紧贴视口底部、不跳动;否则(正在回滚里看历史,或内容还没填到底部)顶端固定。
+
+`bottom_row_occupied` 在 `terminal/src/alacritty.rs::make_content` 中算出:视口最下面那一行的行号 `bottom_line = screen_lines - 1 - display_offset`,满足 `光标所在行 >= bottom_line`,或该行存在非空格字符,即为 `true`。
+
+⚠️ 这一条不能省:屏幕空、内容很短时底部行是空的,若仍锚定底部,不足一行的余量就会随窗口高度在顶部来回移动(看起来就是「内容随缩放上下挪动」)。
 
 #### 3.2.2 视口裁剪(性能关键)
 
