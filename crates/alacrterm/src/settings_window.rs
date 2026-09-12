@@ -1,11 +1,20 @@
 //! 独立窗口形式的「设置」界面。
 //!
-//! 由标题栏右侧的「设置」文字按钮触发（[`AppRoot::open_settings_window`]）。
+//! 由标题栏右侧的「设置」文字按钮触发（[`AppRoot::open_settings_window`]）；
+//! 欢迎页的那一行「打开设置」也走同一入口。
 //!
-//! 它不是「另一个程序」，而是**主窗口的从属（模态）子窗口**：用
-//! [`WindowKind::Dialog`] 创建，Windows 后端会以当前活动窗口（主窗口）为 owner，
-//! 因此不占任务栏条目、始终位于主窗口之上、主窗口关闭时一并消失；
-//! 打开期间主窗口被禁用（模态），关闭设置窗口后自动恢复并交还焦点。
+//! 它是一个**独立顶层窗口**（[`WindowKind::Normal`]）：任务栏里有自己的条目、
+//! 不受主窗口置顶约束、不模态（打开期间主窗口照常可用），可以像另一个程序那样
+//! 单独最小化 / 切换。
+//!
+//! 代价是：系统不再替我们把它与主窗口绑定。原来的 `WindowKind::Dialog` 是
+//! 「主窗口的从属（模态）子窗口」（owner + `EnableWindow(parent, false)`），
+//! 不占任务栏、始终压在主窗口之上、**随主窗口一起关闭**——独立之后就都没有了。
+//! 因此**「主程序退出时一并关闭」由窗口自己负责**：视图创建时记下主窗口句柄，
+//! 用 `App::on_window_closed` 盯住它，主窗口一关就 `App::quit()`（见
+//! [`SettingsWindow::new`]）。不这么做的话，设置窗口会变成唯一活着的窗口，
+//! `QuitMode::LastWindowClosed` 会留着进程不放：主窗口关掉了、任务栏里还挂着一个空壳。
+//!
 //! 之所以仍然用独立窗口而不是应用内对话框：设置内容较多，独立窗口可以自由
 //! 调整大小、不与终端挤在同一条渲染树里，也不会遮住终端内容。
 //!
@@ -16,8 +25,9 @@
 //! 切换深浅色后需要 `cx.refresh_windows()` 让所有窗口（含本窗口）重绘。
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _,
-    Window, WindowBounds, WindowKind, WindowOptions, div, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, IntoElement, ParentElement as _,
+    Render, Styled as _, Subscription, Window, WindowBounds, WindowKind, WindowOptions, div, px,
+    size,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Root, ThemeMode, TitleBar, h_flex,
@@ -35,8 +45,30 @@ const MIN_WINDOW_SIZE: (f32, f32) = (560., 400.);
 
 /// 设置窗口的根视图（内容即 `Settings` 组件）。
 ///
-/// 无自有状态：`Settings` 把搜索框等状态存在窗口的 keyed state 里。
-struct SettingsWindow;
+/// `Settings` 把搜索框等状态存在窗口的 keyed state 里，所以视图几乎没有自有状态；
+/// 唯一的字段是「主窗口已关闭」的观察句柄——`Subscription` 是 RAII 的，被丢掉即
+/// 解除订阅，所以必须由视图持有（见 [`SettingsWindow::new`]）。
+struct SettingsWindow {
+    _main_window_closed: Subscription,
+}
+
+impl SettingsWindow {
+    /// `main_window` = 主窗口句柄（由 [`AppRoot::open_settings_window`] 传入）。
+    ///
+    /// 设置窗口是独立顶层窗口，系统不会因 owner 消失而连带关闭它，所以这里自己
+    /// 盯住主窗口：主窗口一关就 `App::quit()`，让主程序连同设置窗口一起退出。
+    /// 这比反过来“在主窗口关闭时去关设置窗口”简单：不用跨窗口取句柄。
+    fn new(main_window: AnyWindowHandle, cx: &mut Context<Self>) -> Self {
+        let main_window_id = main_window.window_id();
+        Self {
+            _main_window_closed: cx.on_window_closed(move |cx, closed| {
+                if closed == main_window_id {
+                    cx.quit();
+                }
+            }),
+        }
+    }
+}
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -114,8 +146,12 @@ impl Render for SettingsWindow {
 }
 
 impl AppRoot {
-    /// 标题栏右侧的「设置」文字按钮：打开设置窗口；若已打开则激活它。
-    pub(crate) fn open_settings_window(&mut self, cx: &mut Context<Self>) {
+    /// 标题栏右侧的「设置」文字按钮（以及欢迎页那一行）：打开设置窗口；
+    /// 若已打开则激活它。
+    ///
+    /// `window` 是主窗口：设置窗口要靠它的句柄跟随主程序退出
+    /// （见 [`SettingsWindow::new`]）。
+    pub(crate) fn open_settings_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 已打开过：直接激活原窗口。窗口被关闭后 `update` 会返回 Err，
         // 于是继续往下走新建流程。
         if let Some(handle) = self.settings_window {
@@ -127,23 +163,29 @@ impl AppRoot {
             }
         }
 
+        let main_window = window.window_handle();
         let bounds = Bounds::centered(None, size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1)), cx);
-        let options = WindowOptions {
+        let mut options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
-            // 从属（模态）子窗口，而不是一个独立顶层窗口：
-            // Windows 后端会取**当前活动窗口**（即主窗口）作为 owner 传给 CreateWindowExW，
-            // 于是它不占任务栏条目、始终压在主窗口之上、随主窗口一起关闭；
-            // 打开期间主窗口被 `EnableWindow(false)` 禁用（模态），关闭时自动恢复并交还焦点。
-            kind: WindowKind::Dialog,
+            // 独立顶层窗口：任务栏里有自己的条目、不模态、不随主窗口置顶。
+            // ⚠️ 别改回 `WindowKind::Dialog`：那是「主窗口的从属（模态）子窗口」，
+            // Windows 后端会取当前活动窗口当 owner 并 `EnableWindow(parent, false)`
+            // 锁住主窗口（见模块文档里的取舍说明）。
+            kind: WindowKind::Normal,
             // 隐藏系统标题栏，改由视图内的自绘 `TitleBar` 负责
             // （同时设置 app_owns_titlebar_drag，拖拽/双击最大化都由它处理）。
             ..TitleBar::window_options()
         };
+        // 独立窗口会在任务栏里露出条目，得有个名字；
+        // 自绘标题栏本身不显示系统标题，这里只影响任务栏 / Alt-Tab。
+        if let Some(titlebar) = options.titlebar.as_mut() {
+            titlebar.title = Some("设置".into());
+        }
 
         // 与主窗口一致，外层包一层 gpui-kit Root（弹窗 / 通知 / 焦点恢复的宿主）。
         match cx.open_window(options, |window, cx| {
-            let view = cx.new(|_| SettingsWindow);
+            let view = cx.new(|cx| SettingsWindow::new(main_window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         }) {
             Ok(handle) => self.settings_window = Some(handle),

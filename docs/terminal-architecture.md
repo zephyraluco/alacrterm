@@ -113,6 +113,7 @@ crates/
       sidebar_panel.rs          # 左侧边栏(会话列表 + 右键菜单) / 右侧边栏(会话信息) + 两枚折叠开关
       terminal_panel.rs         # 中间容器:自绘标签栏(见 tab_bar.rs) + 终端区(无边框卡片)
       tab_bar.rs                # 自绘标签栏:只用 gpui 原语(div/svg)绘制的标签、关闭按钮与右端「+」
+      welcome.rs                # 终端容器关闭后的欢迎页(空态背景板:logo + 标题 + 开始使用)
       connection_dialog.rs      # 「新建终端」对话框:表单 + ssh 参数组装 + 页脚按钮
       settings_window.rs        # 独立设置窗口(自绘标题栏、窗口句柄复用)
       status_metrics.rs         # sysinfo 采样:连接状态 / CPU / 内存 / 网络 + 字节格式化
@@ -183,14 +184,15 @@ fn main() {
 
 - **左侧边栏**(`sidebar_panel::render_sidebar_container`):列容器 = `v_flex[Sidebar, 本栏状态栏]`,因此**它下面那条状态栏的宽度天然跟着侧边栏**(拖分隔条时实时跟随,无需手动同步宽度)。状态栏里放本栏的折叠按钮 + 视图图标(终端会话 / 关于);宽度记忆仍在 `ResizableState`(存在 `AppRoot` 上,折叠再展开后宽度不丢)
 - **右侧边栏**(`sidebar_panel::render_right_sidebar_container`):同样 `v_flex[Sidebar, 本栏状态栏]`,用 `Side::Right` 构造,当前展示当前会话的只读信息(名称 / 连接 / 进程 / 状态);状态栏里放标识(图标 + 名称)与折叠按钮(在右端,与左栏镜像)
-- **中间列**(在 `AppRoot::render` 里装配):`v_flex[终端区, 公共状态栏]`——终端区在标签页全关时是空占位,但**这条公共状态栏常驻**
+- **中间列**(在 `AppRoot::render` 里装配):`v_flex[终端区, 公共状态栏]`——终端区在标签页全关时改成渲染**欢迎页**(`welcome` 模块,见下),而**这条公共状态栏常驻**
 - **公共状态栏**(`status_bar::render_status_bar`):右端 = 当前会话指标(无会话时显示「无会话」);两端**只在某一侧被折叠时**才出现该侧的「展开」按钮——折叠后那一侧连同它自己的状态栏整块不渲染,否则就没有恢复入口了。左侧的按钮放**最左端**、右侧的放**最右端**(指标之后),与它们展开时各自状态栏里的位置一致
 - **折叠开关的位置**:默认长在各自侧边栏的状态栏里;侧边栏折叠后由中间那条公共状态栏接管「展开」按钮(见上一条)。⚠️ **可见性只由这两枚折叠按钮改变**——活动栏图标、会话条目等其余按钮都不会折叠 / 展开侧边栏(与右侧边栏一致,那边也只有它自己那枚开关)
 - **两层嵌套分栏组**:内层 `main-split` = 左侧边栏 | 中间列,外层 `right-split` = 内层 | 右侧边栏。**刻意不把三个面板塞进同一组**——面板宽度按**下标**存在 `ResizableState` 里,三面板共存时任一侧折叠都会让另一侧的下标漂移、拖出来的宽度丢失
 - **活动栏图标**(`sidebar_panel::render_activity_icons`):终端会话 / 关于两个图标,**横向排在左栏自己的状态栏里**(原先是侧边栏左侧一条 44px 竖栏,已取消)。点击**只切换视图**(`set_sidebar_view`;点击当前视图图标是空操作),**不会折叠 / 展开侧边栏**——折叠只归折叠按钮管。「设置」入口则在**标题栏右侧的文字按钮**(见 §3.5)
-- **终端容器**(`terminal_panel::render_terminal_container`):**自绘标签栏**(`tab_bar` 模块) + 终端区,放在中间列的终端区里;**标签全部关闭后终端区退化为空占位**,两侧边栏与两条状态栏仍在,可从左侧边栏会话条目右键菜单「新建终端」恢复
+- **终端容器**(`terminal_panel::render_terminal_container`):**自绘标签栏**(`tab_bar` 模块) + 终端区,放在中间列的终端区里;**标签全部关闭后终端容器整体不再渲染**,中间列改显示欢迎页(`welcome::render_welcome`),两侧边栏与两条状态栏仍在
+- **欢迎页**(`welcome` 模块,`AppRoot::render_welcome`):版式参考 zed 的欢迎页——内容居中、列宽固定(`w_full().max_w(420px)`,中间列再窄也只会被裁掉)、列内元素左对齐;内容 = 圆角方块 logo(`h_flex` + `svg`) + 标题 + 斜体副标题 + 一节「开始使用」(小号灰字分节标题 + 一条横贯内容列的分隔线 + 操作行)。操作行 = 左图标 + 名称 + 右端快捷键,整行可点、hover 提亮:「新建终端」(快捷键跟随平台:macOS 显示 `⌘ N`,其余 `Ctrl N`,派发 `NewTerminal`)与「打开设置」(`open_settings_window`)。背景直接用主题 `background`(与终端区同色,开关终端时不会有颜色跳变);**没有「最近项目」一节**——本应用没有项目 / 历史会话概念
 - ⚠️ 终端区**刻意不画卡片边框 / 圆角**:标签栏已经贴边并自带一条底边线,再画一圈卡片边框就会在它下方 8px(pane 的 `p_2()`)处多出一条平行横线,看着像重复的分隔线。不画边框后终端背景与 pane 背景同色,选中标签的底色与下方自然连成一体
-- **自绘标签栏**(`tab_bar`):结构与配色参考 zed(`crates/ui/src/components/tab.rs` / `tab_bar.rs` / `terminal_view.rs` 的 `tab_content`),**不使用 gpui-kit 的 `TabBar` / `Tab` / `Button` / `Icon` 组件**——标签、关闭按钮、右端「+」全部用 gpui 原语绘制(图标用 `svg().path(...)`,显式 `.text_color(...)` 着色)。固定 200px 宽、32px 高;选中标签用 `tab_active`/`tab_active_foreground` 且底部留 1px 盖住栏底分隔线(zed 的 `pb_px()` 技巧),未选中用 `tab_foreground` 且 hover 提亮;关闭按钮只在标签被悬停/选中时渲染(悬停态存在 `AppRoot::hovered_tab`,因为 gpui-pre 没有 `visible_on_hover`,而 `opacity(0)` 会留下可点击的隐形热区);中键点击标签也能关闭;`overflow_x_scroll()` + `track_scroll()` 支持标签横向滚动,右端「+」派发 `NewTerminal`
+- **自绘标签栏**(`tab_bar`):结构与配色参考 zed(`crates/ui/src/components/tab.rs` / `tab_bar.rs` / `terminal_view.rs` 的 `tab_content`),**不使用 gpui-kit 的 `TabBar` / `Tab` / `Button` / `Icon` 组件**——标签、关闭按钮、右端「+」全部用 gpui 原语绘制(图标用 `svg().path(...)`,显式 `.text_color(...)` 着色)。固定 200px 宽、32px 高;选中标签用 `tab_active`/`tab_active_foreground` 且底部留 1px 盖住栏底分隔线(zed 的 `pb_px()` 技巧),未选中用 `tab_foreground` 且 hover 提亮;关闭按钮只在标签被悬停/选中时渲染(悬停态存在 `AppRoot::hovered_tab`,因为 gpui-pre 没有 `visible_on_hover`,而 `opacity(0)` 会留下可点击的隐形热区);中键点击标签也能关闭;`overflow_x_scroll()` + `track_scroll()` 支持标签横向滚动,右端「+」派发 `NewTerminal`;**相邻标签之间有竖分割线**(照 zed `TabPosition` 规则:每条边界只画一条线,且选中标签两侧都有线——`0 < ix <= active` 画左线、`ix >= active` 画右线,首个标签不画左线)
 - **新建会话入口**:左侧边栏会话条目的右键菜单「新建终端」(派发 `NewTerminal`,见 §3.7);侧边栏底部**已无常驻按钮**、空白区也**不挂**右键菜单——因此全部会话关闭后(列表为空)当前缺少可点击的恢复入口(已知限制)
 - `sidebar_panel` 两个列容器统一是 `v_flex[Sidebar(flex_1), 本栏 StatusBar(w_full)]`:**宽度同步靠同列布局天然完成**,不要去给状态栏算面板宽度(拖分隔条时 `ResizableState` 只在 MouseUp 更新,手动同步会滞后)
 - 状态栏里的图标按钮必须显式 `h(px(16.))`:gpui-kit 的 `Button` 图标按钮最小 20px 高,会把状态栏撑高(`text_xs` 行高≈16px)
@@ -224,8 +226,10 @@ struct SessionRequest { name: Option<SharedString>, shell: Shell, target: Sessio
 
 - **入口是主窗口标题栏右侧的文字按钮「设置」**(`Button::new("open-settings").text().small().label("设置")`,`AppRoot::render`)——原先在活动栏 / 状态栏里的齿轮图标已删除
 - ⚠️ 标题栏里的按钮必须包一层 `div().occlude()`:gpui-kit 的 `TitleBar` 内容区整体带 `WindowControlArea::Drag`,gpui 的 `WM_NCHITTEST` 一旦命中该 hitbox 就返回 `HTCAPTION`,点击会被系统当成「拖标题栏」而**不会派发给子元素**(表现为点了完全没反应)。`occlude`(`HitboxBehavior::BlockMouse`)让这块区域不进入命中链,于是按普通客户区(HTCLIENT)处理,点击正常派发给按钮
-- **是主窗口的从属(模态)子窗口,而不是「另一个程序」**:创建时用 `WindowOptions { kind: WindowKind::Dialog, .. }`——Windows 后端会取**当前活动窗口**(主窗口)作为 owner 传给 `CreateWindowExW`,于是它不占任务栏条目、始终压在主窗口之上、随主窗口一起关闭;打开期间主窗口被 `EnableWindow(false)` 禁用(模态),关闭设置窗口时自动恢复并交还焦点
-  - ⚠️ `WindowKind` 在 Windows 后端里只有 `Dialog`(owner + 模态)与 `PopUp`(`WS_EX_TOOLWINDOW|WS_EX_TOPMOST`:不占任务栏,但对**所有**窗口置顶)有特殊处理;`Floating` 未实现,会退化成普通顶层窗口(`WS_EX_APPWINDOW`,在任务栏里像一个独立程序)
+- **是独立顶层窗口(像一个单独的程序)**:创建时用 `WindowOptions { kind: WindowKind::Normal, .. }`——任务栏里有自己的条目、不受主窗口置顶约束、**不模态**(打开期间主窗口照常可用),可以单独最小化 / 切换;窗口标题设为「设置」(自绘标题栏不显示系统标题,这个标题只影响任务栏 / Alt-Tab)
+  - ⚠️ **不要改回 `WindowKind::Dialog`**:那是「主窗口的从属(模态)子窗口」——Windows 后端会取**当前活动窗口**作 owner 传给 `CreateWindowExW`,并 `EnableWindow(parent, false)` 锁住主窗口;虽然它能「不占任务栏 + 始终压在主窗口之上 + 随主窗口一起关闭」,但又变回了模态从属窗口
+  - ⚠️ `WindowKind` 在 Windows 后端里只有 `Dialog`(owner + 模态)与 `PopUp`(`WS_EX_TOOLWINDOW|WS_EX_TOPMOST`:不占任务栏,但对**所有**窗口置顶)有特殊处理;其余(含 `Normal` / `Floating`)都会拿到 `WS_EX_APPWINDOW` = 普通顶层窗口(任务栏里有条目)
+- **「主程序退出 → 设置窗口一并关闭」由窗口自己负责**:独立之后系统不再替我们绑定两者,而 `QuitMode::LastWindowClosed` 会因为设置窗口还开着而留着进程不放(主窗口关了、任务栏里还挂着一个空壳)。做法:`SettingsWindow::new` 记下主窗口句柄,用 `App::on_window_closed` 盯住它——主窗口一关就 `App::quit()`,主程序连同设置窗口一起退出(⚠️ `Subscription` 是 RAII 的,存为视图字段否则订阅会被立即解除)。实测(枚举本进程顶层窗口 + `GetWindow(main, GW_OWNER)` / `GWL_EXSTYLE & WS_EX_APPWINDOW` / `IsWindowEnabled`):设置窗口 owner=0、APPWINDOW=True、主窗口 enabled=True ✓;开设置窗口时关主窗口 → 进程退出 ✓;只关设置窗口 → 主程序继续运行 ✓
 - 仍是**独立窗口**而非应用内对话框:可以自由调整大小、不与终端挤在同一条渲染树里
 - **暗色应用不要用系统标题栏**:Windows 下系统标题栏颜色跟随系统「浅色/深色」设置,会出现一条白条;只用 `appears_transparent` + 自绘 `TitleBar`
 - 窗口句柄存在 `AppRoot::settings_window`:重复点击设置入口只 `activate_window`,窗口被用户关闭后下次点击重新开窗

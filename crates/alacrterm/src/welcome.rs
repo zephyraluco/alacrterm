@@ -1,0 +1,201 @@
+//! 终端容器关闭后的**欢迎页**（中间列的默认背景板）。
+//!
+//! 版式参考 zed 的欢迎页：内容整体居中、列宽固定、列内元素左对齐；最上面一组是
+//! 「圆角方块 logo + 标题 + 斜体副标题」，下面接一节分节标题（小号灰字 + 一条横向
+//! 贯穿的分隔线）与其下的操作行（左侧图标 + 名称、右端快捷键，整行可点、悬停提亮）。
+//!
+//! 与参考图的两点差异：
+//! - **没有「最近项目」一节**：本应用没有项目 / 历史会话概念，只保留「开始使用」。
+//! - 背景直接用主题的 `background`（与终端区同色）：打开 / 关闭终端时不会有颜色跳变，
+//!   欢迎页与终端页是同一种底色。
+//!
+//! 触发时机见 [`crate::AppRoot::render`]：所有标签页都关掉后终端容器不再渲染，
+//! 中间列改渲染本页；底部那条公共状态栏不受影响，仍然常驻。
+
+use gpui::{
+    AnyElement, Context, CursorStyle, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, StatefulInteractiveElement as _, Styled as _, Window, div, px, svg,
+};
+// `h_flex` 来自 gpui-base（gpui 原语层）：`div().flex().flex_row().items_center()` 的速记。
+// ⚠️ 单独 `.flex_row()` 不设置 `display: flex`，构造 flex 容器必须走它或 `.flex()`。
+use gpui_kit::base::h_flex;
+use gpui_kit::component::{ActiveTheme as _, IconNamed as _, v_flex};
+
+use crate::AppRoot;
+use crate::actions::NewTerminal;
+use crate::assets::IconName;
+
+/// 欢迎页内容列宽：整列居中，列内元素左对齐（同 zed 欢迎页）。
+const WELCOME_CONTENT_WIDTH: Pixels = px(420.);
+/// 品牌区：logo 方块边长 / 方块内图标尺寸。
+const LOGO_BOX_SIZE: Pixels = px(52.);
+const LOGO_ICON_SIZE: Pixels = px(28.);
+/// 操作行：行高 / 行内图标尺寸。
+const ACTION_ROW_HEIGHT: Pixels = px(26.);
+const ACTION_ICON_SIZE: Pixels = px(14.);
+/// 「新建终端」的快捷键提示（跟随平台：macOS 用 ⌘，其余用 Ctrl）。
+const NEW_TERMINAL_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "⌘ N"
+} else {
+    "Ctrl N"
+};
+
+impl AppRoot {
+    /// 欢迎页：终端容器关闭（所有标签都关掉）后中间列的默认内容。
+    pub(crate) fn render_welcome(&self, cx: &mut Context<Self>) -> AnyElement {
+        let background = cx.theme().background;
+        let foreground = cx.theme().foreground;
+        let muted = cx.theme().muted;
+        let muted_foreground = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+
+        v_flex()
+            .size_full()
+            // 整块在中间列里居中（参考图：内容既不贴顶也不贴左）；
+            // 内边距加在整页外层：中间列很窄时内容两侧仍有呼吸空间，
+            // 而内容列的宽度上限（含分节分隔线）仍是完整的 420px。
+            .items_center()
+            .justify_center()
+            .px(px(24.))
+            .bg(background)
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(WELCOME_CONTENT_WIDTH)
+                    .gap(px(22.))
+                    // —— 品牌区：圆角方块 logo + 标题 + 副标题 ——
+                    .child(
+                        h_flex()
+                            .gap(px(14.))
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .justify_center()
+                                    .size(LOGO_BOX_SIZE)
+                                    .rounded_lg()
+                                    .bg(muted)
+                                    .child(
+                                        svg()
+                                            .path(IconName::SquareTerminal.path())
+                                            .w(LOGO_ICON_SIZE)
+                                            .h(LOGO_ICON_SIZE)
+                                            // `svg()` 不继承父元素颜色，必须显式着色。
+                                            .text_color(foreground),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .text_color(foreground)
+                                            .child("Welcome back to Alacrterm"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .italic()
+                                            .text_color(muted_foreground)
+                                            .child("The terminal for what's next"),
+                                    ),
+                            ),
+                    )
+                    // —— 开始使用：分节标题 + 分隔线 + 操作行 ——
+                    .child(
+                        v_flex()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child("GET STARTED"),
+                            )
+                            .child(div().h(px(1.)).w_full().bg(border))
+                            .child(
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(self.welcome_action(
+                                        "welcome-new-terminal",
+                                        IconName::Plus,
+                                        "新建终端",
+                                        Some(NEW_TERMINAL_SHORTCUT),
+                                        cx,
+                                        |_, window, cx| {
+                                            window.dispatch_action(Box::new(NewTerminal), cx)
+                                        },
+                                    ))
+                                    .child(self.welcome_action(
+                                        "welcome-open-settings",
+                                        IconName::Settings,
+                                        "打开设置",
+                                        None,
+                                        cx,
+                                        |this, window, cx| this.open_settings_window(window, cx),
+                                    )),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 欢迎页里的一行操作：左端图标 + 名称，右端快捷键；整行可点、悬停提亮。
+    ///
+    /// `id` 必须全局唯一（gpui 的状态化元素要求），因此由调用方显式给出。
+    fn welcome_action(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        label: &'static str,
+        shortcut: Option<&'static str>,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let foreground = cx.theme().foreground;
+        let muted = cx.theme().muted;
+        let muted_foreground = cx.theme().muted_foreground;
+
+        let row = h_flex()
+            .id(id)
+            .h(ACTION_ROW_HEIGHT)
+            .px(px(6.))
+            .gap(px(10.))
+            .rounded_sm()
+            .cursor(CursorStyle::PointingHand)
+            .hover(move |style| style.bg(muted))
+            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .child(
+                svg()
+                    .path(icon.path())
+                    .flex_none()
+                    .w(ACTION_ICON_SIZE)
+                    .h(ACTION_ICON_SIZE)
+                    .text_color(muted_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_sm()
+                    .text_color(foreground)
+                    .child(label),
+            );
+
+        // 快捷键可有可无（例如「打开设置」在 keymap 里没有绑定，就不显示提示）。
+        match shortcut {
+            Some(shortcut) => row
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(shortcut),
+                )
+                .into_any_element(),
+            None => row.into_any_element(),
+        }
+    }
+}

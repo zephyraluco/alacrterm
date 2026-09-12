@@ -21,6 +21,11 @@
 //! - 标签多了横向滚动：`overflow_x_scroll()` + `track_scroll()`，gpui 会把垂直滚轮
 //!   自动映射为横向滚动（zed 的 `TabBar` 同样只依赖这一点，没有额外的滚轮处理）；
 //!   激活标签时由 `ScrollHandle::scroll_to_item` 滚进可视区。
+//! - 相邻标签之间有**竖分割线**（照 zed `ui/src/components/tab.rs` 里 `TabPosition` 的
+//!   做法：每条边界只画一条线，且**选中标签两侧都有线**）——`0 < ix <= active` 的标签
+//!   画左线，`ix >= active` 的标签画右线。首个标签不画左线（否则标签栏起点会多出一条
+//!   线：它与选中标签之间的边界由后者负责）；最后一个标签仍画右线，用来与右侧空白区
+//!   隔开（对应 zed 的 `TabPosition::Last`）。
 //! - 右端固定区放一枚「+」（派发 `NewTerminal`，与侧边栏右键菜单同一入口），
 //!   与标签区之间用一条竖线隔开——对应 zed `TabBar` 的 `end_children`。
 
@@ -133,6 +138,16 @@ impl AppRoot {
         };
         let hover_background = cx.theme().muted;
         let icon_color = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+
+        // 竖分割线的归属（照 zed `ui/src/components/tab.rs` 的 `TabPosition` 规则：每条
+        // 边界**只画一条线**，且选中标签两侧都有线）：
+        // - 左线：`0 < ix <= active`——选中标签自己、以及它左侧的标签都画（首个标签永不画，
+        //   否则会在标签栏起点多出一条线；首个标签与选中标签之间的那条边界由后者负责）；
+        // - 右线：`ix >= active`——选中标签及其右侧的标签都画（这样相连两个标签之间的
+        //   边界由靠左那个的右线负责，不会和右邻的左线叠成两条）。
+        let draw_left_border = ix > 0 && ix <= self.active;
+        let draw_right_border = ix >= self.active;
 
         h_flex()
             .id(("terminal-tab", ix))
@@ -141,6 +156,9 @@ impl AppRoot {
             .items_center()
             .h(TAB_BAR_HEIGHT)
             .bg(background)
+            .border_color(border)
+            .when(draw_left_border, |this| this.border_l_1())
+            .when(draw_right_border, |this| this.border_r_1())
             .text_color(foreground)
             .cursor(CursorStyle::PointingHand)
             // 选中标签底部留 1px：让栏底那条分隔线在它下面露不出来，与下方终端连成一体。

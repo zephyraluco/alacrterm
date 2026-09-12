@@ -12,8 +12,9 @@
 //! 不会被丢掉），由用户自行关闭或新建。
 //!
 //! 标签页可全部关闭；**最后一个会话关闭后整个容器一起关闭**（标签栏 / 终端
-//! 全部消失，由 [`AppRoot::render`] 决定不再渲染本容器），
-//! 之后可通过侧边栏会话条目的右键菜单「新建终端」重新打开。
+//! 全部消失，由 [`AppRoot::render`] 决定不再渲染本容器，中间列改显示欢迎页
+//! ——见 [`crate::AppRoot::render_welcome`]），
+//! 之后可在欢迎页里、或从侧边栏会话条目的右键菜单「新建终端」重新打开。
 //!
 //! 会话的生命周期（新建 / 激活 / 关闭）也集中在本模块，作为终端的「单一入口」；
 //! 侧边栏的会话列表经由 [`AppRoot::set_active_tab`] 复用同一套逻辑。
@@ -73,7 +74,7 @@ impl AppRoot {
     /// 所有激活路径（标签点击 / 侧边栏会话项 / 新建会话）都应经由本方法。
     pub(crate) fn set_active_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.terminals.is_empty() {
-            // 全部标签已关闭：无会话可激活，界面处于空白背景板状态。
+            // 全部标签已关闭：无会话可激活，中间列显示欢迎页（见 `render_welcome`）。
             self.active = 0;
             cx.notify();
             return;
@@ -85,8 +86,8 @@ impl AppRoot {
 
     /// 关闭一个终端会话（标签页 × 按钮，参考官方 Dynamic Tabs / Closeable Tabs 示例）。
     ///
-    /// 允许关闭全部标签：最后一个会话关闭后界面进入空白背景板状态（见
-    /// [`Self::render_terminal_container`]），用户可在其中新建会话。
+    /// 允许关闭全部标签：最后一个会话关闭后终端容器整体消失、中间列显示欢迎页（见
+    /// [`Self::render_welcome`]），用户可在其中新建会话。
     /// 实体移除后 `Terminal` 的 Drop 会关闭 PTY 并终止子进程。
     pub(crate) fn close_terminal(&mut self, index: usize, cx: &mut Context<Self>) {
         // 点击 × 后事件仍可能冒泡到标签的 on_click（自绘标签栏虽然在关闭按钮里

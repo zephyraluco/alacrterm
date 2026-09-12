@@ -8,6 +8,7 @@
 //! 应用外壳按「左右两条侧边栏 + 一条共用状态栏」拆分为独立文件：
 //! - [`sidebar_panel`]  —— 左 / 右侧边栏（+ 两枚折叠开关与活动栏图标的渲染）
 //! - [`terminal_panel`] —— 中间容器：标签栏 + 终端
+//! - [`welcome`]        —— 终端容器关闭后中间列的欢迎页（默认背景板）
 //! - [`status_bar`]     —— **全程序共用的唯一状态栏**（常驻窗口底部，见下）
 //! - [`connection_dialog`] —— 「新建终端」建连对话框（IP / 端口 / 名称 / 用户名 / 密码）
 //! - [`settings_window`]  —— 主窗口的从属设置子窗口（非对话框）
@@ -20,7 +21,8 @@
 //!
 //! 折叠规则：**左侧边栏折叠**时，它连同活动栏图标一起让位给终端
 //! （图标由状态栏按折叠状态显示 / 隐藏）；**右侧边栏折叠**时整块让位给终端。
-//! **终端标签页全部关闭**时中间容器消失（之后可从左侧边栏会话条目的右键菜单
+//! **终端标签页全部关闭**时中间容器消失，中间列改显示欢迎页（[`welcome`]，
+//! 见 [`AppRoot::render_welcome`]；之后可从欢迎页或左侧边栏会话条目的右键菜单
 //! 「新建终端」重新打开）。这些情况都**不影响底部状态栏**：它是全程序共用的一条、
 //! 常驻不消失，两端的「折叠 / 展开侧边栏」开关因此永远可点，
 //! 不会出现「窗口全空、没有任何恢复入口」的死角。
@@ -34,6 +36,7 @@ mod status_bar;
 mod status_metrics;
 mod tab_bar;
 mod terminal_panel;
+mod welcome;
 
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, Hsla, InteractiveElement as _,
@@ -365,7 +368,7 @@ impl Render for AppRoot {
         let terminal_container = (!self.terminals.is_empty())
             .then(|| self.render_terminal_container(cx));
 
-        // 中间列 = 终端区（标签页全关时为空占位）+ **公共状态栏**（常驻不消失）。
+        // 中间列 = 终端区（标签页全关时显示欢迎页）+ **公共状态栏**（常驻不消失）。
         // 底部三块状态栏的宽度就是各自列的宽度：两边的状态栏随侧边栏一起宽窄变化
         // （它们在各自的侧边栏容器里，见 `sidebar_panel`），中间这块铺满中间列。
         let mid_column = v_flex()
@@ -378,7 +381,11 @@ impl Render for AppRoot {
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
-                    .child(terminal_container.unwrap_or_else(|| div().into_any_element())),
+                    // 没有会话 = 中间容器整体关闭，改显示欢迎页（`welcome` 模块）。
+                    .child(
+                        terminal_container
+                            .unwrap_or_else(|| self.render_welcome(cx)),
+                    ),
             )
             .child(self.render_status_bar(cx))
             .into_any_element();
@@ -480,8 +487,8 @@ impl Render for AppRoot {
                                     .small()
                                     .label("设置")
                                     .on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.open_settings_window(cx)
+                                        cx.listener(|this, _, window, cx| {
+                                            this.open_settings_window(window, cx)
                                         }),
                                     ),
                             ),
