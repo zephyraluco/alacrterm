@@ -30,6 +30,8 @@
 mod actions;
 mod assets;
 mod connection_dialog;
+#[cfg(windows)]
+mod conpty_backend;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
@@ -84,6 +86,10 @@ pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
 }
 
 fn main() {
+    // 必须在建第一个 PTY **之前**执行：决定 conpty.dll 命中与否（看该模块文档）。
+    #[cfg(windows)]
+    conpty_backend::ensure();
+
     gpui_kit::application()
         // 注册自有资产源（alacrterm assets.rs 方式）：本 crate 的 assets/icons 目录
         // 经 rust-embed 嵌入，`crate::assets::IconName` 由 icon_named! 宏扫描生成，

@@ -513,6 +513,17 @@ graph LR
 
 `build.rs`(仅 Windows)用 `embed-resource 3.0` 编译手写的 `.rc` 内容:图标 + `VERSIONINFO` 资源(FileDescription/FileVersion/ProductName 等,CompanyName 为 `zeal`)。`assets/app-icon.ico` 不存在时跳过 `ICON` 行避免 `RC2135` 编译错误;debug 构建版本号追加 `-dev`。
 
+### 7.4 ConPTY 后端(`conpty_backend.rs`)——必须带 `conpty.dll`
+
+`alacritty_terminal` 在 Windows 上创建伪控制台时先 `LoadLibraryW("conpty.dll")`:命中就用 **Windows Terminal 的 OpenConsole**,否则退回 **Windows 自带的 ConPTY**。后者在「窗口纵向缩到极小再放大」时会让壳侧整片重绘甚至清屏,表现为**上方内容丢失**(本机实测:`ls` 输出后把窗口 707px→40px→707px,可见区差 12795 像素、`ls` 表格消失;换成 OpenConsole 后同样操作 0 像素差异)。
+
+上游 zed 正是随包分发 `conpty.dll` + `OpenConsole.exe` 解决这个问题,本仓库照做:
+
+- 二进制在 `assets/windows/conpty/{conpty.dll,OpenConsole.exe}`;
+- `main()` 在**建第一个 PTY 之前**调 `conpty_backend::ensure()`:exe 同级有 `conpty.dll` 就直接全路径预加载(发行形态);否则回退到仓库 `assets/windows/conpty/` 并用 `SetDllDirectoryW` 加进搜索路径;都没有就告警退回系统 ConPTY;
+- 预加载使后续按基名的 `LoadLibraryW("conpty.dll")` 命中同一模块(Windows 加载器按模块名去重),不受 PATH 影响。
+
+
 ---
 
 ## 8. 数据流总览
