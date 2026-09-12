@@ -1,17 +1,23 @@
 //! 独立窗口形式的「设置」界面。
 //!
-//! 由活动栏底部的设置图标触发（[`AppRoot::open_settings_window`]）。
+//! 由标题栏右侧的「设置」文字按钮触发（[`AppRoot::open_settings_window`]）。
 //!
-//! 这里刻意**不使用对话框**：设置内容较多，独立窗口可以自由调整大小、独立摆放，
-//! 也不会遮住终端内容。窗口句柄记录在 [`AppRoot`] 上，重复点击设置图标只会激活
-//! 已打开的窗口，而不会开出多个；窗口被用户关闭后再点击会重新打开。
+//! 它不是「另一个程序」，而是**主窗口的从属（模态）子窗口**：用
+//! [`WindowKind::Dialog`] 创建，Windows 后端会以当前活动窗口（主窗口）为 owner，
+//! 因此不占任务栏条目、始终位于主窗口之上、主窗口关闭时一并消失；
+//! 打开期间主窗口被禁用（模态），关闭设置窗口后自动恢复并交还焦点。
+//! 之所以仍然用独立窗口而不是应用内对话框：设置内容较多，独立窗口可以自由
+//! 调整大小、不与终端挤在同一条渲染树里，也不会遮住终端内容。
+//!
+//! 窗口句柄记录在 [`AppRoot`] 上，重复点击设置入口只会 `activate_window`，
+//! 不会开出多个；窗口被用户关闭后再点击会重新开一个。
 //!
 //! 主题是全局状态（`Theme::global`），因此设置窗口与主窗口共享同一套配色，
 //! 切换深浅色后需要 `cx.refresh_windows()` 让所有窗口（含本窗口）重绘。
 
 use gpui::{
     App, AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _,
-    Window, WindowBounds, WindowOptions, div, px, size,
+    Window, WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Root, Theme, ThemeMode, TitleBar, h_flex,
@@ -105,7 +111,7 @@ impl Render for SettingsWindow {
 }
 
 impl AppRoot {
-    /// 活动栏底部设置图标：打开设置窗口；若已打开则激活它。
+    /// 标题栏右侧的「设置」文字按钮：打开设置窗口；若已打开则激活它。
     pub(crate) fn open_settings_window(&mut self, cx: &mut Context<Self>) {
         // 已打开过：直接激活原窗口。窗口被关闭后 `update` 会返回 Err，
         // 于是继续往下走新建流程。
@@ -122,6 +128,11 @@ impl AppRoot {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
+            // 从属（模态）子窗口，而不是一个独立顶层窗口：
+            // Windows 后端会取**当前活动窗口**（即主窗口）作为 owner 传给 CreateWindowExW，
+            // 于是它不占任务栏条目、始终压在主窗口之上、随主窗口一起关闭；
+            // 打开期间主窗口被 `EnableWindow(false)` 禁用（模态），关闭时自动恢复并交还焦点。
+            kind: WindowKind::Dialog,
             // 隐藏系统标题栏，改由视图内的自绘 `TitleBar` 负责
             // （同时设置 app_owns_titlebar_drag，拖拽/双击最大化都由它处理）。
             ..TitleBar::window_options()

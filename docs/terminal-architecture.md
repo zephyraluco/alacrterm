@@ -19,7 +19,7 @@
 - 渲染完全由 gpui 的 `StyledText` / `paint_quad` 逐 cell 驱动,与 Alacritty 网格模型通过 `Content` 快照解耦
 - 集成 `gpui-kit` 自绘标题栏(`TitleBar`),隐藏系统标题栏(主窗口标题为固定文案 `Alacrterm`;终端 OSC 标题只用于标签页 / 侧边栏显示)
 - 保留完整功能:事件循环、批量事件处理、选择/复制、vi mode、超链接、鼠标协议、进程标题检测
-- **多会话外壳**:左侧活动栏 + 侧边栏(会话列表) + 右侧标签栏/终端,中间为可拖拽分栏;标签可全部关闭,关闭后整个终端容器一并消失(见 §3.2)
+- **多会话外壳**:左右两条可拖拽侧边栏(左:会话列表 / 右:会话信息)夹着中间的标签栏 + 终端;标签可全部关闭,关闭后中间容器一并消失;任一侧折叠时该侧让位给终端。**窗口底部是三条并列的状态栏**:左右两条各属于对应侧边栏(宽度随侧边栏,内含各自的折叠按钮与图标),中间那条是公共状态栏(会话指标;某侧折叠时暂代它的「展开」按钮)(见 §3.2)
 - **远程连接**:「新建终端」对话框收集 IP / 端口 / 名称 / 用户名 / 密码,填了 IP 即用 `ssh -p <端口> [user@]IP` 启动(依赖本机 OpenSSH 客户端);密码字段目前只收集、不参与建连(见 §3.4)
 - **会话显示名**:用户填写的名称优先(`Session::title`),否则回退到终端 OSC 标题
 - **状态栏指标**:连接状态 / 连接目标 / 会话进程 CPU / 内存 / 系统网络速率,每 1.5s 采样(见 §3.6)
@@ -49,8 +49,9 @@
 graph TB
     subgraph app层[crates/alacrterm]
         MAIN[main.rs<br/>入口 + AppRoot:共享状态/布局装配/指标采样任务]
-        SIDE[sidebar_panel.rs<br/>左侧容器:活动栏 + 侧边栏 + 状态栏]
-        TPANEL[terminal_panel.rs<br/>右侧容器:标签栏 + 终端 + 状态栏]
+        SBAR[status_bar.rs<br/>中间列底部公共状态栏:会话指标 + 折叠侧的展开按钮<br/>STATUS_BAR_HEIGHT 统一三条状态栏高度]
+        SIDE[sidebar_panel.rs<br/>左/右侧边栏]
+        TPANEL[terminal_panel.rs<br/>中间容器:标签栏 + 终端]
         DIALOG[connection_dialog.rs<br/>「新建终端」对话框(ssh)]
         SETWIN[settings_window.rs<br/>独立设置窗口]
         METRICS[status_metrics.rs<br/>CPU / 内存 / 网络采样]
@@ -80,10 +81,11 @@ graph TB
     MAIN --> VIEW
     MAIN --> SIDE
     MAIN --> TPANEL
+    MAIN --> SBAR
     MAIN --> DIALOG
     MAIN --> SETWIN
     MAIN -->|注册全局监听器| ACT
-    TPANEL -->|读采样值| METRICS
+    SBAR -->|读采样值| METRICS
     MAIN -->|gpui-kit TitleBar 等组件| GPUIC[gpui-kit 0.6<br/>gpui-component]
     VIEW --> TERM
     TERM --> ALAC
@@ -106,8 +108,9 @@ crates/
   alacrterm/                    # 应用层(见 §3):入口 + 多会话外壳 + 弹窗 + 状态栏指标
     src/
       main.rs                   # 入口 + AppRoot:共享状态、布局装配、指标采样任务、defer 辅助
-      sidebar_panel.rs          # 左侧容器:活动栏 + 侧边栏(会话列表 + 右键菜单) + 状态栏
-      terminal_panel.rs         # 右侧容器:标签栏 + 终端卡片 + 状态栏(显示指标)
+      status_bar.rs             # 中间列底部的公共状态栏(会话指标 + 折叠侧的展开按钮);`STATUS_BAR_HEIGHT` 统一三条状态栏高度
+      sidebar_panel.rs          # 左侧边栏(会话列表 + 右键菜单) / 右侧边栏(会话信息) + 两枚折叠开关
+      terminal_panel.rs         # 中间容器:标签栏 + 终端卡片
       connection_dialog.rs      # 「新建终端」对话框:表单 + ssh 参数组装 + 页脚按钮
       settings_window.rs        # 独立设置窗口(自绘标题栏、窗口句柄复用)
       status_metrics.rs         # sysinfo 采样:连接状态 / CPU / 内存 / 网络 + 字节格式化
@@ -172,15 +175,23 @@ fn main() {
 - `assets.rs` 中 `icon_named!(IconName, "../../assets/icons")` 宏扫描 `assets/icons` 生成图标枚举,并实现 `From<IconName> for AnyElement` / `RenderOnce` 使其可作组件渲染
 - 建窗即新建一个本地会话;退出策略交给 `QuitMode::LastWindowClosed`
 
-### 3.2 布局装配(活动栏 / 侧边栏 / 分栏 / 终端容器)
+### 3.2 布局装配(左右侧边栏 / 分栏 / 终端容器 / 底部三条状态栏)
 
-根视图 `AppRoot::render` 只负责装配;两个容器各自在独立模块里渲染:
+根视图 `AppRoot::render` 只负责装配;两侧边栏、中间列与它们的底部状态栏各自在独立模块里渲染:
 
-- **活动栏**(`sidebar_panel::render_activity_bar`):固定 44px、不参与分栏——侧边栏折叠后仍靠它恢复;上部分是视图切换图标,弹性占位后设置图标固定在底部
-- **侧边栏**:宽度由分栏面板状态决定;`ResizableState` 存在 `AppRoot` 上(而非组件内部 keyed state),侧边栏折叠再展开后宽度不丢
-- **终端容器**(`terminal_panel::render_terminal_container`):标签栏 + 终端卡片 + 状态栏;**标签全部关闭后整个容器不再渲染**(`AppRoot::render` 用 `(!self.terminals.is_empty()).then(..)` 判断)
-- **新建会话入口**:侧边栏会话条目的右键菜单「新建终端」(派发 `NewTerminal`,见 §3.7);侧边栏底部**已无常驻按钮**、空白区也**不挂**右键菜单——因此全部会话关闭后(列表为空)当前缺少可点击的恢复入口(已知限制)
-- 侧边栏折叠时,右栏用 `resizable_panel().child(div())` 占位:**必须保留两栏结构**,否则单面板会被 `adjust_to_container_size` 拉伸到容器满宽(分隔条消失、侧边栏铺满窗口)
+- **左侧边栏**(`sidebar_panel::render_sidebar_container`):列容器 = `v_flex[Sidebar, 本栏状态栏]`,因此**它下面那条状态栏的宽度天然跟着侧边栏**(拖分隔条时实时跟随,无需手动同步宽度)。状态栏里放本栏的折叠按钮 + 视图图标(终端会话 / 关于);宽度记忆仍在 `ResizableState`(存在 `AppRoot` 上,折叠再展开后宽度不丢)
+- **右侧边栏**(`sidebar_panel::render_right_sidebar_container`):同样 `v_flex[Sidebar, 本栏状态栏]`,用 `Side::Right` 构造,当前展示当前会话的只读信息(名称 / 连接 / 进程 / 状态);状态栏里放标识(图标 + 名称)与折叠按钮(在右端,与左栏镜像)
+- **中间列**(在 `AppRoot::render` 里装配):`v_flex[终端区, 公共状态栏]`——终端区在标签页全关时是空占位,但**这条公共状态栏常驻**
+- **公共状态栏**(`status_bar::render_status_bar`):右端 = 当前会话指标(无会话时显示「无会话」);两端**只在某一侧被折叠时**才出现该侧的「展开」按钮——折叠后那一侧连同它自己的状态栏整块不渲染,否则就没有恢复入口了。左侧的按钮放**最左端**、右侧的放**最右端**(指标之后),与它们展开时各自状态栏里的位置一致
+- **折叠开关的位置**:默认长在各自侧边栏的状态栏里;侧边栏折叠后由中间那条公共状态栏接管「展开」按钮(见上一条)。⚠️ **可见性只由这两枚折叠按钮改变**——活动栏图标、会话条目等其余按钮都不会折叠 / 展开侧边栏(与右侧边栏一致,那边也只有它自己那枚开关)
+- **两层嵌套分栏组**:内层 `main-split` = 左侧边栏 | 中间列,外层 `right-split` = 内层 | 右侧边栏。**刻意不把三个面板塞进同一组**——面板宽度按**下标**存在 `ResizableState` 里,三面板共存时任一侧折叠都会让另一侧的下标漂移、拖出来的宽度丢失
+- **活动栏图标**(`sidebar_panel::render_activity_icons`):终端会话 / 关于两个图标,**横向排在左栏自己的状态栏里**(原先是侧边栏左侧一条 44px 竖栏,已取消)。点击**只切换视图**(`set_sidebar_view`;点击当前视图图标是空操作),**不会折叠 / 展开侧边栏**——折叠只归折叠按钮管。「设置」入口则在**标题栏右侧的文字按钮**(见 §3.5)
+- **终端容器**(`terminal_panel::render_terminal_container`):标签栏 + 终端卡片,放在中间列的终端区里;**标签全部关闭后终端区退化为空占位**,两侧边栏与两条状态栏仍在,可从左侧边栏会话条目右键菜单「新建终端」恢复
+- **新建会话入口**:左侧边栏会话条目的右键菜单「新建终端」(派发 `NewTerminal`,见 §3.7);侧边栏底部**已无常驻按钮**、空白区也**不挂**右键菜单——因此全部会话关闭后(列表为空)当前缺少可点击的恢复入口(已知限制)
+- `sidebar_panel` 两个列容器统一是 `v_flex[Sidebar(flex_1), 本栏 StatusBar(w_full)]`:**宽度同步靠同列布局天然完成**,不要去给状态栏算面板宽度(拖分隔条时 `ResizableState` 只在 MouseUp 更新,手动同步会滞后)
+- 状态栏里的图标按钮必须显式 `h(px(16.))`:gpui-kit 的 `Button` 图标按钮最小 20px 高,会把状态栏撑高(`text_xs` 行高≈16px)
+- **三条状态栏必须等高**(`status_bar::STATUS_BAR_HEIGHT` = 28px):`StatusBar` 的高度由内容撑出,而三栏内容不同——含一行文字的那两条(指标 / 「会话信息」)自然高≈28px,只有 16px 图标按钮的那一条只有≈24px;三栏底边对齐,矮的那条看上去就“短了一截”。定死同一个高度最省事(图标按钮靠 `items_center` 垂直居中)
+- **分栏边界竖线只由面板自己画**:分栏拖拽条(`ResizeHandle`)静止时会在边界处**额外**画一条 1px 线,而两侧面板本来就有同色边框(`Sidebar` 内部的 `border_r_1`/`border_l_1`、两条侧边栏状态栏上的 `border_r_1`/`border_l_1`)——两条线在设备像素上**不总是重合**(125% DPI 实测:左边界错开 1 个设备像素 → 看上去比右边界粗一点)。因此 `main.rs` 在 `Theme::change` 之后执行 `gpui_kit::base::Theme::global_mut(cx).resizable.handle = Some(Hsla::transparent_black())`,把拖拽条那条线置为透明,只保留面板自身的边框;拖拽时的 ring 高亮不受影响(`active_handle` 仍未设置)。⚠️ 这里改的是 **`gpui_base::Theme`**(经 `gpui_kit::base` 转发),与视图里用的 `gpui_component::Theme` 是**两个互不相干的 global**,后者没有 `resizable` 字段。⚠️ 若将来出现两侧都没有自带边框的相邻面板,该边界会缺少竖线,需要自行在面板上补边框
 - 容器渲染方法统一返回 `AnyElement`:edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,装箱可避免同一渲染树里连续调用多个 `&mut cx` 方法时的借用冲突
 
 ### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)
@@ -207,15 +218,20 @@ struct SessionRequest { name: Option<SharedString>, shell: Shell, target: Sessio
 
 ### 3.5 设置窗口(`settings_window.rs`)
 
-- 用**独立窗口**而不是对话框:`cx.open_window` + `TitleBar::window_options()`
+- **入口是主窗口标题栏右侧的文字按钮「设置」**(`Button::new("open-settings").text().small().label("设置")`,`AppRoot::render`)——原先在活动栏 / 状态栏里的齿轮图标已删除
+- ⚠️ 标题栏里的按钮必须包一层 `div().occlude()`:gpui-kit 的 `TitleBar` 内容区整体带 `WindowControlArea::Drag`,gpui 的 `WM_NCHITTEST` 一旦命中该 hitbox 就返回 `HTCAPTION`,点击会被系统当成「拖标题栏」而**不会派发给子元素**(表现为点了完全没反应)。`occlude`(`HitboxBehavior::BlockMouse`)让这块区域不进入命中链,于是按普通客户区(HTCLIENT)处理,点击正常派发给按钮
+- **是主窗口的从属(模态)子窗口,而不是「另一个程序」**:创建时用 `WindowOptions { kind: WindowKind::Dialog, .. }`——Windows 后端会取**当前活动窗口**(主窗口)作为 owner 传给 `CreateWindowExW`,于是它不占任务栏条目、始终压在主窗口之上、随主窗口一起关闭;打开期间主窗口被 `EnableWindow(false)` 禁用(模态),关闭设置窗口时自动恢复并交还焦点
+  - ⚠️ `WindowKind` 在 Windows 后端里只有 `Dialog`(owner + 模态)与 `PopUp`(`WS_EX_TOOLWINDOW|WS_EX_TOPMOST`:不占任务栏,但对**所有**窗口置顶)有特殊处理;`Floating` 未实现,会退化成普通顶层窗口(`WS_EX_APPWINDOW`,在任务栏里像一个独立程序)
+- 仍是**独立窗口**而非应用内对话框:可以自由调整大小、不与终端挤在同一条渲染树里
 - **暗色应用不要用系统标题栏**:Windows 下系统标题栏颜色跟随系统「浅色/深色」设置,会出现一条白条;只用 `appears_transparent` + 自绘 `TitleBar`
-- 窗口句柄存在 `AppRoot::settings_window`:重复点击设置图标只 `activate_window`,窗口被用户关闭后下次点击重新开窗
+- 窗口句柄存在 `AppRoot::settings_window`:重复点击设置入口只 `activate_window`,窗口被用户关闭后下次点击重新开窗
 - 内容为 gpui-kit `Settings` 组件(外观 / 深色主题开关);主题是全局状态,切换后 `cx.refresh_windows()` 刷新所有窗口
 
-### 3.6 状态栏指标(`status_metrics.rs`)
+### 3.6 状态栏指标(`status_metrics.rs` 采样 / `status_bar.rs` 渲染)
 
 - `SystemMonitor` 持有 sysinfo 的 `System` + `Networks`,每 1.5s 采样一次;`SessionMetrics` 是渲染只读快照
 - 驱动:`AppRoot::start_metrics_sampling` 里的 `cx.spawn` 循环(用 `update` 即可,不需要窗口)
+- 渲染在**中间列底部那条公共状态栏**的右端(`status_bar::render_status_bar`);没有会话时只显示「无会话」
 - **CPU / 内存 = 当前会话那个进程**(PID 由 `TerminalView::pid()` 提供);存活状态是三态(`None` 未采样 / `Some(true)` 运行中 / `Some(false)` 已结束),避免启动初期误报「已断开」
 - **网络 = 系统整体速率**(`Networks` 累计值差分);按进程统计流量需要平台 API(如 Windows ETW),sysinfo 不提供
 - 每轮采样都 `cx.notify()`:网络速率本就是实时值、每轮都在变,「无变化不重绘」的门控实测无效(已否决)

@@ -5,38 +5,46 @@
 //! - `crates/terminal_view` —— 终端视图（自定义 gpui Element 逐 cell 渲染）
 //! - `crates/util`          —— Shell 探测 / 路径工具（来自 Zed）
 //!
-//! 应用外壳按「左右两个容器」拆分为独立文件：
-//! - [`sidebar_panel`]  —— 左侧容器：活动栏 + 侧边栏 + 侧边栏状态栏
-//! - [`terminal_panel`] —— 右侧容器：标签栏 + 终端 + 终端状态栏
+//! 应用外壳按「左右两条侧边栏 + 一条共用状态栏」拆分为独立文件：
+//! - [`sidebar_panel`]  —— 左 / 右侧边栏（+ 两枚折叠开关与活动栏图标的渲染）
+//! - [`terminal_panel`] —— 中间容器：标签栏 + 终端
+//! - [`status_bar`]     —— **全程序共用的唯一状态栏**（常驻窗口底部，见下）
 //! - [`connection_dialog`] —— 「新建终端」建连对话框（IP / 端口 / 名称 / 用户名 / 密码）
-//! - [`settings_window`]  —— 独立的设置窗口（非对话框）
+//! - [`settings_window`]  —— 主窗口的从属设置子窗口（非对话框）
 //! - [`status_metrics`]   —— 状态栏指标采样（连接状态 / CPU / 内存 / 网络）
 //!
 //! 本文件只保留程序入口、根视图 [`AppRoot`]（共享状态 + 布局装配 + 设置弹窗）。
-//! 两个容器之间是可拖拽的分隔条（官方 resizable 面板组，左右拖动调整侧边栏宽度），
-//! 标题栏（TitleBar）与弹窗层也在根视图中装配。
+//! 窗内只有三级结构：标题栏 / 主体 / 状态栏。主体是两级嵌套的可拖拽分栏组
+//! （官方 resizable 面板组）：内层 `main-split` = 左侧边栏 | 终端，
+//! 外层 `right-split` = 内层 | 右侧边栏；弹窗层也在此装配。
 //!
-//! 布局装配遵循两条规则：侧边栏折叠、或**终端标签页全部关闭**时，
-//! 对应的容器与分隔条一并消失（终端容器关闭后仅剩左侧容器与空白背景，
-//! 可随时从侧边栏会话条目的右键菜单「新建终端」重新打开）。
+//! 折叠规则：**左侧边栏折叠**时，它连同活动栏图标一起让位给终端
+//! （图标由状态栏按折叠状态显示 / 隐藏）；**右侧边栏折叠**时整块让位给终端。
+//! **终端标签页全部关闭**时中间容器消失（之后可从左侧边栏会话条目的右键菜单
+//! 「新建终端」重新打开）。这些情况都**不影响底部状态栏**：它是全程序共用的一条、
+//! 常驻不消失，两端的「折叠 / 展开侧边栏」开关因此永远可点，
+//! 不会出现「窗口全空、没有任何恢复入口」的死角。
 
 mod actions;
 mod assets;
 mod connection_dialog;
 mod settings_window;
 mod sidebar_panel;
+mod status_bar;
 mod status_metrics;
 mod terminal_panel;
 
 use gpui::{
-    App, AppContext as _, AsyncApp, Bounds, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, px, size,
+    App, AppContext as _, AsyncApp, Bounds, Context, Entity, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, WeakEntity,
+    Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use gpui_kit::{
     QuitMode,
     component::{
-        ActiveTheme as _, Root, Theme, ThemeMode, TitleBar, h_flex,
+        ActiveTheme as _, Root, Sizable as _, Theme, ThemeMode, TitleBar,
+        button::{Button, ButtonVariants as _},
+        h_flex,
         resizable::{ResizableState, h_resizable, resizable_panel},
         v_flex,
     },
@@ -44,7 +52,10 @@ use gpui_kit::{
 use terminal_view::TerminalView;
 use util::shell::Shell;
 
-use sidebar_panel::{SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SidebarView};
+use sidebar_panel::{
+    RIGHT_SIDEBAR_DEFAULT_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH, RIGHT_SIDEBAR_MIN_WIDTH,
+    SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SidebarView,
+};
 use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
 
 fn main() {
@@ -58,6 +69,20 @@ fn main() {
             gpui_kit::init(cx);
             // 终端为深色背景，应用主题跟随使用暗色。
             Theme::change(ThemeMode::Dark, None, cx);
+            // 关掉分栏拖拽条自带的那条常驻竖线：
+            // `resizable` 的拖拽手柄（`ResizeHandle`）静止时会在分栏边界额外画一条
+            // 1px 线，而两侧面板自己也画了同色边框（`Sidebar` 的 `border_r_1` /
+            // `border_l_1`、两条侧边栏状态栏上的 `border_r_1` / `border_l_1`）——
+            // 两条线在设备像素上**不总是重合**（实测 125% DPI：左边界错开 1 个设备
+            // 像素 → 看上去比右边界粗一点），所以把拖拽条那条线置为透明，只保留
+            // 面板自己的边框，左右边界即完全一致。
+            // 拖拽时仍会亮起：`active_handle` 保持未设置 → 回落到 `ring` 色。
+            //
+            // ⚠️ 注意这是**另一个** Theme：拖拽手柄读的是 `gpui_base::Theme`
+            // （本色由 `gpui_kit::base` 重导出），而组件用的是
+            // `gpui_component::Theme`（上面的 `Theme::change`）；两者是各自独立的
+            // global，`gpui_component::Theme` 上并没有 `resizable` 字段。
+            gpui_kit::base::Theme::global_mut(cx).resizable.handle = Some(Hsla::transparent_black());
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(
@@ -148,19 +173,24 @@ struct AppRoot {
     terminals: Vec<Session>,
     /// 当前显示的终端下标。
     active: usize,
-    /// 侧边栏是否可见（点击活动栏当前视图图标可隐藏 / 显示）。
+    /// 左侧边栏是否可见（只由状态栏最左端的折叠按钮切换；活动栏图标不会改变它）。
     sidebar_visible: bool,
-    /// 侧边栏当前视图（由活动栏图标切换）。
+    /// 左侧边栏当前视图（由状态栏里的活动栏图标切换；点击当前视图图标是空操作）。
     sidebar_view: SidebarView,
-    /// 侧边栏状态栏展示的 shell 程序名（如 pwsh.exe）。
-    shell_name: SharedString,
+    /// 右侧边栏是否可见（由状态栏右端的折叠开关切换）。
+    right_sidebar_visible: bool,
     /// 标签栏滚动句柄：跟踪 tabs 横向滚动，激活会话时把选中标签滚入可视区。
     tab_scroll_handle: ScrollHandle,
-    /// 侧边栏 / 终端分栏面板组的共享状态。
+    /// 左侧边栏 / 终端分栏面板组（`main-split`）的共享状态。
     ///
     /// 实体由根视图持有（而非交给组件内部的 keyed state），这样侧边栏折叠再展开、
     /// 乃至窗口重绘后，用户拖出来的宽度都不会丢失。
     resize_state: Entity<ResizableState>,
+    /// 终端 / 右侧边栏分栏面板组（`right-split`）的共享状态。
+    ///
+    /// 刻意与左侧分成两组嵌套面板：面板宽度按**下标**存在状态里，
+    /// 若把三个面板塞进同一组，任一侧折叠都会让另一侧的下标漂移、宽度丢失。
+    right_resize_state: Entity<ResizableState>,
     /// 设置窗口的句柄（见 [`AppRoot::open_settings_window`]）。
     ///
     /// 用于「重复点击设置图标只激活已有窗口」；窗口被关闭后该句柄会失效，
@@ -172,20 +202,15 @@ struct AppRoot {
 
 impl AppRoot {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let shell_program = Shell::System.program();
-        let shell_name = std::path::Path::new(&shell_program)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or(shell_program);
-
         let mut this = Self {
             terminals: Vec::new(),
             active: 0,
             sidebar_visible: true,
             sidebar_view: SidebarView::Sessions,
-            shell_name: shell_name.into(),
+            right_sidebar_visible: true,
             tab_scroll_handle: ScrollHandle::new(),
             resize_state: cx.new(|_| ResizableState::default()),
+            right_resize_state: cx.new(|_| ResizableState::default()),
             settings_window: None,
             monitor: SystemMonitor::new(),
         };
@@ -253,19 +278,36 @@ impl AppRoot {
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 左侧区域（活动栏 + 侧边栏 + 状态栏）与右侧区域（标签栏 + 终端 + 状态栏）
-        // 分别由各自的容器模块渲染；两者之间是可拖拽的分隔条。
-        let activity_bar = self.render_activity_bar(cx);
+        // 主体：侧边栏与终端容器由各自的容器模块渲染，两者之间是可拖拽的分隔条。
+        // 活动栏已并入底部状态栏（见 `status_bar` 模块），此处不再有左侧竖栏。
 
-        // 终端容器：所有标签页关闭后整个容器一起关闭（标签栏 / 终端 / 状态栏全部消失）。
+        // 终端容器：所有标签页关闭后整个容器一起关闭（标签栏 / 终端全部消失）。
         let terminal_container = (!self.terminals.is_empty())
             .then(|| self.render_terminal_container(cx));
 
-        // 侧边栏可见时始终使用分栏面板组，两栏之间保留可拖拽的分隔条；
-        // 终端容器关闭后右栏退化为空白占位——**仍保留两栏结构**，因为
-        // 单面板的分栏组会被 `adjust_to_container_size` 按比例拉伸到容器满宽，
-        // 那样既没有分隔条、侧边栏也会横向铺满整个窗口。
-        let body = if self.sidebar_visible {
+        // 中间列 = 终端区（标签页全关时为空占位）+ **公共状态栏**（常驻不消失）。
+        // 底部三块状态栏的宽度就是各自列的宽度：两边的状态栏随侧边栏一起宽窄变化
+        // （它们在各自的侧边栏容器里，见 `sidebar_panel`），中间这块铺满中间列。
+        let mid_column = v_flex()
+            .h_full()
+            .w_full()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(terminal_container.unwrap_or_else(|| div().into_any_element())),
+            )
+            .child(self.render_status_bar(cx))
+            .into_any_element();
+
+        // 主体分两级装配（见 `AppRoot::right_resize_state` 的说明：两组面板各自持有
+        // 宽度，互不干扰）：
+        //   内层 `main-split`：左侧边栏 | 中间列（左侧不可见时中间列直接铺满）
+        //   外层 `right-split`：内层 | 右侧边栏（右侧不可见时只渲染内层）
+        let center = if self.sidebar_visible {
             h_resizable("main-split")
                 // 绑定根视图持有的状态实体：侧边栏折叠再展开后宽度不会丢失。
                 .with_state(&self.resize_state)
@@ -278,20 +320,38 @@ impl Render for AppRoot {
                         .flex_none()
                         .child(self.render_sidebar_container(cx)),
                 )
-                .child(match terminal_container {
-                    Some(terminal) => resizable_panel().child(terminal),
-                    None => resizable_panel().child(div()),
-                })
+                .child(resizable_panel().child(mid_column))
                 .into_any_element()
         } else {
-            terminal_container.unwrap_or_else(|| div().into_any_element())
+            // 折叠态：左侧边栏（含它自己的状态栏）整块不渲染，中间列铺满。
+            // 左侧的「展开」按钮此时由中间那条公共状态栏提供（见 `render_status_bar`）。
+            mid_column
+        };
+
+        let body = if self.right_sidebar_visible {
+            h_resizable("right-split")
+                .with_state(&self.right_resize_state)
+                // 左栏（左侧边栏 + 中间列）撑满剩余宽度，右栏宽度完全由面板状态决定。
+                .child(resizable_panel().child(center))
+                .child(
+                    resizable_panel()
+                        .size(RIGHT_SIDEBAR_DEFAULT_WIDTH)
+                        .size_range(RIGHT_SIDEBAR_MIN_WIDTH..RIGHT_SIDEBAR_MAX_WIDTH)
+                        .flex_none()
+                        .child(self.render_right_sidebar_container(cx)),
+                )
+                .into_any_element()
+        } else {
+            center
         };
 
         v_flex()
             .id("app-root")
             .size_full()
             .bg(cx.theme().background)
-            // —— 顶部：自绘标题栏（图标 / 标题 / 窗口控制）——
+            // —— 顶部：自绘标题栏（图标 / 标题 / 设置入口 / 窗口控制）——
+            // 标题栏内容区本身就是窗口拖拽区，但其中的按钮仍有自己的 hitbox，
+            // 点击会被正常派发（与窗口控制按钮同理），因此「设置」可以放在这里。
             .child(
                 TitleBar::new().child(
                     h_flex()
@@ -306,26 +366,42 @@ impl Render for AppRoot {
                                 .text_size(px(13.))
                                 .text_color(cx.theme().secondary_foreground)
                                 .child("Alacrterm"),
+                        )
+                        .child(
+                            // 设置入口：文字态按钮（无边框无底色，hover 提亮），
+                            // 靠 flex_1 的标题占位顶到内容区最右端、窗口控制按钮左侧。
+                            //
+                            // 必须 `div().occlude()` 包一层：标题栏内容区整体是窗口拖拽区
+                            // （`WindowControlArea::Drag`），gpui 在 WM_NCHITTEST 里一旦命中
+                            // 拖拽区就返回 HTCAPTION，点击会被系统当作「拖标题栏」而收不到
+                            // （表现为点了没反应）。occlude 阻断它下方拖拽区的命中，
+                            // 这块区域于是按普通客户区处理，点击正常派发给按钮。
+                            div().occlude().child(
+                                Button::new("open-settings")
+                                    .text()
+                                    .small()
+                                    .label("设置")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.open_settings_window(cx)
+                                        }),
+                                    ),
+                            ),
                         ),
                 ),
             )
-            // —— 中部：左侧区域（活动栏 + 侧边栏 + 状态栏）+ 右侧区域（终端容器）——
-            // 活动栏固定宽度、直到底部，不参与分栏拖拽，折叠侧边栏后靠它恢复。
+            // —— 中部：主体（左侧边栏 | 中间列 | 右侧边栏）——
+            // 底部不再有整窗状态栏：三列的底边分别是各自的宽度区块
+            // （左/右栏的状态栏在 `sidebar_panel` 里，中间那条公共的在 `mid_column` 里）。
+            // 分栏组内部使用 size_full，需要这层 flex_1 容器提供「剩余宽度」，
+            // 否则其 100% 宽会溢出错位。
             .child(
-                h_flex()
+                div()
                     .flex_1()
+                    .min_w_0()
+                    .h_full()
                     .overflow_hidden()
-                    .child(activity_bar)
-                    // 分栏组内部使用 size_full，需要这层 flex_1 容器提供「剩余宽度」，
-                    // 否则其 100% 宽会把活动栏的 44px 也算进去而溢出。
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_hidden()
-                            .child(body),
-                    ),
+                    .child(body),
             )
             // —— 覆盖层：gpui-kit 0.6 的 Root 不会自动渲染 Dialog 层，
             //    必须在渲染树中显式挂载（参考官方 ai_recipes 示例），否则弹窗不显示。——

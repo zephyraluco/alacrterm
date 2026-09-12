@@ -1,22 +1,29 @@
-//! 左侧容器：活动栏 + 侧边栏 + 侧边栏状态栏。
+//! 侧边栏（左侧 / 右侧）与它们的折叠开关。
 //!
-//! 三部分同属「左侧区域」，但装配方式不同（见 [`crate::AppRoot::render`]）：
-//! - **活动栏**（[`AppRoot::render_activity_bar`]）：固定 [`ACTIVITY_BAR_WIDTH`] 宽、
-//!   直到底部，常驻显示且不参与分栏拖拽——侧边栏折叠后仍靠它恢复。
-//!   上半部分是视图切换图标（终端会话 / 关于），弹性占位后设置图标固定在底部。
-//! - **侧边栏**（[`AppRoot::render_sidebar_container`] 上半部分）：宽度由根视图的
-//!   分栏面板（可拖拽分隔条）决定，故自身只需 `w_full`。内容为
-//!   「[`SidebarGroup`] 段落标题 + 段内可折叠菜单」两层结构：段落标题给出分区
-//!   （会话 / 关于 / 版本信息），段内菜单项是官方「嵌套菜单」形态，
-//!   点击表头行即展开 / 收起下方的会话列表。
-//! - **状态栏**（同上下半部分）：贴在侧边栏底部，宽度随侧边栏一起变化，
-//!   与右侧终端容器的状态栏同高对齐，仅以右缘竖线分隔。
+//! 两侧边栏 + 开关 + 活动栏图标分处两个模块，装配见 [`crate::AppRoot::render`]：
+//! - **左侧边栏**（[`AppRoot::render_sidebar_container`]）：宽度由分栏面板（可拖拽分隔条）
+//!   决定，故自身只需 `w_full`。内容为「[`SidebarGroup`] 段落标题 + 段内可折叠菜单」
+//!   两层结构：段落标题给出分区（会话 / 关于 / 版本信息），段内菜单项是官方
+//!   「嵌套菜单」形态，点击表头行即展开 / 收起下方的会话列表。
+//! - **右侧边栏**（[`AppRoot::render_right_sidebar_container`]）：终端右侧的面板，
+//!   当前展示当前会话的只读信息（名称 / 连接 / 进程 / 状态）；用 `Side::Right` 构造，
+//!   与左侧对称。
+//! - **两枚折叠开关**（[`AppRoot::sidebar_toggle_button`] /
+//!   [`AppRoot::right_sidebar_toggle_button`]）：分别渲染在**各自那一条状态栏**里
+//!   （左栏在自身状态栏的最左端、右栏在最右端），图标随各自的折叠状态变化。
+//!   左栏开关旁边还会渲染活动栏图标（[`AppRoot::render_activity_icons`]：终端会话 / 关于），
+//!   它们只在左侧边栏可见时显示，且**只切视图、不会折叠侧边栏**。
+//!   某一侧折叠后它那一整块（含自己的状态栏与开关）不渲染，改由中间那条公共状态栏
+//!   在**同一侧**补一枚「展开」按钮（左端 / 右端，见 [`crate::status_bar`]）。
+//!
+//! 两侧边栏用**两组嵌套的分栏面板**装配（内层 `main-split`、外层 `right-split`），
+//! 因为面板宽度按下标存在 `ResizableState` 里：三个面板挤在同一组时，
+//! 任一侧折叠都会让另一侧的下标漂移、拖出来的宽度丢失。
+//! 「设置」入口不在本模块，而在标题栏右侧的文字按钮上（见 [`crate::AppRoot::render`]）。
 
-use gpui::{
-    AnyElement, Context, IntoElement, ParentElement as _, Pixels, Styled as _, div, px,
-};
+use gpui::{AnyElement, Context, IntoElement, ParentElement as _, Pixels, SharedString, Styled as _, px};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Selectable as _, Sizable as _,
+    Icon, Selectable as _, Side, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},
@@ -27,9 +34,7 @@ use gpui_kit::component::{
 use crate::actions::{CloseSession, NewTerminal};
 use crate::AppRoot;
 use crate::assets::IconName;
-
-/// 活动栏宽度（固定，不参与分栏拖拽）。
-const ACTIVITY_BAR_WIDTH: Pixels = px(44.);
+use crate::status_bar::STATUS_BAR_HEIGHT;
 
 /// 侧边栏默认宽度（分栏面板首次布局时的初始宽度）。
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: Pixels = px(220.);
@@ -37,6 +42,16 @@ pub(crate) const SIDEBAR_DEFAULT_WIDTH: Pixels = px(220.);
 pub(crate) const SIDEBAR_MIN_WIDTH: Pixels = px(150.);
 /// 侧边栏拖拽时的最大宽度。
 pub(crate) const SIDEBAR_MAX_WIDTH: Pixels = px(460.);
+
+/// 右侧边栏默认宽度（分栏面板首次布局时的初始宽度）。
+pub(crate) const RIGHT_SIDEBAR_DEFAULT_WIDTH: Pixels = px(240.);
+/// 右侧边栏拖拽时的最小宽度（须大于组件内部的 `PANEL_MIN_SIZE` = 100px）。
+pub(crate) const RIGHT_SIDEBAR_MIN_WIDTH: Pixels = px(150.);
+/// 右侧边栏拖拽时的最大宽度。
+pub(crate) const RIGHT_SIDEBAR_MAX_WIDTH: Pixels = px(460.);
+
+/// 右侧边栏的名称：既作面板里的段落标题，也作它在状态栏右段里的标识文字。
+pub(crate) const RIGHT_SIDEBAR_LABEL: &str = "会话信息";
 
 /// 侧边栏视图（对应活动栏图标）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -48,38 +63,118 @@ pub(crate) enum SidebarView {
 }
 
 impl AppRoot {
-    /// 活动栏图标点击：切换视图；再次点击当前视图图标则隐藏 / 显示侧边栏。
+    /// 活动栏图标点击：切换左栏视图。
+    ///
+    /// **只切视图，不改可见性**——折叠 / 展开只由状态栏里的折叠按钮负责，
+    /// 与右侧边栏一致（那边除折叠按钮外没有任何按钮会改可见性）。
+    /// 因此点击**当前**视图图标是空操作（图标本来就只在侧边栏可见时渲染）。
     pub(crate) fn set_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.sidebar_view == view {
-            self.sidebar_visible = !self.sidebar_visible;
-        } else {
-            self.sidebar_view = view;
-            self.sidebar_visible = true;
+            return;
         }
+        self.sidebar_view = view;
+        // 图标只在侧边栏可见时渲染，所以这里其实必然是 true；
+        // 保留赋值是为了让「切视图 ⇒ 侧边栏可见」这个不变量不依赖渲染条件。
+        self.sidebar_visible = true;
         cx.notify();
     }
 
-    /// 活动栏：侧边栏左侧的图标列（图标按钮 + 底部设置入口）。
+    /// 设置左侧边栏是否显示（只由状态栏里的折叠按钮调用）。
+    pub(crate) fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.sidebar_visible == visible {
+            return;
+        }
+        self.sidebar_visible = visible;
+        cx.notify();
+    }
+
+    /// 设置右侧边栏是否显示（状态栏右端的折叠开关调用）。
+    pub(crate) fn set_right_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.right_sidebar_visible == visible {
+            return;
+        }
+        self.right_sidebar_visible = visible;
+        cx.notify();
+    }
+
+    /// 右侧边栏折叠 / 展开开关（挂在**右栏自己那条状态栏的最右端**）。
+    ///
+    /// 与左侧开关一样常驻：状态栏不随右侧边栏折叠消失，所以它是唯一的恢复入口。
+    /// 图标随状态变化（`PanelRightClose` ↔ `PanelRightOpen`）。
+    pub(crate) fn right_sidebar_toggle_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let expanded = self.right_sidebar_visible;
+        Button::new("right-sidebar-toggle")
+            .ghost()
+            .xsmall()
+            // 与左侧开关一致：图标按钮默认 20px 高，显式压到状态栏行高（16px）。
+            .h(px(16.))
+            .icon(if expanded {
+                IconName::PanelRightClose
+            } else {
+                IconName::PanelRightOpen
+            })
+            .tooltip(if expanded {
+                "折叠右侧边栏"
+            } else {
+                "展开右侧边栏"
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_right_sidebar_visible(!expanded, cx)
+            }))
+            .into_any_element()
+    }
+
+    /// 侧边栏折叠 / 展开开关（挂在**左栏自己那条状态栏的最左端**，即窗口左下角）。
+    ///
+    /// 图标与提示随状态变化：侧边栏可见时是「折叠」，隐藏时是「展开」。
+    /// 这是**唯一**能改变左侧边栏可见性的入口（活动栏图标只切视图，不会折叠它），
+    /// 与右侧边栏一致：那边也只有它自己那枚开关。另：折叠后这一整块不渲染，
+    /// 「展开」按钮改由中间那条公共状态栏的最左端提供，所以不存在「折叠完找不回来」。
+    pub(crate) fn sidebar_toggle_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let expanded = self.sidebar_visible;
+        Button::new("sidebar-toggle")
+            .ghost()
+            .xsmall()
+            // 图标按钮默认 20px 高，会把状态栏撑高（`text_xs` 行高≈16px），
+            // 这里显式压到 16px。
+            .h(px(16.))
+            .icon(if expanded {
+                IconName::PanelLeftClose
+            } else {
+                IconName::PanelLeftOpen
+            })
+            .tooltip(if expanded {
+                "折叠侧边栏"
+            } else {
+                "展开侧边栏"
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.set_sidebar_visible(!expanded, cx)))
+            .into_any_element()
+    }
+
+    /// 活动栏图标（终端会话 / 关于）。
+    ///
+    /// 原先是侧边栏左侧一条 44px 宽的竖栏，现已**整体迁移到左栏状态栏里**
+    /// （与折叠按钮同处一条，见 [`AppRoot::render_sidebar_container`]），横向排开：
+    /// 侧边栏可见时才由那条状态栏渲染，折叠后不渲染（没有可切换的视图，留着只是占地方）。
+    /// 点击**只切换视图**（`set_sidebar_view`）：不会折叠 / 展开侧边栏。
+    /// 设置入口不在这里——它是标题栏右侧的「设置」文字按钮（见 `AppRoot::render`）。
     ///
     /// 返回 [`AnyElement`] 而非 `impl IntoElement`：本 crate 是 edition 2024，
     /// `impl Trait` 会捕获 `&mut Context` 的生命周期，导致同一渲染树里
     /// 连续调用多个 `&mut cx` 的渲染方法时借用冲突；装箱可彻底规避。
-    pub(crate) fn render_activity_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .w(ACTIVITY_BAR_WIDTH)
-            .h_full()
-            .flex_shrink_0()
+    pub(crate) fn render_activity_icons(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
             .items_center()
-            .py_2()
             .gap_1()
-            .bg(cx.theme().tokens.sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
+            // 状态栏里的按钮统一压到 16px 高（≈`text_xs` 行高），免得把状态栏撑高。
             .child(
                 Button::new("view-sessions")
                     .ghost()
+                    .xsmall()
+                    .h(px(16.))
                     .icon(IconName::SquareTerminal)
-                    .selected(self.sidebar_visible && self.sidebar_view == SidebarView::Sessions)
+                    .selected(self.sidebar_view == SidebarView::Sessions)
                     .tooltip("终端会话")
                     .on_click(
                         cx.listener(|this, _, _, cx| this.set_sidebar_view(SidebarView::Sessions, cx)),
@@ -88,22 +183,14 @@ impl AppRoot {
             .child(
                 Button::new("view-about")
                     .ghost()
+                    .xsmall()
+                    .h(px(16.))
                     .icon(IconName::Info)
-                    .selected(self.sidebar_visible && self.sidebar_view == SidebarView::About)
+                    .selected(self.sidebar_view == SidebarView::About)
                     .tooltip("关于")
                     .on_click(
                         cx.listener(|this, _, _, cx| this.set_sidebar_view(SidebarView::About, cx)),
                     ),
-            )
-            // 弹性占位：把设置图标推到活动栏最下方。
-            .child(div().flex_1())
-            .child(
-                Button::new("view-settings")
-                    .ghost()
-                    .icon(IconName::Settings)
-                    .tooltip("设置")
-                    // 打开独立的设置窗口（重复点击只激活已有窗口）。
-                    .on_click(cx.listener(|this, _, _, cx| this.open_settings_window(cx))),
             )
             .into_any_element()
     }
@@ -182,27 +269,112 @@ impl AppRoot {
         };
 
         // 宽度由外层分栏面板决定：必须 w_full，否则 Sidebar 会回落到内置默认宽度。
-        // flex_1 + min_h_0：与下方状态栏同处一列，需能收缩，避免把状态栏挤出容器。
+        // flex_1 + min_h_0：与下方**本栏自己的状态栏**同处一列，需能收缩。
+        // 空白区域**不挂**右键菜单，只有会话条目有自己的右键菜单。
         let sidebar = Sidebar::new(sidebar_id)
             .w_full()
             .child(content)
             .flex_1()
             .min_h_0();
 
-        // 底部状态栏：宽度跟随侧边栏（w_full），右缘竖线区分右侧终端段。
+        // 左栏自己的状态栏：折叠按钮 + 视图图标（终端会话 / 关于）。
+        // 它与侧边栏同处一个列容器，宽度自然随侧边栏（拖分隔条时实时跟随）；
+        // 右缘竖线让列分界一直延伸到底部。（窗口底部是三块并列的状态栏：
+        // 左栏 / 中间公共 / 右栏，见 `status_bar` 模块。）
+        // 高度用 `STATUS_BAR_HEIGHT`：这条里没有文字，自然高度比含文字的那两条矮，
+        // 不统一就会出现「左栏那条短一截」的错位。
+        let status_bar = StatusBar::new()
+            .left(self.sidebar_toggle_button(cx))
+            .left(self.render_activity_icons(cx))
+            .h(STATUS_BAR_HEIGHT)
+            .w_full()
+            .border_r_1();
+
+        v_flex()
+            .h_full()
+            .w_full()
+            .overflow_hidden()
+            .child(sidebar)
+            .child(status_bar)
+            .into_any_element()
+    }
+
+    /// 右侧边栏容器：当前会话的只读信息（名称 / 连接 / 进程 / 状态）。
+    ///
+    /// 内容刻意保持精简——它是右侧边栏的第一个面板，后续可替换成缓冲区列表、
+    /// 输出日志等。宽度由外层分栏面板（`right-split`）决定，所以自身只需 `w_full`；
+    /// `side(Side::Right)` 让组件内部的边框 / 折叠动画方向朝右。
+    pub(crate) fn render_right_sidebar_container(&self, cx: &mut Context<Self>) -> AnyElement {
+        // 只读信息：取当前会话的显示名 / 连接目标 / 进程号 / 运行状态。
+        // 无会话（标签页全部关闭）时四项都显示 `--`，避免面板看上去是空的。
+        let (name, target, pid, state) = match self.terminals.get(self.active) {
+            Some(session) => {
+                let view = session.view.read(cx);
+                let pid = view
+                    .pid(cx)
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "--".to_string());
+                let state = if view.has_exited() {
+                    "已断开"
+                } else {
+                    "运行中"
+                };
+                (
+                    session.title(cx),
+                    session.target.label(),
+                    pid,
+                    state.to_string(),
+                )
+            }
+            None => (
+                SharedString::from("--"),
+                "--".to_string(),
+                "--".to_string(),
+                "无会话".to_string(),
+            ),
+        };
+
+        let content = SidebarGroup::new(RIGHT_SIDEBAR_LABEL).child(
+            SidebarMenu::new().child(
+                SidebarMenuItem::new("当前会话")
+                    .icon(IconName::SquareTerminal)
+                    .default_open(true)
+                    .click_to_toggle(true)
+                    .children([
+                        SidebarMenuItem::new(format!("名称：{name}")).disable(true),
+                        SidebarMenuItem::new(format!("连接：{target}")).disable(true),
+                        SidebarMenuItem::new(format!("进程：{pid}")).disable(true),
+                        SidebarMenuItem::new(format!("状态：{state}")).disable(true),
+                    ]),
+            ),
+        );
+
+        // 与左侧边栏一致：宽度随分栏面板（w_full），状态栏在下面一起撑开。
+        // 空白区域不挂右键菜单。
+        let sidebar = Sidebar::new("sidebar-right")
+            .side(Side::Right)
+            .w_full()
+            .child(content)
+            .flex_1()
+            .min_h_0();
+
+        // 右栏自己的状态栏：标识（图标 + 名称）在左、折叠按钮在右端——
+        // 与左栏那一条镜像对称（那边是「按钮在左端 + 图标在其右」）。
+        // 左缘竖线让列分界一直延伸到底部。
         let status_bar = StatusBar::new()
             .left(
                 h_flex()
                     .items_center()
                     .gap_1()
-                    .child(Icon::new(IconName::SquareTerminal).small())
-                    .child(self.shell_name.clone()),
+                    .flex_shrink_0()
+                    .child(Icon::new(IconName::Info).small())
+                    .child(RIGHT_SIDEBAR_LABEL),
             )
+            .right(self.right_sidebar_toggle_button(cx))
+            .h(STATUS_BAR_HEIGHT)
             .w_full()
-            .border_r_1();
+            .border_l_1();
 
-        // 整个侧边栏区域（会话列表 + 底部状态栏）。
-        // 空白区域**不挂**右键菜单，只有会话条目有自己的右键菜单。
         v_flex()
             .h_full()
             .w_full()

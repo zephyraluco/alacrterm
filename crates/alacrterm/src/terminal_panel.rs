@@ -1,29 +1,29 @@
-//! 右侧容器：多会话标签栏 + 终端视图 + 终端状态栏。
+//! 右侧容器：多会话标签栏 + 终端视图。
 //!
 //! - **标签栏**：动态标签（图标前缀 + 标题 + × 关闭后缀），菜单键固定在右端兜底；
 //!   标签溢出时内部横向裁剪 / 滚动，并额外接管垂直滚轮（`TabBar` 内部
 //!   `lock_scroll_axis` 禁用了「垂直滚轮 → 横向」的自动映射）。
 //! - **终端**：`TerminalView` 实体直接挂在卡片内，尺寸随容器分配。
-//! - **状态栏**：只展示指标——连接状态 / 连接目标 / CPU / 内存 / 网络
-//!   （不显示终端名称：名称已出现在标签页与侧边栏，状态栏再显示是重复）。
-//!   会话进程结束时显示「已断开」：终端网格与标签都保留（ssh 报的断开原因
-//!   不会被丢掉），由用户自行关闭或新建。
 //!
-//! 标签页可全部关闭；**最后一个会话关闭后整个容器一起关闭**（标签栏 / 终端 /
-//! 状态栏全部消失，由 [`AppRoot::render`] 决定不再渲染本容器），
+//! 指标状态栏（连接状态 / CPU / 内存 / 网络）已整体搬到 [`crate::status_bar`]：
+//! 那是全程序共用的一条状态栏，常驻窗口底部，不随本容器的消失而消失。
+//! 会话进程结束时仍显示「已断开」：终端网格与标签都保留（ssh 报的断开原因
+//! 不会被丢掉），由用户自行关闭或新建。
+//!
+//! 标签页可全部关闭；**最后一个会话关闭后整个容器一起关闭**（标签栏 / 终端
+//! 全部消失，由 [`AppRoot::render`] 决定不再渲染本容器），
 //! 之后可通过侧边栏会话条目的右键菜单「新建终端」重新打开。
 //!
 //! 会话的生命周期（新建 / 激活 / 关闭）也集中在本模块，作为终端的「单一入口」；
 //! 侧边栏的会话列表经由 [`AppRoot::set_active_tab`] 复用同一套逻辑。
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, InteractiveElement as _, IntoElement,
+    AnyElement, AppContext as _, Context, InteractiveElement as _, IntoElement,
     ParentElement as _, ScrollWheelEvent, Styled as _, Window, div, point, px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, h_flex,
+    ActiveTheme as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
-    status_bar::StatusBar,
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -31,98 +31,7 @@ use terminal_view::TerminalView;
 use util::shell::Shell;
 
 use crate::assets::IconName;
-use crate::status_metrics::{SessionMetrics, format_bytes, format_rate};
 use crate::{AppRoot, Session, SessionRequest, SessionTarget};
-
-/// 状态栏里的一项指标：弱化色的标签 + 常规色的数值。
-fn metric_item(label: &'static str, value: String, cx: &App) -> AnyElement {
-    h_flex()
-        .gap_1()
-        .flex_shrink_0()
-        .child(
-            div()
-                .text_color(cx.theme().muted_foreground)
-                .child(label),
-        )
-        .child(value)
-        .into_any_element()
-}
-
-/// 状态栏项目之间的分隔点。
-fn metric_separator(cx: &App) -> AnyElement {
-    div()
-        .flex_shrink_0()
-        .text_color(cx.theme().muted_foreground)
-        .child("·")
-        .into_any_element()
-}
-
-/// 状态栏右段：连接状态 · CPU · 内存 · 网络。
-///
-/// - 连接状态由小圆点 + 文字表示：进程仍在运行用 success 色，已结束用弱化色；
-/// - CPU / 内存取自**当前会话进程**（进程未就绪或已退出时显示 `--`）；
-/// - 网络是**系统整体**速率（sysinfo 无法按进程统计流量，详见 `status_metrics` 模块）。
-///
-/// `exited` 来自 [`TerminalView::has_exited`]：会话进程结束的事件一到就能立刻显示
-/// 「已断开」，不必等下一次指标采样（最多 1.5s）才发现进程没了。
-fn render_session_metrics(
-    target: &SessionTarget,
-    metrics: SessionMetrics,
-    exited: bool,
-    cx: &App,
-) -> AnyElement {
-    let (state_text, state_color) = match (exited, metrics.alive) {
-        // 会话结束事件已到达（最及时），或采样发现进程已消失。
-        (true, _) | (false, Some(false)) => ("已断开", cx.theme().muted_foreground),
-        (false, Some(true)) => ("运行中", cx.theme().success),
-        // 还没采样到（刚启动 / PTY 未就绪）：显示中性状态，避免误报断开。
-        (false, None) => ("启动中", cx.theme().muted_foreground),
-    };
-
-    let cpu = metrics
-        .cpu_percent
-        .map(|cpu| format!("{cpu:.1}%"))
-        .unwrap_or_else(|| "--".to_string());
-    let memory = metrics
-        .memory_bytes
-        .map(format_bytes)
-        .unwrap_or_else(|| "--".to_string());
-
-    // 小圆点用文本「●」绘制：与状态栏文字同高，省掉图标与额外布局。
-    let state_dot = div()
-        .flex_shrink_0()
-        .text_color(state_color)
-        .child("●")
-        .into_any_element();
-
-    h_flex()
-        .gap_2()
-        .items_center()
-        .child(
-            h_flex()
-                .gap_1()
-                .flex_shrink_0()
-                .child(state_dot)
-                .child(state_text),
-        )
-        .child(metric_separator(cx))
-        .child(metric_item("连接", target.label(), cx))
-        .child(metric_separator(cx))
-        .child(metric_item("CPU", cpu, cx))
-        .child(metric_separator(cx))
-        .child(metric_item("内存", memory, cx))
-        .child(metric_separator(cx))
-        .child(metric_item(
-            "网络",
-            format!(
-                "↓{} ↑{}",
-                format_rate(metrics.net_rx_per_sec),
-                format_rate(metrics.net_tx_per_sec)
-            ),
-            cx,
-        ))
-        .into_any_element()
-}
 
 impl AppRoot {
     /// 新建一个本地终端会话（默认系统 shell）。
@@ -290,24 +199,11 @@ impl AppRoot {
             .child(tab_bar_area)
             .child(terminal_card);
 
-        // 状态栏：只放指标——连接状态 + 连接目标 + 会话进程的 CPU / 内存 + 系统网络速率，
-        // 全部靠右显示（不显示终端名称，名称已在标签页 / 侧边栏里）。
-        // 指标由后台采样任务每 1.5s 更新一次（见 `status_metrics` 模块）。
-        let status_bar = StatusBar::new()
-            .right(render_session_metrics(
-                &active.target,
-                self.monitor.metrics(),
-                active.view.read(cx).has_exited(),
-                cx,
-            ))
-            .w_full();
-
         v_flex()
             .h_full()
             .w_full()
             .overflow_hidden()
             .child(terminal_pane)
-            .child(status_bar)
             .into_any_element()
     }
 }
