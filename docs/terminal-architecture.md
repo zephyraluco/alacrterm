@@ -51,7 +51,8 @@ graph TB
         MAIN[main.rs<br/>入口 + AppRoot:共享状态/布局装配/指标采样任务]
         SBAR[status_bar.rs<br/>中间列底部公共状态栏:会话指标 + 折叠侧的展开按钮<br/>STATUS_BAR_HEIGHT 统一三条状态栏高度]
         SIDE[sidebar_panel.rs<br/>左/右侧边栏]
-        TPANEL[terminal_panel.rs<br/>中间容器:标签栏 + 终端]
+        TPANEL[terminal_panel.rs<br/>中间容器:自绘标签栏 + 终端]
+        TBAR[tab_bar.rs<br/>自绘标签栏(不用 gpui-kit 的 TabBar/Tab)]
         DIALOG[connection_dialog.rs<br/>「新建终端」对话框(ssh)]
         SETWIN[settings_window.rs<br/>独立设置窗口]
         METRICS[status_metrics.rs<br/>CPU / 内存 / 网络采样]
@@ -110,7 +111,8 @@ crates/
       main.rs                   # 入口 + AppRoot:共享状态、布局装配、指标采样任务、defer 辅助
       status_bar.rs             # 中间列底部的公共状态栏(会话指标 + 折叠侧的展开按钮);`STATUS_BAR_HEIGHT` 统一三条状态栏高度
       sidebar_panel.rs          # 左侧边栏(会话列表 + 右键菜单) / 右侧边栏(会话信息) + 两枚折叠开关
-      terminal_panel.rs         # 中间容器:标签栏 + 终端卡片
+      terminal_panel.rs         # 中间容器:自绘标签栏(见 tab_bar.rs) + 终端区(无边框卡片)
+      tab_bar.rs                # 自绘标签栏:只用 gpui 原语(div/svg)绘制的标签、关闭按钮与右端「+」
       connection_dialog.rs      # 「新建终端」对话框:表单 + ssh 参数组装 + 页脚按钮
       settings_window.rs        # 独立设置窗口(自绘标题栏、窗口句柄复用)
       status_metrics.rs         # sysinfo 采样:连接状态 / CPU / 内存 / 网络 + 字节格式化
@@ -186,12 +188,14 @@ fn main() {
 - **折叠开关的位置**:默认长在各自侧边栏的状态栏里;侧边栏折叠后由中间那条公共状态栏接管「展开」按钮(见上一条)。⚠️ **可见性只由这两枚折叠按钮改变**——活动栏图标、会话条目等其余按钮都不会折叠 / 展开侧边栏(与右侧边栏一致,那边也只有它自己那枚开关)
 - **两层嵌套分栏组**:内层 `main-split` = 左侧边栏 | 中间列,外层 `right-split` = 内层 | 右侧边栏。**刻意不把三个面板塞进同一组**——面板宽度按**下标**存在 `ResizableState` 里,三面板共存时任一侧折叠都会让另一侧的下标漂移、拖出来的宽度丢失
 - **活动栏图标**(`sidebar_panel::render_activity_icons`):终端会话 / 关于两个图标,**横向排在左栏自己的状态栏里**(原先是侧边栏左侧一条 44px 竖栏,已取消)。点击**只切换视图**(`set_sidebar_view`;点击当前视图图标是空操作),**不会折叠 / 展开侧边栏**——折叠只归折叠按钮管。「设置」入口则在**标题栏右侧的文字按钮**(见 §3.5)
-- **终端容器**(`terminal_panel::render_terminal_container`):标签栏 + 终端卡片,放在中间列的终端区里;**标签全部关闭后终端区退化为空占位**,两侧边栏与两条状态栏仍在,可从左侧边栏会话条目右键菜单「新建终端」恢复
+- **终端容器**(`terminal_panel::render_terminal_container`):**自绘标签栏**(`tab_bar` 模块) + 终端区,放在中间列的终端区里;**标签全部关闭后终端区退化为空占位**,两侧边栏与两条状态栏仍在,可从左侧边栏会话条目右键菜单「新建终端」恢复
+- ⚠️ 终端区**刻意不画卡片边框 / 圆角**:标签栏已经贴边并自带一条底边线,再画一圈卡片边框就会在它下方 8px(pane 的 `p_2()`)处多出一条平行横线,看着像重复的分隔线。不画边框后终端背景与 pane 背景同色,选中标签的底色与下方自然连成一体
+- **自绘标签栏**(`tab_bar`):结构与配色参考 zed(`crates/ui/src/components/tab.rs` / `tab_bar.rs` / `terminal_view.rs` 的 `tab_content`),**不使用 gpui-kit 的 `TabBar` / `Tab` / `Button` / `Icon` 组件**——标签、关闭按钮、右端「+」全部用 gpui 原语绘制(图标用 `svg().path(...)`,显式 `.text_color(...)` 着色)。固定 200px 宽、32px 高;选中标签用 `tab_active`/`tab_active_foreground` 且底部留 1px 盖住栏底分隔线(zed 的 `pb_px()` 技巧),未选中用 `tab_foreground` 且 hover 提亮;关闭按钮只在标签被悬停/选中时渲染(悬停态存在 `AppRoot::hovered_tab`,因为 gpui-pre 没有 `visible_on_hover`,而 `opacity(0)` 会留下可点击的隐形热区);中键点击标签也能关闭;`overflow_x_scroll()` + `track_scroll()` 支持标签横向滚动,右端「+」派发 `NewTerminal`
 - **新建会话入口**:左侧边栏会话条目的右键菜单「新建终端」(派发 `NewTerminal`,见 §3.7);侧边栏底部**已无常驻按钮**、空白区也**不挂**右键菜单——因此全部会话关闭后(列表为空)当前缺少可点击的恢复入口(已知限制)
 - `sidebar_panel` 两个列容器统一是 `v_flex[Sidebar(flex_1), 本栏 StatusBar(w_full)]`:**宽度同步靠同列布局天然完成**,不要去给状态栏算面板宽度(拖分隔条时 `ResizableState` 只在 MouseUp 更新,手动同步会滞后)
 - 状态栏里的图标按钮必须显式 `h(px(16.))`:gpui-kit 的 `Button` 图标按钮最小 20px 高,会把状态栏撑高(`text_xs` 行高≈16px)
 - **三条状态栏必须等高**(`status_bar::STATUS_BAR_HEIGHT` = 28px):`StatusBar` 的高度由内容撑出,而三栏内容不同——含一行文字的那两条(指标 / 「会话信息」)自然高≈28px,只有 16px 图标按钮的那一条只有≈24px;三栏底边对齐,矮的那条看上去就“短了一截”。定死同一个高度最省事(图标按钮靠 `items_center` 垂直居中)
-- **分栏边界竖线只由面板自己画**:分栏拖拽条(`ResizeHandle`)静止时会在边界处**额外**画一条 1px 线,而两侧面板本来就有同色边框(`Sidebar` 内部的 `border_r_1`/`border_l_1`、两条侧边栏状态栏上的 `border_r_1`/`border_l_1`)——两条线在设备像素上**不总是重合**(125% DPI 实测:左边界错开 1 个设备像素 → 看上去比右边界粗一点)。因此 `main.rs` 在 `Theme::change` 之后执行 `gpui_kit::base::Theme::global_mut(cx).resizable.handle = Some(Hsla::transparent_black())`,把拖拽条那条线置为透明,只保留面板自身的边框;拖拽时的 ring 高亮不受影响(`active_handle` 仍未设置)。⚠️ 这里改的是 **`gpui_base::Theme`**(经 `gpui_kit::base` 转发),与视图里用的 `gpui_component::Theme` 是**两个互不相干的 global**,后者没有 `resizable` 字段。⚠️ 若将来出现两侧都没有自带边框的相邻面板,该边界会缺少竖线,需要自行在面板上补边框
+- **分栏边界竖线统一由拖拽条画**:`ResizeHandle` 静止时会在边界处画一条 1px 线(`h_full` 贯穿整列,包括两侧状态栏行),所以**不再**在侧边栏自己那边重复画线:两条侧边栏状态栏都**没有** `border_*_1`(`Sidebar` 内部那条固定边框则通过主题关掉),否则左边界会变成 2 个设备像素(`border_r_1` 画在左栏盒子内 = `[B-1,B)`,拖拽条画在 `[B,B+1)`,两者相邻;而右边界 `border_l_1` 恰好与拖拽条重合 = `[B,B+1)`,所以只有左边会变粗)。具体做法:`main.rs` 的 `change_theme()` 在 `Theme::change` 之后执行 `Theme::global_mut(cx).sidebar_border = transparent`(`sidebar_border` 默认 = `border`,与拖拽条同色,置透明后边界就只剩拖拽条那一条)。⚠️ **换主题必须走 `crate::change_theme(mode, cx)` 这个统一入口**(设置窗口的深浅色开关已改用它):`gpui_component::Theme::change()` 会把整套配色**投影**回主题 global,只在启动时压一次不够。⚠️ 副作用:`sidebar_border` 兼作侧边栏菜单「嵌套项缩进导线」的颜色(见 gpui-component `sidebar/menu.rs`),它也会一起消失。⚠️ 若将来出现两侧都没拖拽条的相邻面板,边界会缺少竖线
 - 容器渲染方法统一返回 `AnyElement`:edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,装箱可避免同一渲染树里连续调用多个 `&mut cx` 方法时的借用冲突
 
 ### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)

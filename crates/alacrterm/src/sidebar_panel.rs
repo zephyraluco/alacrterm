@@ -279,16 +279,15 @@ impl AppRoot {
 
         // 左栏自己的状态栏：折叠按钮 + 视图图标（终端会话 / 关于）。
         // 它与侧边栏同处一个列容器，宽度自然随侧边栏（拖分隔条时实时跟随）；
-        // 右缘竖线让列分界一直延伸到底部。（窗口底部是三块并列的状态栏：
-        // 左栏 / 中间公共 / 右栏，见 `status_bar` 模块。）
+        // **不画右边框**：列分界的那条竖线统一由分栏拖拽条来画
+        // （它 `h_full` 贯穿整列，也盖住这一行；见 `crate::change_theme` 的说明）。
         // 高度用 `STATUS_BAR_HEIGHT`：这条里没有文字，自然高度比含文字的那两条矮，
         // 不统一就会出现「左栏那条短一截」的错位。
         let status_bar = StatusBar::new()
             .left(self.sidebar_toggle_button(cx))
             .left(self.render_activity_icons(cx))
             .h(STATUS_BAR_HEIGHT)
-            .w_full()
-            .border_r_1();
+            .w_full();
 
         v_flex()
             .h_full()
@@ -360,7 +359,7 @@ impl AppRoot {
 
         // 右栏自己的状态栏：标识（图标 + 名称）在左、折叠按钮在右端——
         // 与左栏那一条镜像对称（那边是「按钮在左端 + 图标在其右」）。
-        // 左缘竖线让列分界一直延伸到底部。
+        // 同样**不画左边框**：列分界的竖线由分栏拖拽条统一画。
         let status_bar = StatusBar::new()
             .left(
                 h_flex()
@@ -372,8 +371,7 @@ impl AppRoot {
             )
             .right(self.right_sidebar_toggle_button(cx))
             .h(STATUS_BAR_HEIGHT)
-            .w_full()
-            .border_l_1();
+            .w_full();
 
         v_flex()
             .h_full()

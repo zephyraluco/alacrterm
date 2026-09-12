@@ -20,7 +20,7 @@ use gpui::{
     Window, WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Root, Theme, ThemeMode, TitleBar, h_flex,
+    ActiveTheme as _, Icon, Root, ThemeMode, TitleBar, h_flex,
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     v_flex,
 };
@@ -89,9 +89,12 @@ impl Render for SettingsWindow {
                                                     } else {
                                                         ThemeMode::Light
                                                     };
-                                                    // Theme::change 传 None 时不会自动刷新窗口，
+                                                    // 统一入口：应用主题并重新压下
+                                                    // 分栏拖拽条线条的透明覆盖（见
+                                                    // `crate::change_theme` 的说明）。
+                                                    // 传 None 时不会自动刷新窗口，
                                                     // 需手动刷新所有窗口（含本设置窗口）。
-                                                    Theme::change(mode, None, cx);
+                                                    crate::change_theme(mode, cx);
                                                     cx.refresh_windows();
                                                 },
                                             ),

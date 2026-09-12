@@ -32,12 +32,13 @@ mod settings_window;
 mod sidebar_panel;
 mod status_bar;
 mod status_metrics;
+mod tab_bar;
 mod terminal_panel;
 
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, WeakEntity,
-    Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
+    IntoElement, ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _,
+    WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use gpui_kit::{
     QuitMode,
@@ -58,6 +59,27 @@ use sidebar_panel::{
 };
 use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
 
+/// 应用（或切换）界面主题，并重新压上我们的主题覆盖。
+///
+/// **分栏边界的那条竖线统一由拖拽条（`ResizeHandle`）来画**：它静止时会在边界处
+/// 画一条 1px 线，`h_full` 贯穿整列（含两侧状态栏行）。所以我们要做的是**反方向**的
+/// 覆盖——把侧边栏组件自己那条边框关掉：`Sidebar` 内部固定 `Side::Left → border_r_1()`
+/// / `Side::Right → border_l_1()`，颜色取 `cx.theme().sidebar_border`（默认 = `border`，
+/// 与拖拽条同色）。把它置为透明后，左右边界就只剩拖拽条那一条线，宽度天然一致。
+///
+/// ⚠️ 只做一次不够：`gpui_component::Theme::change()` 会把整套配色**投影**回主题 global
+/// （包含 `sidebar_border`），所以**每次**换主题都要重新压。设置窗口的深浅色开关已经
+/// 改走本函数，以后新增换主题的地方也必须走它。
+///
+/// ⚠️ 副作用：`sidebar_border` 还兼作侧边栏菜单「嵌套项缩进导线」的颜色
+/// （gpui-component `sidebar/menu.rs`），它也会一起变成透明。
+///
+/// 传 `None` 作为窗口参数（与原先一致）：调用方需要自行 `cx.refresh_windows()`。
+pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
+    Theme::change(mode, None, cx);
+    Theme::global_mut(cx).sidebar_border = Hsla::transparent_black();
+}
+
 fn main() {
     gpui_kit::application()
         // 注册自有资产源（alacrterm assets.rs 方式）：本 crate 的 assets/icons 目录
@@ -68,21 +90,7 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
             // 终端为深色背景，应用主题跟随使用暗色。
-            Theme::change(ThemeMode::Dark, None, cx);
-            // 关掉分栏拖拽条自带的那条常驻竖线：
-            // `resizable` 的拖拽手柄（`ResizeHandle`）静止时会在分栏边界额外画一条
-            // 1px 线，而两侧面板自己也画了同色边框（`Sidebar` 的 `border_r_1` /
-            // `border_l_1`、两条侧边栏状态栏上的 `border_r_1` / `border_l_1`）——
-            // 两条线在设备像素上**不总是重合**（实测 125% DPI：左边界错开 1 个设备
-            // 像素 → 看上去比右边界粗一点），所以把拖拽条那条线置为透明，只保留
-            // 面板自己的边框，左右边界即完全一致。
-            // 拖拽时仍会亮起：`active_handle` 保持未设置 → 回落到 `ring` 色。
-            //
-            // ⚠️ 注意这是**另一个** Theme：拖拽手柄读的是 `gpui_base::Theme`
-            // （本色由 `gpui_kit::base` 重导出），而组件用的是
-            // `gpui_component::Theme`（上面的 `Theme::change`）；两者是各自独立的
-            // global，`gpui_component::Theme` 上并没有 `resizable` 字段。
-            gpui_kit::base::Theme::global_mut(cx).resizable.handle = Some(Hsla::transparent_black());
+            change_theme(ThemeMode::Dark, cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(
@@ -181,6 +189,12 @@ struct AppRoot {
     right_sidebar_visible: bool,
     /// 标签栏滚动句柄：跟踪 tabs 横向滚动，激活会话时把选中标签滚入可视区。
     tab_scroll_handle: ScrollHandle,
+    /// 鼠标当前悬停的终端标签下标（`None` = 没有悬停任何标签）。
+    ///
+    /// 自绘标签栏（[`crate::tab_bar`]）用它决定关闭按钮是否渲染：gpui-pre 既没有
+    /// `visible_on_hover` / `invisible`，又不能只靠透明度隐藏（会留下看不见但
+    /// 仍可点击的热区），所以把悬停态存下来。
+    hovered_tab: Option<usize>,
     /// 左侧边栏 / 终端分栏面板组（`main-split`）的共享状态。
     ///
     /// 实体由根视图持有（而非交给组件内部的 keyed state），这样侧边栏折叠再展开、
@@ -191,6 +205,22 @@ struct AppRoot {
     /// 刻意与左侧分成两组嵌套面板：面板宽度按**下标**存在状态里，
     /// 若把三个面板塞进同一组，任一侧折叠都会让另一侧的下标漂移、宽度丢失。
     right_resize_state: Entity<ResizableState>,
+    /// 左侧边栏的「期望宽度」（逻辑像素）：用户拖拽分隔条后的宽度记在这里。
+    ///
+    /// 分栏容器在**容器尺寸变化**时会把所有面板按比例重排（
+    /// `ResizableState::adjust_to_container_size`），于是窗口一变宽、侧边栏就跟着
+    /// 变宽。记下期望宽度后由 [`AppRoot::pin_sidebar_widths`] 把面板钉回去，
+    /// 让宽窄变化全部由中间那一列吸收。
+    sidebar_width: Pixels,
+    /// 右侧边栏的「期望宽度」，含义同 [`AppRoot::sidebar_width`]。
+    right_sidebar_width: Pixels,
+    /// 上一次看到的 `main-split` / `right-split` 容器宽度。
+    ///
+    /// 分栏容器只在**容器宽度变化**的那一次布局里重排面板，所以「宽度和上次不一样」
+    /// 就等于「刚发生过重排」——这是[`AppRoot::pin_sidebar_widths`] 判断该不该
+    /// 动手的依据。拖拽分隔条不改变容器宽度，因此不会被误判成重排。
+    main_split_width: Option<Pixels>,
+    right_split_width: Option<Pixels>,
     /// 设置窗口的句柄（见 [`AppRoot::open_settings_window`]）。
     ///
     /// 用于「重复点击设置图标只激活已有窗口」；窗口被关闭后该句柄会失效，
@@ -209,8 +239,13 @@ impl AppRoot {
             sidebar_view: SidebarView::Sessions,
             right_sidebar_visible: true,
             tab_scroll_handle: ScrollHandle::new(),
+            hovered_tab: None,
             resize_state: cx.new(|_| ResizableState::default()),
             right_resize_state: cx.new(|_| ResizableState::default()),
+            sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+            right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
+            main_split_width: None,
+            right_split_width: None,
             settings_window: None,
             monitor: SystemMonitor::new(),
         };
@@ -218,6 +253,47 @@ impl AppRoot {
         // 启动状态栏指标采样（CPU / 内存 / 网络），窗口存活期间持续运行。
         Self::start_metrics_sampling(cx);
         this
+    }
+
+    /// 确保两侧边栏保持各自的「期望宽度」，宽度变化全部由中间那一列吸收。
+    ///
+    /// 分栏容器在容器尺寸变化时会把**所有**面板按比例重排（
+    /// `ResizableState::adjust_to_container_size`）——于是缩放窗口、折叠另一侧边栏
+    /// 都会把侧边栏一起带宽 / 带窄。这里发现容器宽度与上次不同（即刚重排过）
+    /// 就立刻 `resize_panel` 钉回 [`AppRoot::sidebar_width`] /
+    /// [`AppRoot::right_sidebar_width`]；多出来 / 少掉的空间自然落到中间那一列。
+    ///
+    /// 两处调用时机很关键：
+    /// - **在 [`AppRoot::render`] 开头同步调用**——紧接的布局就会用上钉好的宽度，
+    ///   不会先闪一帧错误宽度；
+    /// - **只在容器宽度变过时**才动手——拖拽分隔条不改变容器宽度，所以不会和
+    ///   用户抢宽度（拖拽结果由 `on_resize` 回调记进上面两个字段）。
+    ///
+    /// 期望宽度与当前宽度相同时 `ResizableState::resize_panel` 直接返回，
+    /// 因此可以每帧调用。
+    fn pin_sidebar_widths(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_visible {
+            let width = self.sidebar_width;
+            let container = self.resize_state.read(cx).container_size();
+            if self.main_split_width != Some(container) {
+                self.main_split_width = Some(container);
+                self.resize_state.update(cx, |state, cx| {
+                    state.resize_panel(0, width, window, cx);
+                });
+            }
+        }
+        if self.right_sidebar_visible {
+            let width = self.right_sidebar_width;
+            let container = self.right_resize_state.read(cx).container_size();
+            if self.right_split_width != Some(container) {
+                self.right_split_width = Some(container);
+                self.right_resize_state.update(cx, |state, cx| {
+                    // 右侧边栏是本组的最后一个面板：`resize_panel` 会通过挤压
+                    // 前一个面板（中间列）来让它拿到这个宽度。
+                    state.resize_panel(1, width, window, cx);
+                });
+            }
+        }
     }
 
     /// 把一个「需要窗口 + 需要 &mut 根视图」的操作推迟到本次窗口更新之后执行。
@@ -281,6 +357,10 @@ impl Render for AppRoot {
         // 主体：侧边栏与终端容器由各自的容器模块渲染，两者之间是可拖拽的分隔条。
         // 活动栏已并入底部状态栏（见 `status_bar` 模块），此处不再有左侧竖栏。
 
+        // 侧边栏宽度只由用户拖拽决定：容器尺寸变化带来的按比例重排先钉回去，
+        // 免得窗口一变宽侧边栏就跟着变宽（见 `pin_sidebar_widths`）。
+        self.pin_sidebar_widths(window, cx);
+
         // 终端容器：所有标签页关闭后整个容器一起关闭（标签栏 / 终端全部消失）。
         let terminal_container = (!self.terminals.is_empty())
             .then(|| self.render_terminal_container(cx));
@@ -311,9 +391,18 @@ impl Render for AppRoot {
             h_resizable("main-split")
                 // 绑定根视图持有的状态实体：侧边栏折叠再展开后宽度不会丢失。
                 .with_state(&self.resize_state)
+                // 拖拽结束后记下新宽度，作为窗口尺寸变化时的「期望宽度」。
+                .on_resize({
+                    let root = cx.entity().downgrade();
+                    move |state, _window, cx| {
+                        if let Some(width) = state.read(cx).sizes().first().copied() {
+                            let _ = root.update(cx, |this, _| this.sidebar_width = width);
+                        }
+                    }
+                })
                 .child(
                     resizable_panel()
-                        .size(SIDEBAR_DEFAULT_WIDTH)
+                        .size(self.sidebar_width)
                         .size_range(SIDEBAR_MIN_WIDTH..SIDEBAR_MAX_WIDTH)
                         // flex_none：宽度完全由面板状态决定，否则组件内置的
                         // flex_grow_1 会把侧边栏撑得比设定值更宽。
@@ -331,11 +420,20 @@ impl Render for AppRoot {
         let body = if self.right_sidebar_visible {
             h_resizable("right-split")
                 .with_state(&self.right_resize_state)
+                // 拖拽结束后记下新宽度（右侧边栏是本组的最后一个面板，下标 1）。
+                .on_resize({
+                    let root = cx.entity().downgrade();
+                    move |state, _window, cx| {
+                        if let Some(width) = state.read(cx).sizes().get(1).copied() {
+                            let _ = root.update(cx, |this, _| this.right_sidebar_width = width);
+                        }
+                    }
+                })
                 // 左栏（左侧边栏 + 中间列）撑满剩余宽度，右栏宽度完全由面板状态决定。
                 .child(resizable_panel().child(center))
                 .child(
                     resizable_panel()
-                        .size(RIGHT_SIDEBAR_DEFAULT_WIDTH)
+                        .size(self.right_sidebar_width)
                         .size_range(RIGHT_SIDEBAR_MIN_WIDTH..RIGHT_SIDEBAR_MAX_WIDTH)
                         .flex_none()
                         .child(self.render_right_sidebar_container(cx)),
