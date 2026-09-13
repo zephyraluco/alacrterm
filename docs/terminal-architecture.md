@@ -233,7 +233,87 @@ struct SessionRequest { name: Option<SharedString>, shell: Shell, target: Sessio
 - 仍是**独立窗口**而非应用内对话框:可以自由调整大小、不与终端挤在同一条渲染树里
 - **暗色应用不要用系统标题栏**:Windows 下系统标题栏颜色跟随系统「浅色/深色」设置,会出现一条白条;只用 `appears_transparent` + 自绘 `TitleBar`
 - 窗口句柄存在 `AppRoot::settings_window`:重复点击设置入口只 `activate_window`,窗口被用户关闭后下次点击重新开窗
-- 内容为 gpui-kit `Settings` 组件(外观 / 深色主题开关);主题是全局状态,切换后 `cx.refresh_windows()` 刷新所有窗口
+- **入口有两个**:主窗口标题栏右侧的文字按钮「设置」,以及快捷键 `Ctrl+,`(经 `actions::OpenSettings`,绑在 `None` context 上——焦点在终端里也能触发;`main` 建窗时 `cx.bind_keys` 注册)
+- 内容为 gpui-kit `Settings` 组件,分**两页**(左侧导航 / 搜索框由组件自绘):
+  - **主题** ← 深浅模式开关 + 「深色模式配色」「浅色模式配色」两个下拉框(列出 `themes/` 里该模式的主题 + 首项「跟随 gpui-kit(默认)」)
+  - **终端** ← 字体 / 字号 / 字重 / 行高倍数 / 最小对比度 / 光标形状 / 光标闪烁(四个数字字段是自建字段,原因见下一节)
+- **组件铺满客户区**(用户要求):外层只留 `flex_1().min_h_0()` 的布局壳,**不要 `p_*`**——
+  组件自己的导航栏 / 页面各自有留白,外面再包一圈会让整块与窗口边缘隔出一道缝。
+  实测:去掉 `p_4()` 后导航栏底色从 x=29 提前到 x=9(即客户区起点,窗口边框 x=0..8 是
+  不可见的 resize 边框,不是留白)。
+
+#### 设置项的读写路径(改一项发生了什么)
+
+`gpui_component::setting::SettingField` 的取值闭包签名是 `Fn(&App) -> T`——**拿不到任何
+Entity**,所以可配置项必须放在 gpui `Global` 里(`config::Settings`,含 `render` + 两个主题名)。
+设值闭包拿了 `&mut App`,于是**需要 Entity 的副作用**只能另外借:
+
+```
+点一下设置项 ──▶ config::settings_mut(cx).render ← 新值        ① 全局(设置字段取值读它)
+                  ├─ config::save_render_settings()            ② 落盘 config/terminal.json
+                  └─ AppRoot::apply_render_settings()          ③ 推给所有存活会话(终端参数存在
+                        └─ WeakEntity<AppRoot>                     每个 TerminalView 里,要逐个 update)
+```
+
+- ⚠️ `WeakEntity<AppRoot>` 由 `open_settings_window` 建窗时捕获传入(`cx.entity().downgrade()`);
+  三步缺一不可——只改全局会让存量会话不变、只落盘要重启才生效
+- **主题是全局状态**(`Theme::global`),改完 `cx.refresh_windows()` 两个窗口一起重绘,
+  所以走 `config::set_theme` 就够了,不需要 `WeakEntity`
+- **落盘只覆盖界面负责的键**(见 `config::save_render_settings`):27 个 ANSI 颜色、3 个 accent 色
+  与将来手写的其它键原样保留(读写整份 JSON 值,不重新序列化整个结构——否则
+  `Hsla → hex` 来回换算会把颜色改花)
+- ⚠️ f32 参数写进 JSON / 显示在输入框前要过 `config::as_number()`:直接 `as f64` 会让
+  `1.3f32` 变成 `1.2999999523162842`(实测踩过)
+- 实测(125% DPI,`target/settings_probe.ps1`):字号 15→20 点五次 `+` ⇒ 终端立即放大
+  (终端区亮像素 3352→5586)、`config/terminal.json` 的 `font_size` 变 20;主题选 `Harper` ⇒
+  两个窗口配色立即变、`config/app.json` 写入 `"dark_theme": "Harper"`,分栏竖线仍只有拖拽条一条
+  (说明 `set_theme` 里的 `change_theme` 把 `sidebar_border` 覆盖压住了);重启后
+  `config/app.json` 选中的 `Catppuccin Mocha` + `font_size: 18` 都照旧生效
+  (标签栏 `#0B0B11`、终端区亮像素 4416,介于 15 与 20 之间)✓
+
+#### 数字字段为什么不用 `SettingField::number_input`
+
+设置页的四个数字字段(字号 / 字重 / 行高倍数 / 最小对比度)走**自建字段**
+(`settings_window.rs::number_item` + `NumberFieldState`),不用 gpui-kit 内置的
+`SettingField::number_input`。原因是上游 `NumberField`
+(`gpui-component/src/setting/fields/number.rs`)有两处行为不可用:
+
+1. **`NumberFieldOptions::step` 无效**:`InputState` 造出来时 `number_step` 已是
+   `Some(Fixed(1.))`(`gpui-base/src/input/base/state.rs` 的 `new_in_mode`),
+   于是 `apply_number_step` 自己步进并 `return`,**不会**发 `NumberInputEvent::Step`
+   ——而组件只在那个事件的 handler 里读 `options.step`(死代码)。实测:字重 `step: 100`
+   点一次 `+`,400 → **401**;行高 `step: 0.05`,1.3 → **2.3**。
+2. **钳制发生在每次按键**:组件在 `InputEvent::Change` 里做
+   `value.clamp(min, max)` → 写设置 → `input.set_value(钳后文本)`,而
+   `set_value` 会把光标留在文本末尾 ⇒ 下一个按键是**追加**。于是 min 高一点的字段
+   根本打不出目标值:min=6 时敲 `1` 当场被改写成 `6`、再敲 `2` 得 `62` → `48`(实测
+   字重 400 想输 200 会得到 900)。这与 gpui-base 自己的约定相反——`clamp_number_value`
+   的文档写明「输入期间允许越界,失焦才钳」,但它只在设过 `number_min/max` 时才生效,
+   而 `NumberField` 从没设过。
+
+自建字段的做法(`number_item(title, description, (min, max, step), root, get, set)`):
+
+- 用 `SettingField::render(|options, window, cx| …)` 换掉内置字段,状态放
+  `window.use_keyed_state("number-field-{page}-{group}-{item}")`(key 必须含三项序号,
+  否则同页多个字段会抢同一个 state),内含 `Entity<InputState>`、`committed: f64`
+  与订阅;
+- `InputState::new(window, cx).default_value(…).step(step).min(min).max(max)`——step/min/max
+  交给输入框自己:步进走 `step_value(..)`(还会保留小数位、到边界时不动),
+  输入期间允许越界中间态,失焦时由 `clamp_number_value` 收口;
+- 订阅 `InputEvent::Change` / `Blur`,**只把「钳过的副本」提交给配置,绝不改动输入框文本**;
+  回调里用 `cx.defer_in` 延后一拍再碰输入框(订阅回调可能就发生在它的可变借用里);
+- 反向同步(外部改值 → 回写文本)用 `committed` 做守卫:只有传进来的值 ≠ 上次提交的值
+  才 `set_value`,否则会把用户正在输入的中间态顶掉;失焦时若框里是空 / 不可解析的内容,
+  补回 `committed`。
+
+实测(125% DPI,`target/settings_probe.ps1`):字重选中 `400` 输入 `200` ⇒
+`config/terminal.json` 的 `font_weight` = **200.0**(旧实现 900);字号选中 `16` 输入 `12` ⇒
+`font_size` = **12.0**(旧实现 `6` → `48`);点 `+`:字重 400 → **500**(step 100)、
+行高 1.3 → **1.35**(step 0.05)✓。上游修好 `NumberField` 后可以直接换回内置字段。
+
+⚠️ 探针为此加了 `-Drag 'x1,y1;x2,y2'`:用 PostMessage 发
+`WM_MOUSEMOVE + LEFTDOWN + 多步 MOVE(MK_LBUTTON) + LEFTUP` 做拖拽选择,用于选中输入框里
+的旧值再覆写——`Ctrl+A` / `Backspace` 这类**走动作派发**的键用 PostMessage 送不进去。
 
 ### 3.6 状态栏指标(`status_metrics.rs` 采样 / `status_bar.rs` 渲染)
 
@@ -247,7 +327,8 @@ struct SessionRequest { name: Option<SharedString>, shell: Shell, target: Sessio
 ### 3.7 右键菜单与 Action(`actions.rs`)
 
 - 菜单项按官方写法 `menu.menu("标签", Box::new(SomeAction))`,点击后由菜单 `dispatch_action` 派发
-- 自定义 Action:`actions!(alacrterm, [NewTerminal])`(零字段);带数据的 `CloseSession { index }` 需派生 `Deserialize`(`#[action(namespace = .., no_json)]` 免掉 schemars)
+- 自定义 Action:`actions!(alacrterm, [NewTerminal, OpenSettings])`(零字段);带数据的 `CloseSession { index }` 需派生 `Deserialize`(`#[action(namespace = .., no_json)]` 免掉 schemars)
+- 快捷键在 `main` 建窗时 `cx.bind_keys` 注册:`ctrl-,` → `OpenSettings`(绑在 `None` context ⇒ 焦点在终端里也能触发)
 - 接收方用**全局监听器** `App::on_action`:在 action 冒泡阶段必然触发,不依赖焦点(菜单是同一窗口内的浮层)
 - 需要窗口的操作(如打开对话框)配合 `defer_after_update`;不需要窗口的直接 `root.update(cx, ..)`
 - **不要嵌套 `context_menu`**:gpui 的 hitbox 默认是 `Normal`(只有 `.occlude()` 才阻断),父容器与子条目都挂会**同时弹出两个菜单**——因此目前只有会话条目有右键菜单,侧边栏空白区不弹
@@ -287,6 +368,97 @@ cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
 - **回调里不要直接 `update_in`**:对话框 `on_ok`、全局 action 监听器执行期间,目标窗口仍在「更新栈」上,`WeakEntity::update_in` 会返回 `Err("entity has no current window")`(**同帧内的 `window.defer` 也一样**)→ 统一用 `AppRoot::defer_after_update`(`App::spawn` + 1ms 定时器 + `update_in`),让出后窗口已放回
 - `sample_metrics` 这类定时任务用 `update`(不需窗口)即可,不必用 `update_in`
 - gpui-kit 的 `h_flex()` 默认交叉轴居中:放在 `h_flex` 里的满高列必须显式 `.h_full()`,否则只取内容高度并垂直居中
+
+### 3.10 渲染配置(`config/terminal.json`,启动时解析一次)
+
+分工:**文件解析在 `alacrterm`(`config.rs` 的「终端渲染参数」一节),`terminal_view` 只负责使用**——
+`TerminalView::new(working_directory, shell, settings, window, cx)` 接收应用层构造好的
+`Arc<RenderSettings>`(`terminal_view::RenderSettings`,即 `TerminalRenderSettings` 的重导出)。
+
+```
+config/terminal.json ──(alacrterm::config::load_render_settings)──▶ TerminalRenderSettings
+        │                                                            │
+        └── 缺失/字段缺省/取值非法 ⇒ 逐项回退到 default()              └── AppRoot.render_settings: Arc<..>
+                                                                              └── spawn_session → TerminalView::new
+```
+
+- **查找顺序**:`<可执行文件目录>/config/terminal.json`(发行形态)→
+  `<仓库根>/config/terminal.json`(开发形态,经 `CARGO_MANIFEST_DIR/../..`)。
+- **解析**:`serde_json` + 全 `Option` 字段 ⇒ **逐项回退**,任何情况下都能启动;
+  颜色支持 `#RRGGBB` 与 `#RRGGBBAA`(`#` 可省),`colors` 的键名就是 `TerminalColors` 字段名,
+  未知键 / 非法值只提示、不致命。
+- **时机**:`config::install(cx)` 在 `AppRoot::new` 之前解析**一次**装进全局(`config::Settings`),
+  新建会话时从全局读(`spawn_session`)⇒ 设置窗口改完对**之后新建**的会话自然生效;
+  存量会话由 `AppRoot::apply_render_settings` 即时推送(见 3.5)。
+- **回写**:设置窗口的「终端」页会把界面负责的那几个键写回本文件(`config::save_render_settings`),
+  颜色类键不动;每次保存都从磁盘重读 JSON 再改键,所以手写的其它键不会丢。
+- ⚠️ 提示用 `eprintln!`(带 `[config]` 前缀)而不是 `log::warn!`:**本仓库没有安装 logger**,
+  `log` 宏是空操作,写了也看不到。
+- 实测:把 `terminal_background` 临时改成 `#204060` 后重启,终端区亮像素从 ~7.5k 涨到 **415k** ⇒
+  配置确实驱动渲染 ✓。
+
+---
+
+### 3.11 界面主题(`themes/*.json`,官方主题库)
+
+主题文件来自 gpui-kit 官方主题库
+(<https://github.com/longbridge/gpui-kit/tree/main/themes>),直接落在仓库根的 `themes/` 下
+(当前 8 个文件 / 17 套主题,文件可自由增删——目录整体被扫描)。分工同样是**解析与登记在
+`alacrterm`(`config.rs` 的「界面主题」一节)**,渲染层(gpui-component)只负责投影。
+
+```
+themes/*.json ──(config::preload_themes: ThemeRegistry::load_themes_from_str)──▶ 注册表(内置 2 套 + 目录里解析出的)
+      │                                                                                          │
+      └── ThemeRegistry::watch_dir ▶ 文件改动热重载(只刷新主题库)                                   └── 默认不启用:配色 = gpui-kit 内置主题
+```
+
+- **默认不启用任何导入主题**(与 gpui-kit 开箱一致):用它的内置 `Default Dark` /
+  `Default Light`(即 `gpui-component/src/theme/default-theme.json`),这正是
+  `config/app.json` 里不写主题名(`null`)的结果。
+- **换主题走 `config::set_theme(name, mode, cx)`**:挂槽位 → 记全局 → 写回
+  `config/app.json` → `change_theme` 重新投影 + `refresh_windows`。设置窗口「主题」页的两个
+  下拉框就是它(“跟随 gpui-kit” 对应空串/`null`);启动时 `config::apply_saved_themes`
+  按同一份配置把两个槽位挂好(必需在 `load_themes` 之后)。
+
+  ```jsonc
+  // config/app.json（不存在 = 全部跟随 gpui-kit）
+  { "dark_theme": "Catppuccin Mocha", "light_theme": null }
+  ```
+
+- **文件格式**:每个文件是一个 `ThemeSet`(`{ name, author, themes: [ThemeConfig, ...] }`),
+  **一个文件可含多套主题**(深浅变体),所以选择用的是文件内 `themes[].name`
+  (如 `"Catppuccin Mocha"`),与文件名无关。
+- **目录查找**:`<可执行文件目录>/themes`(发行形态)→ `<仓库根>/themes`(开发形态),同 3.10。
+  目录**不存在就整段跳过**:`watch_dir` 的语义是"目录不存在就创建 + 挂 notify 监视",
+  发行形态下不该凭空多出一个空 `themes/`。
+- **为什么要同步 `preload`**:`watch_dir` 的首次装载跑在 `cx.spawn` 里(registry.rs:105),
+  比第一个渲染帧晚——注册表在那之前是空的,谁想按名字拿主题都拿不到。先同步读一遍目录,
+  之后 `watch_dir` 的异步重载只是把同样内容再放一次(注册表按名字去重)。
+- ⚠️ **热重载会被"覆盖冲掉",必须用观察者补回**:注册表自带 `observe_global`
+  (改文件 → 重载 → 按当前 `Theme.light_theme/dark_theme` 的**名字**回填 → 重新 `Theme::change`),
+  而那次 `Theme::change` 会**重新投影** `sidebar_border`,把我们置的透明冲掉。
+  修法是在 `config::load_themes` 里**再注册一个** `observe_global::<ThemeRegistry>`:
+  全局观察者按**注册顺序**回调(`gpui-pre/src/subscription.rs` 用自增 subscriber_id 排序),
+  注册在 `gpui_component::init` 之后 ⇒ 一定在它投影完才执行 ⇒ 覆盖压得住。
+  实测 A/B(往主题里注入 `"sidebar.border": "#00FF00"` 后热重载,扫描分栏竖线):
+
+  | 补回方式 | 注入 `#00FF00` 后热重载 |
+  | --- | --- |
+  | `watch_dir` 的 `on_load` 回调里重压 | 竖线出现 `#00FF00` ⇒ **被冲掉** |
+  | 额外注册全局观察者(现方案) | 竖线只有侧边栏底色 + 拖拽条那条线 ⇒ **压得住** ✓ |
+
+  (`on_load` 比注册表的 `observe_global` 早:前者在 `reload_themes` 里同步调用,
+  后者是在同一轮 effect 队列里稍后执行。)
+- ⚠️ **主题文件里的 `sidebar.border` 会被我们的覆盖盖掉**(置透明,理由见 `change_theme` 文档):
+  分栏竖线统一交给拖拽条画,这是有意为之,导入主题时不必再改这一项。
+- ⚠️ **终端 ANSI 调色板不跟随界面主题**:它来自 `config/terminal.json`(见 3.10),
+  所以换界面主题时终端区颜色不变(实测:终端区像素 `#000000` 前后一致)。
+- 实测(均为同一窗口逐点采样):① 手动选 `Catppuccin Mocha` 时:标签栏 `#171717 → #0B0B11`
+  (= 主题的 `tab_bar.background`)、侧边栏 `#0A0A0A → #1C1C2A`、标题栏 `#121212 → #12121D`,
+  全窗口 **38.5%** 采样点发生变化 ⇒ 主题确实能生效 ✓ ② 不启用任何导入主题时:主色直方图与
+  导入主题前**逐项一致**(`#000000 / #0A0A0A / #171717 / #262626 …`)⇒ 默认确实回到
+  gpui-kit 内置配色 ✓ ③ 该状态下来一次主题文件热重载,分栏竖线仍是「侧边栏底色 + 拖拽条一条线」
+  ⇒ 观察者补的覆盖也在(未被配色投影冲掉) ✓
 
 ---
 

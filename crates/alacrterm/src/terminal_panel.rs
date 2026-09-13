@@ -19,15 +19,17 @@
 //! 会话的生命周期（新建 / 激活 / 关闭）也集中在本模块，作为终端的「单一入口」；
 //! 侧边栏的会话列表经由 [`AppRoot::set_active_tab`] 复用同一套逻辑。
 
+use std::sync::Arc;
+
 use gpui::{
-    AnyElement, AppContext as _, Context, Focusable as _, IntoElement, ParentElement as _,
+    AnyElement, App, AppContext as _, Context, Focusable as _, IntoElement, ParentElement as _,
     Styled as _, Window, div,
 };
 use gpui_kit::component::v_flex;
-use terminal_view::TerminalView;
+use terminal_view::{RenderSettings, TerminalView};
 use util::shell::Shell;
 
-use crate::{AppRoot, Session, SessionRequest, SessionTarget};
+use crate::{AppRoot, Session, SessionRequest, SessionTarget, config};
 
 impl AppRoot {
     /// 新建一个本地终端会话（默认系统 shell）。
@@ -58,7 +60,8 @@ impl AppRoot {
             shell,
             target,
         } = request;
-        let view = cx.new(|cx| TerminalView::new(None, shell, window, cx));
+        let settings = Arc::new(config::settings(cx).render.clone());
+        let view = cx.new(|cx| TerminalView::new(None, shell, settings, window, cx));
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         // 焦点策略集中在应用层（点击终端之外时焦点会离开终端，见
         // `AppRoot::on_background_mouse_down`），所以新会话要显式聚焦，否则键盘没有去处。
@@ -70,6 +73,19 @@ impl AppRoot {
             target,
         });
         self.set_active_tab(self.terminals.len() - 1, cx);
+    }
+
+    /// 把新的终端渲染参数推给所有存活会话（设置窗口改完立即生效）。
+    ///
+    /// 全局 [`config::Settings`] 与落盘由调用方负责（设置窗口），这里只管渲染；
+    /// 之后新建的会话也会拿到新值（`spawn_session` 从全局读）。
+    pub(crate) fn apply_render_settings(&mut self, settings: RenderSettings, cx: &mut App) {
+        let settings = Arc::new(settings);
+        for session in &self.terminals {
+            session
+                .view
+                .update(cx, |view, cx| view.set_render_settings(settings.clone(), cx));
+        }
     }
 
     /// 激活指定的终端会话标签，并把标签栏滑动到该标签。

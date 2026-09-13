@@ -29,6 +29,8 @@ use util::shell::Shell;
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
 
+pub use crate::terminal_element::TerminalRenderSettings as RenderSettings;
+
 /// 实现 [`gpui::Focusable`]：让应用层能直接聚焦 / 判断某个会话的焦点状态
 /// （焦点策略由应用层掌握，见 `AppRoot::on_background_mouse_down`）。
 impl gpui::Focusable for TerminalView {
@@ -77,15 +79,16 @@ pub struct TerminalView {
 
 impl TerminalView {
     /// 创建终端视图并异步启动终端（PTY + 事件循环）。
+    ///
+    /// `settings` 由应用层提供（渲染参数，应用层负责从配置文件解析后传入）。
     pub fn new(
         working_directory: Option<PathBuf>,
         shell: Shell,
+        settings: Arc<TerminalRenderSettings>,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-
-        let settings = Arc::new(TerminalRenderSettings::default());
 
         // 焦点在终端时让 tab / shift-tab 归终端（见 [`TERMINAL_KEY_CONTEXT`]）。
         // 只需注册一次——每个标签页都会走 `new`。
@@ -171,6 +174,25 @@ impl TerminalView {
             ime_state: None,
             cursor_phase: true,
         }
+    }
+
+    /// 运行期替换渲染参数（设置窗口改完立刻生效，不必重启）。
+    ///
+    /// 渲染读的是 `self.settings`（同一个 `Arc` 也传给了 `TerminalElement`），
+    /// 换掉它 + `notify` 即可重绘；光标形状还要同步给终端实体
+    /// ——`focus_in` 里做的是同一件事（终端可能被应用改成 DECSCUSR 指定的形状）。
+    pub fn set_render_settings(
+        &mut self,
+        settings: Arc<TerminalRenderSettings>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.settings = settings;
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |terminal, _| {
+                terminal.set_cursor_shape(self.settings.cursor_shape);
+            });
+        }
+        cx.notify();
     }
 
     /// 焦点进入：设置默认光标形状并通知终端应用。

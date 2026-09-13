@@ -29,6 +29,7 @@
 
 mod actions;
 mod assets;
+mod config;
 mod connection_dialog;
 #[cfg(windows)]
 mod conpty_backend;
@@ -42,9 +43,9 @@ mod welcome;
 
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Render, ScrollHandle, SharedString, Styled as _, WeakEntity, Window, WindowBounds, WindowHandle,
-    WindowOptions, div, px, size,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _, WeakEntity, Window,
+    WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use gpui_kit::{
     QuitMode,
@@ -67,15 +68,20 @@ use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
 
 /// 应用（或切换）界面主题，并重新压上我们的主题覆盖。
 ///
+/// 配色默认与 gpui-kit 开箱一致（内置 `Default Dark` / `Default Light`）；用哪套由
+/// `config/app.json` 决定（设置窗口的「主题」页可改）——**换主题走
+/// [`config::set_theme`]**，它选好主题后调本函数投影。
+///
 /// **分栏边界的那条竖线统一由拖拽条（`ResizeHandle`）来画**：它静止时会在边界处
 /// 画一条 1px 线，`h_full` 贯穿整列（含两侧状态栏行）。所以我们要做的是**反方向**的
 /// 覆盖——把侧边栏组件自己那条边框关掉：`Sidebar` 内部固定 `Side::Left → border_r_1()`
 /// / `Side::Right → border_l_1()`，颜色取 `cx.theme().sidebar_border`（默认 = `border`，
 /// 与拖拽条同色）。把它置为透明后，左右边界就只剩拖拽条那一条线，宽度天然一致。
 ///
-/// ⚠️ 只做一次不够：`gpui_component::Theme::change()` 会把整套配色**投影**回主题 global
-/// （包含 `sidebar_border`），所以**每次**换主题都要重新压。设置窗口的深浅色开关已经
-/// 改走本函数，以后新增换主题的地方也必须走它。
+/// ⚠️ 只做一次不够：`Theme::change()` 会把整套配色**投影**回主题 global（包含
+/// `sidebar_border`，也会盖掉主题文件里的 `sidebar.border`），所以**每次**换主题、
+/// 以及主题文件热重载后都要重新压。设置窗口的深浅色开关已经改走本函数，
+/// 以后新增换主题的地方也必须走它。
 ///
 /// ⚠️ 副作用：`sidebar_border` 还兼作侧边栏菜单「嵌套项缩进导线」的颜色
 /// （gpui-component `sidebar/menu.rs`），它也会一起变成透明。
@@ -99,6 +105,14 @@ fn main() {
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
+            // 配置分三步（顺序不能换）：
+            //   ① `install` 解析 `config/terminal.json` + `config/app.json` 装进全局；
+            //   ② `load_themes` 把 `themes/` 登记成主题库（含热重载）；
+            //   ③ `apply_saved_themes` 按配置把主题挂到两个槽位上（不写回、不投影）。
+            // 没有配置文件时全用默认：gpui-kit 内置主题 + `RenderSettings::default()`。
+            config::install(cx);
+            config::load_themes(cx);
+            config::apply_saved_themes(cx);
             // 终端为深色背景，应用主题跟随使用暗色。
             change_theme(ThemeMode::Dark, cx);
 
@@ -115,6 +129,10 @@ fn main() {
                     // 注册全局 action 监听器（右键菜单项会派发这些 action），
                     // 用 `Entity<AppRoot>` 的弱引用：这里正好拿得到已构造好的实体。
                     AppRoot::register_actions(root.downgrade(), cx);
+                    // 标准快捷键：`Ctrl+,` 打开设置（与 VS Code / Zed 一致）。
+                    // 绑在 `None` context 上 ⇒ 焦点在终端里也能触发（键位派发在
+                    // key listener 之前，见 `TerminalView` 里 tab 的同类说明）。
+                    cx.bind_keys([KeyBinding::new("ctrl-,", actions::OpenSettings, None)]);
                     cx.new(|cx| Root::new(root, window, cx))
                 },
             )

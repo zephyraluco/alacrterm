@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 use crate::AppRoot;
 
-actions!(alacrterm, [NewTerminal]);
+actions!(alacrterm, [NewTerminal, OpenSettings]);
 
 /// 关闭指定下标的终端会话。
 ///
@@ -45,9 +45,17 @@ impl AppRoot {
         });
 
         // —— 新建终端：要开对话框（需要窗口），让出一拍再执行 ——
+        let open_root = root.clone();
         cx.on_action(move |_: &NewTerminal, cx: &mut App| {
             Self::defer_after_update(root.clone(), cx, |this, window, cx| {
                 this.open_new_terminal_dialog(window, cx)
+            });
+        });
+
+        // —— 打开设置：同样需要窗口（开新窗口），也走 defer ——
+        cx.on_action(move |_: &OpenSettings, cx: &mut App| {
+            Self::defer_after_update(open_root.clone(), cx, |this, window, cx| {
+                this.open_settings_window(window, cx)
             });
         });
     }
