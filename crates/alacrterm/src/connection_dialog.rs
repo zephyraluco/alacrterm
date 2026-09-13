@@ -29,7 +29,7 @@ use gpui_kit::component::{
 use terminal::SshOptions;
 use util::shell::Shell;
 
-use crate::{AppRoot, SessionRequest};
+use crate::{AppRoot, SessionRequest, SshSettings};
 
 /// 端口留空时使用的默认 SSH 端口。
 const DEFAULT_SSH_PORT: &str = "22";
@@ -111,6 +111,13 @@ impl ConnectionForm {
                     user
                 },
                 (!password.is_empty()).then_some(password),
+            )
+            // 主机密钥校验策略来自设置窗口（全局）；读不到就用默认值
+            // （`Ask` = 首次连接弹窗核对指纹）。
+            .with_host_key_checking(
+                cx.try_global::<SshSettings>()
+                    .map(|settings| settings.host_key_checking)
+                    .unwrap_or_default(),
             ),
         }
     }

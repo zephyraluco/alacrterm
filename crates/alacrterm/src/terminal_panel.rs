@@ -20,14 +20,29 @@
 //! 侧边栏的会话列表经由 [`AppRoot::set_active_tab`] 复用同一套逻辑。
 
 use gpui::{
-    AnyElement, AppContext as _, Context, IntoElement, ParentElement as _, SharedString,
+    AnyElement, App, AppContext as _, Context, IntoElement, ParentElement as _, SharedString,
     Styled as _, Window, div,
 };
 use gpui_kit::component::v_flex;
-use terminal_view::TerminalView;
+use std::sync::Arc;
+use terminal_view::{HostKeyPromptHandler, TerminalView};
 use util::shell::Shell;
 
 use crate::{AppRoot, Session, SessionRequest, SessionTarget};
+
+/// 主机密钥确认请求的落地：交给根视图弹「是 / 否」对话框。
+///
+/// 事件回调里只有 `&mut App`（没有窗口），所以这里只把请求转交给
+/// [`AppRoot`]，由它经 [`AppRoot::defer_after_update`] 让出一拍再开对话框
+/// （回调执行期间窗口还在更新栈上，直接开对话框会取不到窗口）。
+fn host_key_prompt_handler(cx: &Context<AppRoot>) -> HostKeyPromptHandler {
+    let root = cx.entity().downgrade();
+    Arc::new(move |prompt, cx: &mut App| {
+        AppRoot::defer_after_update(root.clone(), cx, move |this, window, cx| {
+            this.show_host_key_dialog(prompt, window, cx);
+        });
+    })
+}
 
 impl AppRoot {
     /// 新建一个本地终端会话（默认系统 shell）。
@@ -68,8 +83,9 @@ impl AppRoot {
                 // 名称留空时用 `user@host`：远端不一定上报窗口标题（OSC），
                 // 但标签页 / 侧边栏 / 状态栏都需要一个稳定的标识。
                 let name = Some(name.unwrap_or_else(|| SharedString::from(options.endpoint())));
+                let prompt_handler = host_key_prompt_handler(cx);
                 (
-                    cx.new(|cx| TerminalView::new_ssh(options, window, cx)),
+                    cx.new(|cx| TerminalView::new_ssh(options, prompt_handler, window, cx)),
                     name,
                     target,
                 )

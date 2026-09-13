@@ -4,7 +4,9 @@ mod alacritty;
 mod pty_info;
 mod ssh;
 
-pub use ssh::SshOptions;
+pub use ssh::{
+    HostKeyDecision, HostKeyPrompt, HostKeyState, SshOptions, StrictHostKeyChecking,
+};
 
 use anyhow::{Result, bail};
 use log::trace;
@@ -627,6 +629,10 @@ pub enum Event {
     BreadcrumbsChanged,
     CloseTerminal,
     Bell,
+    /// SSH 后端在首次连接 / 主机密钥变更时请求用户确认（见 [`StrictHostKeyChecking`]）。
+    ///
+    /// 收到后必须调 [`HostKeyPrompt::respond`]：不回答的话那个会话会一直等到超时。
+    HostKeyPrompt(HostKeyPrompt),
     Wakeup,
     BlinkChanged(bool),
     SelectionsChanged,
@@ -691,6 +697,8 @@ pub(crate) enum TerminalBackendEvent {
     Bell,
     /// 远端会话已连通（SSH 后端专用；本地 PTY 建出来就算连通）。
     Connected,
+    /// 需要用户确认主机密钥（SSH 后端专用，见 [`StrictHostKeyChecking`]）。
+    HostKeyPrompt(HostKeyPrompt),
     Exit,
     ChildExit(ExitStatus),
 }
@@ -710,6 +718,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Wakeup => f.write_str("Wakeup"),
             Self::Bell => f.write_str("Bell"),
             Self::Connected => f.write_str("Connected"),
+            Self::HostKeyPrompt(prompt) => write!(f, "HostKeyPrompt({prompt:?})"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
         }
@@ -1325,6 +1334,8 @@ impl Terminal {
             // 只更新状态：状态栏通过 `Terminal::is_connected` 读它，
             // 不单独发 UI 事件（紧随其后的 Wakeup 就会触发重绘）。
             TerminalBackendEvent::Connected => self.connected = true,
+            // 主机密钥确认：终端实体不碰 UI，转成向上事件交给视图层（弹窗 / 回答）。
+            TerminalBackendEvent::HostKeyPrompt(prompt) => cx.emit(Event::HostKeyPrompt(prompt)),
             TerminalBackendEvent::Exit => self.register_task_finished(None, cx),
             TerminalBackendEvent::MouseCursorDirty => {
                 //NOOP, Handled in render

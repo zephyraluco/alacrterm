@@ -32,6 +32,7 @@ mod assets;
 mod connection_dialog;
 #[cfg(windows)]
 mod conpty_backend;
+mod host_key_dialog;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
@@ -56,7 +57,7 @@ use gpui_kit::{
     },
 };
 use terminal_view::TerminalView;
-use terminal::SshOptions;
+use terminal::{SshOptions, StrictHostKeyChecking};
 use util::shell::Shell;
 
 use sidebar_panel::{
@@ -64,6 +65,27 @@ use sidebar_panel::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SidebarView,
 };
 use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
+
+/// SSH 相关的全局设置：在设置窗口里改，建连时由
+/// [`ConnectionForm::build`](crate::connection_dialog::ConnectionForm::build) 读取。
+///
+/// 目前只有主机密钥校验策略一项（对应 OpenSSH 的 `StrictHostKeyChecking`）。
+#[derive(Clone, Debug)]
+pub(crate) struct SshSettings {
+    pub(crate) host_key_checking: StrictHostKeyChecking,
+}
+
+impl Default for SshSettings {
+    /// 默认 `Ask`：首次连接某台主机时弹窗让用户核对指纹——与 OpenSSH 的默认行为一致，
+    /// 也是本应用从「静默 TOFU」改成「可验证」的那一步。
+    fn default() -> Self {
+        Self {
+            host_key_checking: StrictHostKeyChecking::Ask,
+        }
+    }
+}
+
+impl gpui::Global for SshSettings {}
 
 /// 应用（或切换）界面主题，并重新压上我们的主题覆盖。
 ///
@@ -101,6 +123,8 @@ fn main() {
             gpui_kit::init(cx);
             // 终端为深色背景，应用主题跟随使用暗色。
             change_theme(ThemeMode::Dark, cx);
+            // SSH 设置的唯一状态源（当前没有持久化，与主题一样每次启动回到默认值）。
+            cx.set_global(SshSettings::default());
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(

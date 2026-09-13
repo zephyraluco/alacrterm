@@ -26,11 +26,19 @@ use gpui::{
     SharedString, Styled, Subscription, Task, WeakEntity, Window, div, rgb,
 };
 use terminal::{
-    Event as TerminalEvent, Modes, SshOptions, Terminal, TerminalBounds, TerminalBuilder,
+    Event as TerminalEvent, HostKeyDecision, HostKeyPrompt, Modes, SshOptions, Terminal,
+    TerminalBounds, TerminalBuilder,
 };
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
 use util::shell::Shell;
+
+/// 主机密钥确认请求的处理者：由应用层提供（本 crate 不认识应用的根视图）。
+///
+/// 回调里只有 `&mut App`（拿不到窗口），所以开窗 / 弹窗由应用层自己想办法。
+/// 没有处理器时一律按「拒绝」走（见 [`TerminalView::handle_terminal_event`]），
+/// 总比默默信任一台没验证过的主机安全。
+pub type HostKeyPromptHandler = Arc<dyn Fn(HostKeyPrompt, &mut App) + 'static>;
 
 /// IME（输入法）组合文本状态。
 pub(crate) struct ImeState {
@@ -58,6 +66,8 @@ pub struct TerminalView {
     pub(crate) ime_state: Option<ImeState>,
     /// 光标闪烁相位。
     cursor_phase: bool,
+    /// 主机密钥确认请求的处理器（`None` = 无人处理，直接拒绝）。
+    on_host_key_prompt: Option<HostKeyPromptHandler>,
 }
 
 impl TerminalView {
@@ -70,25 +80,28 @@ impl TerminalView {
     ) -> Self {
         let env = std::env::vars().collect();
         let builder = TerminalBuilder::new(working_directory, shell, env, cx);
-        Self::with_builder(builder, window, cx)
+        Self::with_builder(builder, None, window, cx)
     }
 
     /// 创建终端视图并异步启动一个 **SSH 远端会话**（russh 直连，不经系统 `ssh`）。
     ///
     /// 连接失败不会让视图进入错误态：原因会由终端后端写进网格（见 `terminal::ssh`）。
+    /// `on_host_key_prompt` 用来问用户「是否信任这台主机」（见 [`HostKeyPromptHandler`]）。
     pub fn new_ssh(
         options: SshOptions,
+        on_host_key_prompt: HostKeyPromptHandler,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let env = std::env::vars().collect();
         let builder = TerminalBuilder::new_ssh(options, env, cx);
-        Self::with_builder(builder, window, cx)
+        Self::with_builder(builder, Some(on_host_key_prompt), window, cx)
     }
 
     /// `new` / `new_ssh` 的公共实现：只有「终端是怎么建出来的」不同。
     fn with_builder(
         builder: Task<Result<TerminalBuilder>>,
+        on_host_key_prompt: Option<HostKeyPromptHandler>,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
@@ -166,6 +179,7 @@ impl TerminalView {
             title: "终端".into(),
             ime_state: None,
             cursor_phase: true,
+            on_host_key_prompt,
         }
     }
 
@@ -208,6 +222,16 @@ impl TerminalView {
                 }
                 cx.notify();
             }
+            TerminalEvent::HostKeyPrompt(prompt) => match &self.on_host_key_prompt {
+                // 交给应用层去问用户（本 crate 只负责把问题递上去）。
+                Some(handler) => handler(prompt.clone(), cx),
+                // 没有处理器：拒绝比默默信任安全。prompt 这里被丢弃，
+                // 等待方会读到通道关闭 → 按拒绝处理（见 `ssh::ClientHandler::confirm`）。
+                None => {
+                    log::warn!("没有主机密钥确认处理器，按拒绝处理：{}", prompt.endpoint());
+                    prompt.respond(HostKeyDecision::Reject);
+                }
+            },
             TerminalEvent::CloseTerminal => {
                 // 会话进程结束（本地 shell 退出、ssh 连接断开等）。
                 //

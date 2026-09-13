@@ -36,7 +36,9 @@ use gpui_kit::component::{
 };
 
 use crate::AppRoot;
+use crate::SshSettings;
 use crate::assets::IconName;
+use terminal::StrictHostKeyChecking;
 
 /// 设置窗口的初始尺寸（宽, 高）。
 const WINDOW_SIZE: (f32, f32) = (760., 520.);
@@ -133,6 +135,44 @@ impl Render for SettingsWindow {
                                         )
                                         .description(
                                             "切换深色 / 浅色界面主题，与终端背景保持一致。",
+                                        ),
+                                    ),
+                                ),
+                        )
+                        .page(
+                            SettingPage::new("SSH")
+                                .icon(Icon::new(IconName::SquareTerminal))
+                                .default_open(true)
+                                .group(
+                                    SettingGroup::new().item(
+                                        SettingItem::new(
+                                            "新主机询问是否信任",
+                                            SettingField::switch(
+                                                // 以全局 `SshSettings` 为唯一状态源。
+                                                |cx: &App| {
+                                                    cx.global::<SshSettings>()
+                                                        .host_key_checking
+                                                        .asks()
+                                                },
+                                                |val: bool, cx: &mut App| {
+                                                    let host_key_checking = if val {
+                                                        StrictHostKeyChecking::Ask
+                                                    } else {
+                                                        StrictHostKeyChecking::AcceptNew
+                                                    };
+                                                    cx.set_global(SshSettings {
+                                                        host_key_checking,
+                                                    });
+                                                    // 与主题开关同理：设置项自身靠重绘更新。
+                                                    cx.refresh_windows();
+                                                },
+                                            ),
+                                        )
+                                        .description(
+                                            "开启（默认）：首次连接某台主机时弹窗显示主机密钥指纹，\
+                                             核对后再决定是否信任。关闭：自动信任并记入 \
+                                             known_hosts（对应 OpenSSH 的 accept-new）。\
+                                             密钥与记录不一致时仍会弹窗询问，忽略则拒绝连接。",
                                         ),
                                     ),
                                 ),

@@ -4,9 +4,10 @@
 > （`ssh` 刻意不接受命令行传密码）、连接状态无从得知、`conpty.dll` 那一套 Windows 兜底也只对
 > 本地 PTY 生效。本文记录改成 `russh` 直连之后的实现。
 >
-> 相关文件：`crates/terminal/src/ssh.rs`（后端）、`crates/terminal/src/ssh_tests.rs`（端到端测试）、
-> `crates/terminal/src/alacritty.rs`（后端抽象）、`crates/terminal/src/terminal.rs`（装配）、
-> `crates/alacrterm/src/connection_dialog.rs`（表单 → 建连请求）。
+> 相关文件：`crates/terminal/src/ssh.rs`（后端，含单元测试）、`crates/terminal/src/alacritty.rs`
+> （后端抽象）、`crates/terminal/src/terminal.rs`（装配 / 事件）、`crates/alacrterm/src/connection_dialog.rs`
+> （表单 → 建连请求）、`crates/alacrterm/src/host_key_dialog.rs`（主机密钥确认对话框）、
+> `crates/alacrterm/src/settings_window.rs`（校验策略设置）。
 
 ---
 
@@ -56,7 +57,7 @@ gpui 后台任务 ──spawn()──> std::thread "alacrterm-ssh"
 
 ```
 client::connect(config, (host, port), handler)   ← 20s 超时
-    └─ handler.check_server_key()                ← 主机密钥校验（TOFU）
+    └─ handler.check_server_key()                ← 主机密钥校验（按策略，可能弹窗）
 authenticate()                                   ← 密码 → 免密 → ~/.ssh 私钥
 handle.channel_open_session()
 channel.split() → (reader, writer)               ← 拆半，见 §4
@@ -64,18 +65,29 @@ writer.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
 writer.request_shell(true)
 ```
 
-### 3.1 主机密钥：TOFU（首次使用即信任）
+### 3.1 主机密钥：按 `StrictHostKeyChecking` 策略校验
 
-`ClientHandler::check_server_key` 用 `russh::keys::known_hosts`：
+`ClientHandler::check_server_key` 用 `russh::keys::known_hosts` 判断出「已记录且一致 / 没有记录 /
+记录不一致」，再按 `SshOptions::host_key_checking`（默认 `Ask`）决定怎么处理：
 
-- 记录存在且一致 → 接受；
-- **没有记录** → `learn_known_hosts_path` 写入 known_hosts 后接受（等价于 `ssh` 首次连接回答 `yes`）；
-- 记录存在但**不一致** → 拒绝并记 error 日志（可能被中间人替换）；
-- 定位不到文件（没有 home 目录）→ 跳过校验并告警（与 OpenSSH「没有 known_hosts 就当首次连接」一致）。
+| 策略 | 没有记录（首次连接） | 记录不一致（主机重装过，或可能被冒充） |
+|---|---|---|
+| `Ask`（默认） | 弹窗显示指纹，用户选「信任并继续」→ 写入 known_hosts | 弹窗对比新旧指纹，选信任 → **替换**旧记录 |
+| `AcceptNew` | 直接写入并接受（改动前的 TOFU 行为） | 拒绝 |
+| `Yes` | 拒绝 | 拒绝 |
+| `No` | 直接写入并接受 | 直接替换（⚠️ 不安全） |
 
-已知限制：**没有** `ssh` 那种「unknown host，是否继续？(yes/no)」的交互确认，也没有
-`StrictHostKeyChecking` / `UserKnownHostsFile` 的配置文件支持（后者有 API 级的等价物，
-见 §7 的 `SshOptions::with_known_hosts`）。
+- 密钥**一致时永远不弹窗**（绝大多数连接都走这条快路）；
+- 定位不到文件（没有 home 目录）→ 跳过校验并告警（与 OpenSSH「没有 known_hosts 就当首次连接」一致）；
+- 与 OpenSSH 的唯一差别：`Ask` 在**密钥变更**时也允许用户选择替换记录；OpenSSH 的 `ask` 只能停下
+  让人手工改 known_hosts（`accept-new` / `yes` 也只会拒绝）。这是有意的——否则重装过的机器在界面上
+  完全没有出路；
+- 替换由 `forget_known_host` 自己重写文件：22 端口存 `host`、其余存 `[host]:port`，一行的主机字段
+  可以是逗号分隔的多个名字，同一主机的**所有**记录行都会删掉（其它算法的旧记录同样不可信了）。
+  ⚠️ **不能**用 russh 的 `known_host_keys_path` 给的行号：它统计行数时会跳过 `#` 注释行
+  （`continue` 跳过了 `line += 1`），文件里有注释就会整体错位；
+- ⚠️ `HashKnownHosts` 写出的 `|1|salt|hash` 条目回推不出主机名，匹配不到（返回 0 行）→ 这时会
+  **拒绝**连接并让用户手工清理，而不是假装替换成功。
 
 ### 3.2 认证顺序
 
@@ -93,6 +105,39 @@ RSA 私钥要先和服务器协商签名哈希（`best_supported_rsa_hash`），
 拿它去开远端 PTY 会让 shell 先看到一个 6 行的窗口，而某些 shell / readline 在极矮窗口下会
 重排甚至清屏（这正是本地 PTY 那边 `conpty.dll` 系列问题的同一类症状）。
 所以先按惯例报 **80×24**，紧接着的第一次布局就会用真实尺寸 `window_change` 覆盖它。
+
+---
+
+### 3.4 交互式确认的往返路径
+
+`check_server_key` 在**握手路径**上：拿不到用户的回答就不能继续握手，所以需要一条
+「SSH 线程 → UI → SSH 线程」的往返：
+
+```
+alacrterm-ssh 线程                                   gpui（主线程）
+  check_server_key
+    └─ HostKeyPrompt{端点/算法/指纹/旧指纹, Sender} ─┐
+       等待 answers.next()（最长 HOST_KEY_TIMEOUT）  │
+       ↑                                            ↓
+       └──── HostKeyDecision ──── HostKeyPrompt::respond() ←── 对话框按钮
+```
+
+- 请求经 `TerminalBackendEvent::HostKeyPrompt` → `Terminal::process_event` 转成
+  `terminal_view::Event::HostKeyPrompt` → 应用层提供的 `HostKeyPromptHandler`
+  （`terminal_panel::host_key_prompt_handler`）→ `AppRoot::defer_after_update` → 弹对话框
+  （`host_key_dialog.rs`）。事件回调里只有 `&mut App`（没有窗口），所以必须让出一拍再开对话框；
+- 回答只认第一次：`HostKeyPrompt::respond` 把发送端从 `Mutex<Option<_>>` 里 `take()` 出来，
+  确认 / 取消 / 关闭（`on_ok` / `on_cancel` / `on_close`）三条路径重复回答也不会串；
+- 等不到回答一律按**拒绝**处理：对话框被关掉或应用退出 → 发送端被丢弃 → 接收端读到 `None`；
+  超过 `HOST_KEY_TIMEOUT`（120s）→ 超时；
+- ⚠️ 这段等待在 `client::connect` **内部**，所以外层建连超时是
+  `CONNECT_TIMEOUT + HOST_KEY_TIMEOUT`（只在 `Ask` 时加）：否则用户还在比指纹，连接就先超时了。
+  代价是 `Ask` 策略下连不通的主机最长要等 140s（SYN 被黑洞的情况）；
+- UI 侧用**窗口级**对话框而不是终端区浮层：连接是在后台完成的，发起连接的会话未必是当前标签页，
+  浮层会没人看到。
+
+`HostKeyPrompt` 手写了 `Debug` / `PartialEq`（按发送端 `Arc::ptr_eq` 比较）：`terminal::Event` 要求
+`Clone + Debug + PartialEq + Eq`，而 `UnboundedSender` 不满足后两者。
 
 ---
 
@@ -142,6 +187,9 @@ SSH 后端没有可写的本地进程，提示只能自己生成 ANSI 序列喂�
 
 ⚠️ 换行一律写 `\r\n`：仿真器默认不把单独的 `\n` 当作回车换行（与 `Terminal::write_output`
 里那段「给 LF 补 CR」是同一个道理）。
+
+用户没信任主机密钥时，russh 只报一句英文 `Unknown server key`；`run()` 里把它换成了
+「连接中断：主机密钥未被信任，已放弃连接」，网格与日志都能看懂。
 
 ### 5.2 会话状态：`TerminalBackendEvent::Connected` → 状态栏
 
@@ -215,41 +263,35 @@ tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros"] }
 `SshOptions` 用 `SshOptions::new(host, port, user, password)` 构造（字段私有，避免密码被
 随手 `Debug` 打印——`Debug` 是手写的，密码只显示「已设置」）。
 `with_known_hosts(path)` 对应 OpenSSH 的 `UserKnownHostsFile`，测试用它避免污染真实用户的
-`~/.ssh/known_hosts`。
+`~/.ssh/known_hosts`；`with_host_key_checking(policy)` 对应 `StrictHostKeyChecking`（默认 `Ask`，
+应用里由设置窗口的开关切换 `Ask` / `AcceptNew`）。
 
 ---
 
-## 8. 测试（`crates/terminal/src/ssh_tests.rs`）
+## 8. 测试（`crates/terminal/src/ssh.rs` 的 `#[cfg(test)] mod tests`）
 
-四个用例都在 127.0.0.1 上真起一个最小 `russh` 服务端（密码认证 + 会话通道 + PTY/shell + 回显），
-因为这条链路的正确性恰恰在协议交互里，mock 掉就什么都证明不了：
+这些用例直接调 `ClientHandler::check_server_key`（用 `futures::join!` 同时在另一支里回答询问），
+不需要真服务端：
 
 | 用例 | 覆盖 |
 |---|---|
-| `connects_and_streams_data_both_ways` | 认证 → PTY/shell 应答 → 远端 banner 进网格 → 本机输入送达远端并回显 |
-| `host_key_is_remembered_after_first_connect` | 首次连接写入 known_hosts（`[127.0.0.1]:port`），第二次命中记录仍能连上 |
-| `wrong_password_is_reported_in_grid` | 认证失败原因如实写进网格 |
-| `unreachable_host_is_reported_in_grid` | 连不上时网格里给出原因，而不是静默留白 |
-
-关键点/坑：
-
-- 服务端**必须自带主机密钥**（`server::Config::keys`），否则客户端直接以
-  `No common Key algorithm - ours: [..], theirs: []` 失败。测试内嵌了一把一次性 ed25519
-  私钥（`ssh-keygen -t ed25519 -N ''` 生成，仅测试用）：运行时生成需要 `rand`，而
-  `PrivateKey::random` 的 `CryptoRng` 约束来自 ssh-key 内部的 `rand_core` 版本，
-  外部 `rand` 的版本对不上就会编译失败（0.9 的 `ThreadRng` 不满足）。
-- 服务端 `Session::channel_success(channel)` 是**同步**方法（不是 async）；客户端
-  `request_pty(true, ..)` / `request_shell(true)` 会等这个应答，不回应就是永久挂起。
-- 等待用 `tokio::time::sleep`，**不能**用 `std::thread::sleep`：测试与假服务端跑在同一个
-  current-thread 运行时上，阻塞式 sleep 会把服务端一起饿死。
-- 每个用例一个独立的临时 known_hosts（含 pid 与用例名），跑完删除。
+| `forget_known_host_*`（4 个） | 替换记录时只删这台主机这一端口的行；认逗号分隔的主机名；哈希条目不动；没有记录时原样返回 |
+| `ask_policy_prompts_and_remembers_on_trust` | `Ask` + 未知主机：询问带端点 / 算法 / `SHA256:` 指纹 / `Unknown`，信任后写入 known_hosts |
+| `ask_policy_rejects_on_decline` | `Ask` + 取消 → 拒绝且不写记录 |
+| `ask_policy_replaces_changed_key_on_trust` | 密钥不一致：询问带 `Changed{known}`，信任后旧记录被删、新记录写入，别的主机不受影响 |
+| `accept_new_policy_never_prompts` | `AcceptNew` 不弹窗，直接写入 |
+| `accept_new_policy_rejects_changed_key` | 密钥不一致 + 非 `Ask`：直接拒绝且不改文件 |
+| `yes_policy_rejects_unknown_host` | `Yes` 下未知主机直接拒绝 |
 
 ```powershell
-cargo test -p terminal ssh_tests -- --test-threads=1
+cargo test -p terminal --lib ssh::
 ```
 
+⚠️ 每个用例用**独立的**临时文件名：cargo 默认并行跑测试，共用文件名会互相覆盖。
 ⚠️ `cargo test -p terminal` 里有 23 个 `alacritty::hyperlinks::tests::path::*` 是**既有失败**
 （与本改动无关）。
+
+原先那套「真起一个 russh 服务端」的端到端测试（`ssh_tests.rs`）已不在仓库里；需要端到端时走 §9.1。
 
 ---
 
@@ -262,6 +304,29 @@ cargo test -p terminal ssh_tests -- --test-threads=1
 4. 故意填错密码：终端网格出现红色「连接中断：密码认证被拒绝」，状态栏变为「已断开」；
 5. 远端 `exit`：网格追加灰色「连接已断开（远端退出码 0）」，标签与内容保留（不关标签、不退出应用）。
 
+### 9.1 主机密钥确认
+
+需要一个「能连上、但主机密钥由我们掌控」的服务端。最小做法是临时写一个 russh 服务端：
+`auth_none` 直接接受，`pty_request` / `shell_request` 里调 `session.channel_success(channel)`
+（否则客户端一直在等应答），主机密钥用
+`ssh-keygen -t ed25519 -N '' -f target/fake_key` 生成后 `load_secret_key` 读入，监听 127.0.0.1。
+换一把私钥重启就能复现「密钥已变更」。
+
+1. 连 `127.0.0.1`（首次）→ 弹「首次连接这台主机」（主机 / 算法 / `SHA256:…` 指纹）；点「信任并继续」
+   → 会话建立、`~/.ssh/known_hosts` 多一行 `127.0.0.1 ssh-ed25519 AAAA…`；
+2. 换主机私钥重启服务端再连 → 弹「主机密钥已变更」，并列出「已记录」的旧指纹；点「信任并继续」
+   → 那是**替换**（文件里仍只一行）而不是追加；
+3. 换一个没记录过的主机名（如 `localhost`）→ 弹窗后点「取消」→ 网格出现红色
+   「连接中断：主机密钥未被信任，已放弃连接」，known_hosts 不留记录；
+4. 设置窗口 → SSH → 关掉「新主机询问是否信任」→ 再连 `localhost` → **不弹窗**，直接写入并连上。
+
+⚠️ 自动化这类界面时的要点（脚本是临时的，放 `target/`、不入库）：坐标用**物理像素**，并把
+pwsh 进程设成 DPI-aware，这样 `GetWindowRect` / `SetCursorPos` / 截图像素三者坐标系一致；
+点击前必须把窗口置为前台（否则第一次点击只用来激活，按钮收不到）；喂文字用
+`PostMessage(WM_CHAR)`、按键用 `PostMessage(WM_KEYDOWN/UP)`（`KEYUP` 的 lParam 要带 bit30 + bit31，
+否则 `TranslateMessage` 会把它当按下、再生成一条 `WM_CHAR`）；截图前先 `ShowWindow` +
+`SetWindowPos(TOPMOST)`，gpui 窗口被遮住时不重绘、`PrintWindow` 会拿到上一帧。
+
 ---
 
 ## 10. 已知边界（有意未做）
@@ -270,7 +335,10 @@ cargo test -p terminal ssh_tests -- --test-threads=1
   （用户得把真实的 host / port / 用户填进对话框）；
 - 不支持**加密私钥**（需要口令输入，界面没有这个入口）与 **ssh-agent**（`SSH_AUTH_SOCK` /
   Pageant / Windows OpenSSH agent）；
-- 没有 `ssh` 的交互式主机密钥确认，也没有 `StrictHostKeyChecking=no` 之类的开关；
+- 主机密钥校验只有弹窗询问（`Ask`）/ 自动信任（`AcceptNew`）/ 只信记录（`Yes`）/ 一律接受（`No`）
+  四种策略，且是**全局**设置（设置窗口 → SSH），不能按主机配置，也没有持久化（每次启动回到 `Ask`）；
+  非交互的 `Yes` / 危险的全接受 `No` 没有暴露到界面上；
+- `HashKnownHosts` 写出的 `|1|…` 条目无法识别：替换时删不掉，只能拒绝连接并让用户手工清理（见 §3.1）；
 - 不转发 X11 / agent / 端口；
 - 不支持键盘交互式（keyboard-interactive）认证——只做 password / none / publickey。
 
