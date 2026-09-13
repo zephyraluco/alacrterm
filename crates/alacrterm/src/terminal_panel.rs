@@ -20,7 +20,8 @@
 //! 侧边栏的会话列表经由 [`AppRoot::set_active_tab`] 复用同一套逻辑。
 
 use gpui::{
-    AnyElement, AppContext as _, Context, IntoElement, ParentElement as _, Styled as _, Window, div,
+    AnyElement, AppContext as _, Context, Focusable as _, IntoElement, ParentElement as _,
+    Styled as _, Window, div,
 };
 use gpui_kit::component::v_flex;
 use terminal_view::TerminalView;
@@ -59,6 +60,10 @@ impl AppRoot {
         } = request;
         let view = cx.new(|cx| TerminalView::new(None, shell, window, cx));
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        // 焦点策略集中在应用层（点击终端之外时焦点会离开终端，见
+        // `AppRoot::on_background_mouse_down`），所以新会话要显式聚焦，否则键盘没有去处。
+        let focus = view.focus_handle(cx);
+        window.focus(&focus, cx);
         self.terminals.push(Session {
             view,
             name,

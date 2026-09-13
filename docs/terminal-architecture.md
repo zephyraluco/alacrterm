@@ -331,13 +331,13 @@ terminal.process_pty_event(event, cx)?;
 
 ```rust
 fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    // 仅当窗口内没有任何元素持有焦点时(启动 / 焦点真空)才接管——不能无条件抢占,
-    // 否则会打断设置弹窗输入框、以及靠焦点路径分发 Cancel 的弹窗关闭按钮(见 §6 焦点)
-    if window.focused(cx).is_none() { window.focus(&self.focus_handle, cx); }
+    // ⚠️ 这里**不再**自动抢焦点：焦点策略已移到应用层（见 §4.3 「焦点归属」），
+    // 每帧抢会把「点击终端之外 → 焦点离开终端」顶回去
     window.set_window_title(&self.title);    // 同步原生窗口标题(自绘标题栏固定显示 Alacrterm)
     let focused = self.focus_handle.is_focused(window);
     let cursor_visible = self.should_show_cursor(focused, cx);   // 闪烁相位判断
-    // 根 div:bg(terminal_background) + track_focus + on_key_down + on_mouse_down(右键)
+    // 根 div:bg(terminal_background) + track_focus + on_key_down
+    //   + on_mouse_down(左键:聚焦 + stop_propagation;右键:粘贴)
     //   └─ TerminalElement::new(terminal, view, focus, focused, cursor_visible, settings)
 }
 ```
@@ -411,6 +411,59 @@ graph LR
    - **普通字符(无修饰)→ 返回 `None`**,交回 InputHandler 的 WM_CHAR 路径 —— 这就是必须注册 input handler 才能输入的原因
 4. 处理成功则 `stop_propagation`,避免 gpui 其他元素再消费按键
 
+> ⚠️ **Tab / Shift+Tab 的归属:焦点在终端时归终端,焦点移走时照旧做焦点切换**:
+> gpui-component 的 `Root` 在 `"Root"` key context 里把 `tab` / `shift-tab` 绑成了焦点
+> 切换动作(`gpui-component/src/root.rs` 的 `on_action_tab` → `window.focus_next(cx)`),
+> 而 gpui 的 **键位派发发生在 key listener 之前**,且动作命中 listener 后默认停止传播
+> (`gpui-pre/src/window.rs` 的 `Action` bubble phase,注释原文:*Actions stop propagation
+> by default during the bubble phase*)⇒ 终端一个 Tab 事件都收不到(实测:字母能到达
+> `on_key_down`,`tab` 完全没有)。
+>
+> **做法:在终端 context 下「取消」这两个键位,把按键交回焦点所在的组件**,而不是自己
+> 截取转发 —— `TerminalView` 根 div 注册 `"Terminal"` key context,并
+> `cx.bind_keys([KeyBinding::new("tab", NoAction, Some("Terminal")), …])`。
+> `NoAction` 是 gpui 一等的「取消绑定」标记(`gpui-pre/src/keymap.rs:203` 不派发任何动作、
+> `:208` 只压掉优先级相同或更低的绑定),它比 `Root` 那条绑定的 context **更深**,
+> 因此焦点位于终端时把 `Root` 的 tab 绑定压掉 ⇒ 按键顺着 gpui 的正常流程落到
+> **焦点元素**的 key listener,与 Enter / 方向键走完全同一条路(`on_key_down` →
+> `try_keystroke` → `to_esc_str`)。焦点不在终端时 `"Terminal"` 不参与匹配,
+> 设置窗口 / 对话框里的 Tab 焦点遍历不受影响。
+>
+> **两个方向都实测过**(125% DPI,脚本 `target/tab_probe.ps1`):
+> ① 焦点在终端 → 输入 `Get-Chi` 后按 Tab,PSReadLine 补全成 `Get-ChildItem`,且焦点未被移走;
+> ② 先把焦点移到别的组件(`window.focus_next`),之后每次 Tab 焦点都发生改变(焦点切换照旧)。
+>
+> ⚠️ 副作用:**终端聚焦时 Tab 不再做应用内焦点跳转** —— 这是「Tab 归终端」的必然代价。
+> 将来若要用键盘把焦点移出终端,需要另择按键(例如 Ctrl+Tab)。
+> ⚠️ **不要**改成「在 `"Terminal"` context 把 tab 绑到终端自己的转发动作再 `send_keystroke`」:
+> 那样虽然也能工作,但绕开了正常输入路径(已实现过并回退)。
+>
+> 历史:`tab` 绑定在 gpui-component 0.5.2 就有(`crates/ui/src/root.rs` 的
+> `KeyBinding::new("tab", Tab, Some("Root"))`),但 `9766e0b`(2026-09-09 引入设置对话框)
+> 之前窗口内容只有自己的 `AppRoot`、**渲染树里没有 `Root` 元素**,没有节点带
+> `"Root"` context ⇒ 绑定匹配不到、Tab 自然落到 key listener。是「Root 进树」把这条
+> 一直存在却够不着的绑定激活了,不是升级或新加的键位。
+
+#### 焦点归属（谁拿焦点、Tab 给谁）
+
+| 情形 | 行为 |
+|---|---|
+| 点击终端区域 | `TerminalView` 左键处理聚焦终端并 `stop_propagation`（用来区分「点在终端里 / 外」） |
+| 点击**终端之外**（侧边栏空白、标签栏、状态栏……） | `AppRoot` 根节点的左键处理把焦点交给 `AppRoot::background_focus` —— 焦点离开终端 |
+| 新建会话 | `spawn_session` 里 `window.focus(新会话的 focus_handle)` —— 焦点直接给新终端 |
+| 焦点在终端 | Tab / Shift+Tab 归终端（`NoAction` 压掉 `Root` 的绑定，见上） |
+| 焦点不在终端 | `Root` 的 Tab / Shift+Tab 照旧做焦点遍历 |
+
+要点：
+- **不能用 `Window::blur` 代替「把焦点交给 `background_focus`」**：完全失焦时 gpui 的 `focus_next`
+  没有起点（`tab_stops.next(None)` 拿不到目标），Tab 会彻底失效；交给一个真实句柄后 Tab 仍可遍历。
+- `TerminalView::render` **不再自动抢焦点**（旧版是「焦点真空就抢」）：那样会把用户点击空白造成的
+  失焦每帧顶回去。启动时的聚焦改由应用层在 `spawn_session` 里显式做。
+- 「点击终端之外」的判断依赖终端内的 `stop_propagation`；而点击处若自己拿到了焦点
+  （对话框输入框等），`background_focus` 不会去抢（只在「当前焦点是某个终端」时才动手）。
+- 实测（125% DPI）：启动即 `terminal focused=true`；点侧边栏空白 → `false`；再点终端内部 → `true`；
+  失焦后每次 Tab 焦点都在变（遍历仍有效）；点回终端后 `Get-Chi` + Tab 仍能补全成 `Get-ChildItem`。
+
 **`Terminal::input` 的副作用**:入队 `InternalEvent::Scroll(Scroll::Bottom)` + `SetSelection(None)`(输入即回到底部并清空选择),置 `keyboard_input_sent = true`,再 `write_to_pty`。`keyboard_input_sent` 用于 Shell 关闭判定(见 §6)。
 
 **粘贴双路径**:Ctrl+Shift+V 与鼠标右键都从剪贴板读文本 → `terminal.paste`。`paste()` 按 `BRACKETED_PASTE` 模式决定是否包裹 `\x1b[200~ ... \x1b[201~`,非 bracketed 模式把 `\r\n` / `\n` 统一成 `\r`。
@@ -479,7 +532,7 @@ graph LR
 | **退格差异** | `backspace → \x7f`(DEL),`ctrl+backspace → \x08`(BS),对齐 Alacritty 行为 |
 | **颜色体系** | `TerminalColors::dark()` 本地 XTerm 深色默认;256 色映射含 6×6×6 立方体(公式 `index = 16+36r+6g+b` 求逆)与 24 级灰阶(8..238 步长 10);NamedColor 变体来自 vte 0.15(Black..BrightWhite / Foreground / Background / Cursor / Dim* / BrightForeground / DimForeground) |
 | **vi mode** | `Terminal::vi_motion` 支持 `h/j/k/l/w/b/e/%/$/0/^/H/M/L` 移动;`g→Top`、`G→Bottom`、`ctrl+b/f→PageUp/PageDown`、`ctrl+d/u→半页滚动`;`v` 进入选择、`y` 复制、`i` 退出。每次移动先入队 `UpdateSelection(cursor_pos)`(把光标换算成像素坐标)再入队 `ViMotion`,保证选择起点正确 |
-| **焦点** | render 中**仅当 `window.focused(cx).is_none()`**(启动 / 焦点真空)才 `window.focus()` 兜底;不能无条件抢占——终端会随 PTY Wakeup / 光标闪烁频繁重渲染,抢占会打断设置弹窗输入框与靠焦点路径分发 `Cancel` 的弹窗关闭按钮。点击终端区域由 `TerminalElement` 左键 `on_mouse_down` 聚焦;焦点进出经 `FOCUS_IN_OUT` 模式向应用发 `\x1b[I` / `\x1b[O` |
+| **焦点** | 由应用层掌握（见 §4.3 「焦点归属」）：终端左键聚焦 + `stop_propagation`；`AppRoot` 根节点在「终端之外」的点击上把焦点交给 `background_focus`；`spawn_session` 显式聚焦新会话。`TerminalView::render` 不再自动抢焦点。焦点进出经 `FOCUS_IN_OUT` 模式向应用发 `\x1b[I` / `\x1b[O` |
 | **窗口标题** | `window.set_window_title(&str)`(不是 `set_title`)同步原生窗口标题;自绘标题栏固定显示 `Alacrterm`,终端 OSC 标题只用于标签页 / 侧边栏的会话显示名 |
 | **标题栏集成** | 用 `TitleBar::window_options()` 作为 `WindowOptions` 基础(内部 `appears_transparent` + `app_owns_titlebar_drag`,隐藏系统标题栏);`gpui_kit::init` 必须在 `run` 回调开头调用,`Theme::change(Dark)` 保证终端深色背景与标题栏配色一致 |
 | **Shell 关闭判定** | `register_task_finished`:用户输入过(`keyboard_input_sent`)或退出码为 0 才 `CloseTerminal`(区分用户主动退出与 spawn 失败) |

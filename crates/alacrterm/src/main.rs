@@ -41,9 +41,10 @@ mod terminal_panel;
 mod welcome;
 
 use gpui::{
-    App, AppContext as _, AsyncApp, Bounds, Context, Entity, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _,
-    WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
+    App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Render, ScrollHandle, SharedString, Styled as _, WeakEntity, Window, WindowBounds, WindowHandle,
+    WindowOptions, div, px, size,
 };
 use gpui_kit::{
     QuitMode,
@@ -237,9 +238,33 @@ struct AppRoot {
     settings_window: Option<WindowHandle<Root>>,
     /// 状态栏指标采样器（CPU / 内存 / 网络），由后台定时任务驱动。
     pub(crate) monitor: SystemMonitor,
+    /// 「背景」焦点：点击终端之外时接管焦点。
+    ///
+    /// 用真实句柄而非 `Window::blur`：完全失焦后 gpui 的 `focus_next` 没有起点，Tab 会失效。
+    background_focus: FocusHandle,
 }
 
 impl AppRoot {
+    /// 点击终端**之外**时，把焦点从终端拿走（gpui 不会因点击非可获焦区域而移焦）。
+    ///
+    /// 只在「当前焦点是某个终端」时动手：点击落在终端里时 `TerminalView` 已
+    /// `stop_propagation`；点击处控件自己获焦（对话框输入框等）时这里也不抢。
+    /// 细节与实测见 `docs/terminal-architecture.md` §4.3「焦点归属」。
+    fn on_background_mouse_down(
+        &mut self,
+        _: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal_focused = self
+            .terminals
+            .iter()
+            .any(|session| session.view.read(cx).is_focused(window));
+        if terminal_focused {
+            window.focus(&self.background_focus, cx);
+        }
+    }
+
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             terminals: Vec::new(),
@@ -257,6 +282,7 @@ impl AppRoot {
             right_split_width: None,
             settings_window: None,
             monitor: SystemMonitor::new(),
+            background_focus: cx.focus_handle(),
         };
         this.spawn_terminal(window, cx);
         // 启动状态栏指标采样（CPU / 内存 / 网络），窗口存活期间持续运行。
@@ -459,6 +485,8 @@ impl Render for AppRoot {
         v_flex()
             .id("app-root")
             .size_full()
+            .track_focus(&self.background_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_background_mouse_down))
             .bg(cx.theme().background)
             // —— 顶部：自绘标题栏（图标 / 标题 / 设置入口 / 窗口控制）——
             // 标题栏内容区本身就是窗口拖拽区，但其中的按钮仍有自己的 hitbox，

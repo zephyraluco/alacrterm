@@ -21,13 +21,21 @@ use std::{
 
 use gpui::{
     App, AppContext as _, AsyncApp, Entity, FocusHandle, IntoElement, InteractiveElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollWheelEvent,
-    SharedString, Styled, Subscription, WeakEntity, Window, div, rgb,
+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, NoAction, ParentElement, Render,
+    ScrollWheelEvent, SharedString, Styled, Subscription, WeakEntity, Window, div, rgb,
 };
 use terminal::{Event as TerminalEvent, Modes, Terminal, TerminalBounds, TerminalBuilder};
+use util::shell::Shell;
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
-use util::shell::Shell;
+
+/// 实现 [`gpui::Focusable`]：让应用层能直接聚焦 / 判断某个会话的焦点状态
+/// （焦点策略由应用层掌握，见 `AppRoot::on_background_mouse_down`）。
+impl gpui::Focusable for TerminalView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
 
 /// IME（输入法）组合文本状态。
 pub(crate) struct ImeState {
@@ -36,6 +44,16 @@ pub(crate) struct ImeState {
 
 /// 光标闪烁间隔。
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 终端的 key context。
+///
+/// 用途只有一个：在焦点位于终端时**取消** tab / shift-tab 的键位绑定，把按键交回
+/// 焦点所在的组件。gpui-component 的 `Root` 把这两个键绑成了焦点切换动作，而 gpui 的
+/// 键位派发在 key listener 之前、且动作默认停止传播 ⇒ 终端一个 Tab 都收不到。
+/// 用 [`NoAction`] 在更深的 context 上压掉那条绑定后，按键就顺着 gpui 的正常流程
+/// 落到焦点元素（终端）的 key listener，与 Enter / 方向键走同一条路；
+/// 焦点不在终端时本 context 不参与匹配，`Root` 的 Tab 焦点切换照旧。
+const TERMINAL_KEY_CONTEXT: &str = "Terminal";
 
 /// 终端视图。
 pub struct TerminalView {
@@ -68,6 +86,16 @@ impl TerminalView {
         let focus_handle = cx.focus_handle();
 
         let settings = Arc::new(TerminalRenderSettings::default());
+
+        // 焦点在终端时让 tab / shift-tab 归终端（见 [`TERMINAL_KEY_CONTEXT`]）。
+        // 只需注册一次——每个标签页都会走 `new`。
+        static UNBIND_TAB_KEYS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        UNBIND_TAB_KEYS.get_or_init(|| {
+            cx.bind_keys([
+                KeyBinding::new("tab", NoAction, Some(TERMINAL_KEY_CONTEXT)),
+                KeyBinding::new("shift-tab", NoAction, Some(TERMINAL_KEY_CONTEXT)),
+            ]);
+        });
 
         // 焦点进出：通知终端应用（FOCUS_IN_OUT 模式），并设置默认光标形状
         let focus_in = cx.on_focus_in(&focus_handle, window, |terminal_view, _window, cx| {
@@ -283,6 +311,24 @@ impl TerminalView {
         }
     }
 
+    /// 该终端当前是否持有焦点（供应用层判断点击是否落在终端之外）。
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
+    /// 左键点击终端区域：聚焦，并**停止冒泡**。
+    ///
+    /// 停止冒泡是为了让上层（`AppRoot`）能区分「点在终端里」与「点在终端之外」。
+    fn on_left_mouse_down(
+        &mut self,
+        _: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        cx.stop_propagation();
+    }
+
     fn on_mouse_down(
         &mut self,
         e: &MouseDownEvent,
@@ -350,16 +396,6 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        // 仅当窗口中没有任何元素持有焦点时（应用启动 / 焦点真空）才接管焦点。
-        // 不能无条件抢占：设置弹窗打开期间，对话框与其中的输入框持有焦点，而终端
-        // 会随 PTY Wakeup / 光标闪烁不断重渲染，若在此抢焦点会导致：
-        //   1. 弹窗内输入框无法保持焦点、无法输入；
-        //   2. 弹窗右上角关闭按钮（通过焦点路径分发 Cancel 动作）点击无效。
-        // 点击终端区域时 TerminalElement 的左键 on_mouse_down 会自行聚焦。
-        if window.focused(cx).is_none() {
-            window.focus(&self.focus_handle, cx);
-        }
-
         window.set_window_title(&self.title);
 
         let focused = self.focus_handle.is_focused(window);
@@ -368,8 +404,10 @@ impl Render for TerminalView {
         let mut root = div()
             .id("terminal-view")
             .size_full()
+            .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .bg(self.settings.colors.terminal_background);
 
