@@ -2,7 +2,6 @@
 name = "alacrterm"
 version = "0.1.0"
 edition = "2024"
-build = "build.rs"
 
 [dependencies]
 gpui = { workspace = true }
@@ -16,6 +15,3 @@ sysinfo = { workspace = true }
 terminal = { workspace = true }
 terminal_view = { workspace = true }
 util = { workspace = true }
-
-[build-dependencies]
-embed-resource = "3.0"

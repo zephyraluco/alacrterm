@@ -118,7 +118,7 @@ crates/
       settings_window.rs        # 独立设置窗口(自绘标题栏、窗口句柄复用)
       status_metrics.rs         # sysinfo 采样:连接状态 / CPU / 内存 / 网络 + 字节格式化
       actions.rs                # 自定义 Action(NewTerminal / CloseSession) + 全局监听器
-      assets.rs / build.rs      # 图标资产 / Windows 版本资源
+      assets.rs                 # 图标资产
   terminal_view/                # 视图层(独立 crate):
     src/
       lib.rs                    # TerminalView:终端创建/事件订阅/键盘输入/焦点/IME/滚动
@@ -734,9 +734,11 @@ graph LR
 
 `TerminalBuilder::resolve_path` 用 `SearchPathW`(Windows API)解析 shell 程序路径,非含分隔符路径加 `\\?\` 前缀。
 
-### 7.3 构建脚本
+### 7.3 构建脚本(已移除)
 
-`build.rs`(仅 Windows)用 `embed-resource 3.0` 编译手写的 `.rc` 内容:图标 + `VERSIONINFO` 资源(FileDescription/FileVersion/ProductName 等,CompanyName 为 `zeal`)。`assets/app-icon.ico` 不存在时跳过 `ICON` 行避免 `RC2135` 编译错误;debug 构建版本号追加 `-dev`。
+原先 `build.rs` 仅在 Windows 下生效:用 `embed-resource 3.0` 编译手写的 `.rc` 内容,把图标 + `VERSIONINFO` 资源(FileDescription/FileVersion/ProductName 等)嵌进 exe。**现已整份删除**,`crates/alacrterm/Cargo.toml` 里的 `build = "build.rs"` 与 `[build-dependencies] embed-resource` 一并去掉 ⇒ 构建期不再执行任何脚本,exe 也不带自定义图标 / 版本资源(文件属性里看不到这些字段)。
+
+⚠️ `assets/app-icon.ico` **仍然保留**:打包(cargo-packager / NSIS)用它作为安装包与快捷方式图标,该路径与 `build.rs` 无关。
 
 ### 7.4 ConPTY 后端(`conpty_backend.rs`)——必须带 `conpty.dll`
 
@@ -794,7 +796,7 @@ flowchart TD
 cargo run -p alacrterm        # 运行终端
 cargo test -p alacrterm       # 单元测试(格式化等纯函数)
 cargo check --workspace       # 编译检查
-cargo build -p alacrterm      # 构建(Windows 下 build.rs 生成版本资源)
+cargo build -p alacrterm      # 构建
 ```
 
 ## 附录:仓库记忆要点(历史修复)
