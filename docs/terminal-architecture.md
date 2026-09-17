@@ -111,7 +111,7 @@ crates/
       main.rs                   # 入口 + AppRoot:共享状态、布局装配、指标采样任务、defer 辅助
       status_bar.rs             # 中间列底部的公共状态栏(会话指标 + 折叠侧的展开按钮);`STATUS_BAR_HEIGHT` 统一三条状态栏高度
       sidebar_panel.rs          # 左侧边栏(会话列表 + 右键菜单) / 右侧边栏(会话信息) + 两枚折叠开关
-      terminal_panel.rs         # 中间容器:自绘标签栏(见 tab_bar.rs) + 终端区(无边框卡片)
+      terminal_panel.rs         # 中间容器:自绘标签栏(见 tab_bar.rs) + 终端区(无边框、无内边距)
       tab_bar.rs                # 自绘标签栏:只用 gpui 原语(div/svg)绘制的标签、关闭按钮与右端「+」
       welcome.rs                # 终端容器关闭后的欢迎页(空态背景板:logo + 标题 + 开始使用)
       connection_dialog.rs      # 「新建终端」对话框:表单 + ssh 参数组装 + 页脚按钮
@@ -191,7 +191,7 @@ fn main() {
 - **活动栏图标**(`sidebar_panel::render_activity_icons`):终端会话 / 关于两个图标,**横向排在左栏自己的状态栏里**(原先是侧边栏左侧一条 44px 竖栏,已取消)。点击**只切换视图**(`set_sidebar_view`;点击当前视图图标是空操作),**不会折叠 / 展开侧边栏**——折叠只归折叠按钮管。「设置」入口则在**标题栏右侧的文字按钮**(见 §3.5)
 - **终端容器**(`terminal_panel::render_terminal_container`):**自绘标签栏**(`tab_bar` 模块) + 终端区,放在中间列的终端区里;**标签全部关闭后终端容器整体不再渲染**,中间列改显示欢迎页(`welcome::render_welcome`),两侧边栏与两条状态栏仍在
 - **欢迎页**(`welcome` 模块,`AppRoot::render_welcome`):版式参考 zed 的欢迎页——内容居中、列宽固定(`w_full().max_w(420px)`,中间列再窄也只会被裁掉)、列内元素左对齐;内容 = 圆角方块 logo(`h_flex` + `svg`) + 标题 + 斜体副标题 + 一节「开始使用」(小号灰字分节标题 + 一条横贯内容列的分隔线 + 操作行)。操作行 = 左图标 + 名称 + 右端快捷键,整行可点、hover 提亮:「新建终端」(快捷键跟随平台:macOS 显示 `⌘ N`,其余 `Ctrl N`,派发 `NewTerminal`)与「打开设置」(`open_settings_window`)。背景直接用主题 `background`(与终端区同色,开关终端时不会有颜色跳变);**没有「最近项目」一节**——本应用没有项目 / 历史会话概念
-- ⚠️ 终端区**刻意不画卡片边框 / 圆角**:标签栏已经贴边并自带一条底边线,再画一圈卡片边框就会在它下方 8px(pane 的 `p_2()`)处多出一条平行横线,看着像重复的分隔线。不画边框后终端背景与 pane 背景同色,选中标签的底色与下方自然连成一体
+- ⚠️ 终端区**四周不留内边距、也不画卡片边框 / 圆角**:终端背景要一路铺到标签栏底边线与下方状态栏(早先这里有层 `p_2()`,四周会露出一圈 pane 底色的缝——见 `terminal_panel::render_terminal_container` 的注释);再画一圈卡片边框又会在标签栏底边线下方多出一条平行横线,看着像重复的分隔线。终端背景与 pane 底色同色,选中标签的底色与下方自然连成一体
 - **自绘标签栏**(`tab_bar`):结构与配色参考 zed(`crates/ui/src/components/tab.rs` / `tab_bar.rs` / `terminal_view.rs` 的 `tab_content`),**不使用 gpui-kit 的 `TabBar` / `Tab` / `Button` / `Icon` 组件**——标签、关闭按钮、右端「+」全部用 gpui 原语绘制(图标用 `svg().path(...)`,显式 `.text_color(...)` 着色)。固定 200px 宽、32px 高;选中标签用 `tab_active`/`tab_active_foreground` 且底部留 1px 盖住栏底分隔线(zed 的 `pb_px()` 技巧),未选中用 `tab_foreground` 且 hover 提亮;关闭按钮只在标签被悬停/选中时渲染(悬停态存在 `AppRoot::hovered_tab`,因为 gpui-pre 没有 `visible_on_hover`,而 `opacity(0)` 会留下可点击的隐形热区);中键点击标签也能关闭;`overflow_x_scroll()` + `track_scroll()` 支持标签横向滚动,右端「+」派发 `NewTerminal`;**相邻标签之间有竖分割线**(照 zed `TabPosition` 规则:每条边界只画一条线,且选中标签两侧都有线——`0 < ix <= active` 画左线、`ix >= active` 画右线,首个标签不画左线)
 - **新建会话入口**:左侧边栏会话条目的右键菜单「新建终端」(派发 `NewTerminal`,见 §3.7);侧边栏底部**已无常驻按钮**、空白区也**不挂**右键菜单——因此全部会话关闭后(列表为空)当前缺少可点击的恢复入口(已知限制)
 - `sidebar_panel` 两个列容器统一是 `v_flex[Sidebar(flex_1), 本栏 StatusBar(w_full)]`:**宽度同步靠同列布局天然完成**,不要去给状态栏算面板宽度(拖分隔条时 `ResizableState` 只在 MouseUp 更新,手动同步会滞后)

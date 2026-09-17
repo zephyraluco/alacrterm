@@ -145,14 +145,14 @@ impl AppRoot {
 
         // 终端区：直接挂载当前会话的 `TerminalView`。
         //
-        // 刻意**不画边框 / 圆角**：标签栏已经贴边并自带一条底边线，
-        // 这里再画一圈边框就会在它下方 8px（pane 的内边距）处多出一条平行横线，
-        // 看上去像是重复的分隔线。不画边框后，终端背景与 pane 背景同色，
-        // 选中标签的底色与下方区域自然连成一体。
+        // **四周不留内边距**：终端背景要一直铺到标签栏底边线与下方状态栏
+        // （早先这里包了一层 `p_2()`，四周会露出一圈 pane 底色的缝）。
+        // 也刻意**不画边框 / 圆角**：标签栏已经贴边并自带一条底边线，再画一圈卡片边框
+        // 就会在它下方多出一条平行横线，看上去像是重复的分隔线。
         //
-        // ⚠️ 内边距那层必须是 **flex 列容器**（`v_flex`），不能是普通 `div()`：
+        // ⚠️ 本层必须是 **flex 列容器**（`v_flex`），不能是普通 `div()`：
         // `TerminalView` 是 `size_full`，百分比高度要解析到**确定的高度**上；
-        // 若外层是块级 div，`terminal_area` 的 `flex_1()` 不生效、高度退化为 auto，
+        // 若外层是块级 div，`flex_1()` 不生效、高度退化为 auto，
         // 终端就会被压成 0 高（表现为「终端一片空白，什么都不显示」）。
         let terminal_area = v_flex()
             .flex_1()
@@ -161,7 +161,7 @@ impl AppRoot {
             .overflow_hidden()
             .child(active.view.clone());
 
-        // 终端 pane：上方自绘标签栏（贴边，自带底边线）+ 下方终端区（留白）。
+        // 终端 pane：上方自绘标签栏（贴边，自带底边线）+ 下方终端区（同样贴边）。
         // overflow_hidden：pane 无 overflow 时，taffy 的自动最小尺寸 = 内容宽
         // （含所有标签的总宽），标签一多 pane 会被撑出可视区；设为 hidden 后
         // 最小尺寸归零，宽度完全由行分配——标签栏内部再横向滚动。
@@ -171,14 +171,7 @@ impl AppRoot {
             .min_h_0()
             .overflow_hidden()
             .child(self.render_terminal_tab_bar(cx))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .p_2()
-                    .overflow_hidden()
-                    .child(terminal_area),
-            );
+            .child(terminal_area);
 
         v_flex()
             .h_full()
