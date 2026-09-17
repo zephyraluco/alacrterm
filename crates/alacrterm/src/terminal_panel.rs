@@ -1,57 +1,80 @@
-//! 右侧容器：多会话标签栏 + 终端视图。
+//! 终端会话：生命周期（新建 / 激活 / 关闭）+ 它们在 dock 里的面板 [`SessionPane`]。
 //!
-//! - **标签栏**：**自绘**（见 [`crate::tab_bar`]）——图标 + 标题 + 关闭按钮全部用
-//!   gpui 原语绘制，未使用 gpui-kit 的 `TabBar` / `Tab` 组件；标签多了横向滚动，
-//!   右端固定一枚「+」新建终端。
-//! - **终端**：`TerminalView` 实体直接挂在终端区里，尺寸随容器分配（不画卡片边框，
-//!   以免在标签栏底边线下方多出一条平行横线）。
+//! 一个会话 = dock 的 `center` 里一块面板，标签栏是自绘的（[`crate::tab_bar`]）；
+//! 中间列 = `v_flex[dock, 公共状态栏]`。本模块是会话的**单一入口**：新建 / 激活 /
+//! 关闭都集中在这里，侧边栏列表与标签栏按钮都经由它，保证会话表
+//! （[`AppRoot::terminals`]）与 dock 面板一一对应、顺序一致。
 //!
-//! 指标状态栏（连接状态 / CPU / 内存 / 网络）已整体搬到 [`crate::status_bar`]：
-//! 那是**中间列的公共状态栏**（不随本容器的消失而消失）。
-//! 会话进程结束时仍显示「已断开」：终端网格与标签都保留（ssh 报的断开原因
-//! 不会被丢掉），由用户自行关闭或新建。
+//! 会话进程结束时终端不消失（网格与标签保留，状态栏显示「已断开」）；全部关掉后
+//! 中间列显示欢迎页（[`AppRoot::render_welcome`]）。
 //!
-//! 标签页可全部关闭；**最后一个会话关闭后整个容器一起关闭**（标签栏 / 终端
-//! 全部消失，由 [`AppRoot::render`] 决定不再渲染本容器，中间列改显示欢迎页
-//! ——见 [`crate::AppRoot::render_welcome`]），
-//! 之后可在欢迎页里、或从侧边栏会话条目的右键菜单「新建终端」重新打开。
-//!
-//! 会话的生命周期（新建 / 激活 / 关闭）也集中在本模块，作为终端的「单一入口」；
-//! 侧边栏的会话列表经由 [`AppRoot::set_active_tab`] 复用同一套逻辑。
+//! ⚠️ 面板注册进布局必须走 [`panel_handle`](gpui_kit::component::dock::panel_handle)：
+//! 裸 `Entity<P>` 会让皮肤取不到表现层 trait，标签退化成只写 `panel_name` 的标题栏。
 
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Focusable as _, IntoElement, ParentElement as _,
-    Styled as _, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, WeakEntity, Window, div,
 };
-use gpui_kit::component::v_flex;
+use gpui_kit::component::{
+    button::Button,
+    dock::{
+        BasePanel, DockPlacement, InsertTarget, Panel, PanelControl, PanelEvent, PanelId, TabGroup,
+        panel_handle,
+    },
+};
 use terminal_view::{RenderSettings, TerminalView};
-use util::shell::Shell;
 
-use crate::{AppRoot, Session, SessionRequest, SessionTarget, config};
+use crate::actions::NewTerminal;
+use crate::assets::IconName;
+use crate::config;
+use crate::{AppRoot, Session, SessionRequest, SessionTarget};
 
 impl AppRoot {
-    /// 新建一个本地终端会话（默认系统 shell）。
+    /// 新建一个本地终端会话。
     pub(crate) fn spawn_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.spawn_session(
             SessionRequest {
                 name: None,
-                shell: Shell::System,
-                target: SessionTarget::Local,
+                shell: util::shell::Shell::System,
+                target: crate::SessionTarget::Local,
             },
             window,
             cx,
         );
     }
 
-    /// 按给定参数新建会话（PTY 在后台启动），并订阅其事件用于刷新界面。
+    /// 按给定参数新建会话（PTY 在后台启动），并挂成 dock 里的一块面板。
     ///
-    /// 参数来自 [`ConnectionForm`](crate::connection_dialog::ConnectionForm)：
-    /// 显示名、要启动的 shell（本地 shell 或 `ssh`）、连接目标（状态栏展示用）。
+    /// 参数来自 [`ConnectionForm`](crate::connection_dialog::ConnectionForm)（显示名 /
+    /// shell / 连接目标）。
     pub(crate) fn spawn_session(
         &mut self,
         request: SessionRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 新会话进哪一组：`+` 按钮留下的提示优先，否则跟当前会话同组。
+        let group = self
+            .pending_session_group
+            .take()
+            .or_else(|| self.session_group(self.active, cx));
+        self.spawn_session_in(request, group, window, cx);
+    }
+
+    /// 某个会话所在的标签组。
+    fn session_group(&self, index: usize, cx: &App) -> Option<WeakEntity<TabGroup>> {
+        self.terminals
+            .get(index)
+            .and_then(|session| session.pane.read(cx).group())
+    }
+
+    /// [`Self::spawn_session`] 的实现：`group` 指定新面板放进哪个标签组。
+    fn spawn_session_in(
+        &mut self,
+        request: SessionRequest,
+        group: Option<WeakEntity<TabGroup>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -62,23 +85,45 @@ impl AppRoot {
         } = request;
         let settings = Arc::new(config::settings(cx).render.clone());
         let view = cx.new(|cx| TerminalView::new(None, shell, settings, window, cx));
+        // 标题 / 连接状态变化都要刷新界面（标签名、侧边栏、状态栏）。
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
-        // 焦点策略集中在应用层（点击终端之外时焦点会离开终端，见
-        // `AppRoot::on_background_mouse_down`），所以新会话要显式聚焦，否则键盘没有去处。
-        let focus = view.focus_handle(cx);
-        window.focus(&focus, cx);
-        self.terminals.push(Session {
-            view,
-            name,
-            target,
+
+        let root = cx.weak_entity();
+        let pane = cx.new(|_| SessionPane::new(view.clone(), name, target, root));
+        let handle = panel_handle(pane.clone());
+        self.dock.update(cx, |area, cx| {
+            area.add_panel_view(handle, DockPlacement::Center, None, window, cx);
         });
-        self.set_active_tab(self.terminals.len() - 1, cx);
+
+        // `add_panel_view` 只塞进 center 的**第一个**标签组，分屏时要挪到目标组。
+        if let Some(node) = group.and_then(|group| group.upgrade().map(|group| group.read(cx).node()))
+        {
+            let panel = panel_handle(pane.clone()).panel_id(cx);
+            self.dock.update(cx, |area, cx| {
+                area.move_panel(
+                    panel,
+                    InsertTarget::Tabs {
+                        node,
+                        ix: None,
+                        activate: true,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        }
+
+        self.terminals.push(Session { view, pane });
+        // 新面板由 dock 选中（`set_active` 会把焦点交给终端）；记一次账，再按 dock
+        // 的顺序排一遍（分屏时新面板未必在末尾，而侧边栏按这张表的顺序显示）。
+        self.active = self.terminals.len() - 1;
+        self.sync_sessions_with_dock(cx);
+        cx.notify();
     }
 
-    /// 把新的终端渲染参数推给所有存活会话（设置窗口改完立即生效）。
+    /// 把新的终端渲染参数推给所有存活会话。
     ///
-    /// 全局 [`config::Settings`] 与落盘由调用方负责（设置窗口），这里只管渲染；
-    /// 之后新建的会话也会拿到新值（`spawn_session` 从全局读）。
+    /// 全局 [`config::Settings`] 与落盘由调用方（设置窗口）负责，这里只管渲染。
     pub(crate) fn apply_render_settings(&mut self, settings: RenderSettings, cx: &mut App) {
         let settings = Arc::new(settings);
         for session in &self.terminals {
@@ -88,96 +133,270 @@ impl AppRoot {
         }
     }
 
-    /// 激活指定的终端会话标签，并把标签栏滑动到该标签。
+    /// 激活指定的终端会话（点标签由 dock 自己处理）。
     ///
-    /// `ScrollHandle::scroll_to_item` 在下一帧 prepaint 时生效：仅做最小滚动，
-    /// 让选中的标签进入可视范围（标签已在视野内时不动）。
-    /// 所有激活路径（标签点击 / 侧边栏会话项 / 新建会话）都应经由本方法。
-    pub(crate) fn set_active_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.terminals.is_empty() {
+    /// 选中动作交给 dock（`select_panel`）——它会回调面板的 `set_active`。
+    pub(crate) fn set_active_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.terminals.get(index) else {
             // 全部标签已关闭：无会话可激活，中间列显示欢迎页（见 `render_welcome`）。
             self.active = 0;
             cx.notify();
             return;
-        }
-        self.active = index.min(self.terminals.len() - 1);
-        self.tab_scroll_handle.scroll_to_item(self.active);
+        };
+        let panel = panel_handle(session.pane.clone()).panel_id(cx);
+        self.dock
+            .update(cx, |area, cx| area.select_panel(panel, window, cx));
+        self.active = index;
         cx.notify();
     }
 
-    /// 关闭一个终端会话（标签页 × 按钮，参考官方 Dynamic Tabs / Closeable Tabs 示例）。
-    ///
-    /// 允许关闭全部标签：最后一个会话关闭后终端容器整体消失、中间列显示欢迎页（见
-    /// [`Self::render_welcome`]），用户可在其中新建会话。
-    /// 实体移除后 `Terminal` 的 Drop 会关闭 PTY 并终止子进程。
-    pub(crate) fn close_terminal(&mut self, index: usize, cx: &mut Context<Self>) {
-        // 点击 × 后事件仍可能冒泡到标签的 on_click（自绘标签栏虽然在关闭按钮里
-        // `stop_propagation` 了，这里仍做越界校验作为防御）——下标可能已失效。
-        if index >= self.terminals.len() {
+    /// dock 面板报告「我成为当前会话」时同步下标（[`SessionPane::set_active`] 调用），
+    /// 按实体 id 反查；查不到（会话刚被关掉）就忽略。
+    pub(crate) fn set_active_pane(&mut self, pane: gpui::EntityId, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .terminals
+            .iter()
+            .position(|session| session.pane.entity_id() == pane)
+        else {
+            return;
+        };
+        if self.active == index {
             return;
         }
+        self.active = index;
+        cx.notify();
+    }
+
+    /// 关闭一个终端会话（按下标关闭的入口，如侧边栏右键菜单）。
+    ///
+    /// 面板移除后 `TerminalView` 一并销毁，`Terminal` 的 Drop 会关闭 PTY 并终止子进程。
+    pub(crate) fn close_terminal(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.terminals.get(index) else {
+            return;
+        };
+        let pane = session.pane.clone();
+        // 先让 dock 摘掉面板，再动会话表；关闭最后一刻可能触发别的面板 `set_active`，
+        // 那只影响焦点与 `active` 记账。
+        self.dock
+            .update(cx, |area, cx| area.remove_panel(pane, window, cx));
         self.terminals.remove(index);
-        // 选中下标调整逻辑与官方 close_tab 示例一致（末位用 saturating 防止 usize 下溢）。
+        // 选中下标调整逻辑与原先一致（末位用 saturating 防止 usize 下溢）。
         if self.active >= index && self.active > 0 {
             self.active -= 1;
         }
         if self.active >= self.terminals.len() {
             self.active = self.terminals.len().saturating_sub(1);
         }
-        if !self.terminals.is_empty() {
-            self.tab_scroll_handle.scroll_to_item(self.active);
-        }
+        // 下标调整后只保证不越界；顺序也跟着 dock 走（关掉的可能不是末位）。
+        self.sync_sessions_with_dock(cx);
         cx.notify();
     }
 
-    /// 终端容器：标签栏 + 终端卡片 + 底部状态栏。
-    pub(crate) fn render_terminal_container(&self, cx: &mut Context<Self>) -> AnyElement {
-        // 前置条件：至少存在一个会话。全部标签页关闭后整个终端容器不再渲染
-        // （见 `AppRoot::render`），本方法不会被调用；此处只做防御性检查，
-        // 避免 `self.active` 越界时 panic。
-        let Some(active) = self.terminals.get(self.active) else {
-            return div().into_any_element();
+    /// 按面板 id 关闭会话（标签栏上的 `×` / 中键：按钮属于哪块面板就关哪块）。
+    pub(crate) fn close_panel_id(
+        &mut self,
+        panel: PanelId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .terminals
+            .iter()
+            .position(|session| panel_handle(session.pane.clone()).panel_id(cx) == panel)
+        else {
+            return;
         };
+        self.close_terminal(index, window, cx);
+    }
 
-        // 标签栏是**自绘**的（`tab_bar` 模块）：图标 + 标题 + 关闭按钮都用 gpui 原语，
-        // 不再使用 gpui-kit 的 `TabBar` / `Tab`（旧实现里标签栏自带 `menu(true)` 菜单键，
-        // 以及为绕过 `lock_scroll_axis` 而手写的垂直滚轮→横向映射，都已随之删除）。
+    /// 把会话表同步成 dock 的样子：顺序 = dock 里面板的先后，成员 = dock 里还在的面板。
+    ///
+    /// 由 [`DockEvent::LayoutChanged`](gpui_kit::component::dock::DockEvent) 触发
+    /// （见 `AppRoot::new`）。dock 也可能自己关面板（换回 gpui-kit 皮肤时），那种关闭
+    /// 不经过本模块，所以这里要负责把不在 dock 里的会话丢掉（`Terminal` 的 Drop 关 PTY）。
+    pub(crate) fn sync_sessions_with_dock(&mut self, cx: &mut Context<Self>) {
+        let Some(tree) = self.dock.read(cx).layout(DockPlacement::Center) else {
+            return;
+        };
+        // 按 dock 的顺序挑会话：面板顺序也就是视觉顺序（含分屏后的两组）。
+        let order: Vec<PanelId> = tree.panels().collect();
+        let active_pane = self.terminals.get(self.active).map(|s| s.pane.entity_id());
+        let mut ordered = Vec::with_capacity(self.terminals.len());
+        for id in order {
+            let Some(ix) = self
+                .terminals
+                .iter()
+                .position(|session| panel_handle(session.pane.clone()).panel_id(cx) == id)
+            else {
+                continue;
+            };
+            ordered.push(self.terminals.remove(ix));
+        }
+        // dock 里已经没有的会话落在这里清理（dock 自己关掉的）。
+        let dropped = !self.terminals.is_empty();
+        let before: Vec<gpui::EntityId> = self.terminals.iter().map(|s| s.pane.entity_id()).collect();
+        self.terminals = ordered;
+        let after: Vec<gpui::EntityId> = self.terminals.iter().map(|s| s.pane.entity_id()).collect();
+        if !dropped && before == after {
+            return;
+        }
+        // 当前会话按面板找回下标（找不到说明刚被关掉，按老规矩往前靠）。
+        self.active = active_pane
+            .and_then(|pane| self.terminals.iter().position(|s| s.pane.entity_id() == pane))
+            .unwrap_or_else(|| self.active.min(self.terminals.len().saturating_sub(1)));
+        cx.notify();
+    }
+}
 
-        // 终端区：直接挂载当前会话的 `TerminalView`。
-        //
-        // **四周不留内边距**：终端背景要一直铺到标签栏底边线与下方状态栏
-        // （早先这里包了一层 `p_2()`，四周会露出一圈 pane 底色的缝）。
-        // 也刻意**不画边框 / 圆角**：标签栏已经贴边并自带一条底边线，再画一圈卡片边框
-        // 就会在它下方多出一条平行横线，看上去像是重复的分隔线。
-        //
-        // ⚠️ 本层必须是 **flex 列容器**（`v_flex`），不能是普通 `div()`：
-        // `TerminalView` 是 `size_full`，百分比高度要解析到**确定的高度**上；
-        // 若外层是块级 div，`flex_1()` 不生效、高度退化为 auto，
-        // 终端就会被压成 0 高（表现为「终端一片空白，什么都不显示」）。
-        let terminal_area = v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .overflow_hidden()
-            .child(active.view.clone());
+/// 一个终端会话对应的 dock 面板：会话的展示信息（名字 / 连接目标）+ 终端视图。
+///
+/// 会话列表本身在 [`AppRoot::terminals`] 上（顺序 = dock 里标签的顺序）。
+pub(crate) struct SessionPane {
+    view: Entity<TerminalView>,
+    root: WeakEntity<AppRoot>,
+    /// 新建会话时用户填的名字；`None` = 回退到终端自己上报的标题。
+    name: Option<SharedString>,
+    target: SessionTarget,
+    /// 本面板所在的标签组（`on_added_to` 告知）：「新建终端」靠它判断新会话进哪一组。
+    group: Option<WeakEntity<TabGroup>>,
+}
 
-        // 终端 pane：上方自绘标签栏（贴边，自带底边线）+ 下方终端区（同样贴边）。
-        // overflow_hidden：pane 无 overflow 时，taffy 的自动最小尺寸 = 内容宽
-        // （含所有标签的总宽），标签一多 pane 会被撑出可视区；设为 hidden 后
-        // 最小尺寸归零，宽度完全由行分配——标签栏内部再横向滚动。
-        // flex_1 + min_h_0：与下方状态栏同处一列，需能收缩。
-        let terminal_pane = v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_hidden()
-            .child(self.render_terminal_tab_bar(cx))
-            .child(terminal_area);
+impl SessionPane {
+    pub(crate) fn new(
+        view: Entity<TerminalView>,
+        name: Option<SharedString>,
+        target: SessionTarget,
+        root: WeakEntity<AppRoot>,
+    ) -> Self {
+        Self {
+            view,
+            root,
+            name,
+            target,
+            group: None,
+        }
+    }
 
-        v_flex()
-            .h_full()
-            .w_full()
-            .overflow_hidden()
-            .child(terminal_pane)
-            .into_any_element()
+    /// 本面板当前所在的标签组。
+    pub(crate) fn group(&self) -> Option<WeakEntity<TabGroup>> {
+        self.group.clone()
+    }
+
+    /// 会话显示名：优先用户命名，否则终端标题。
+    pub(crate) fn name(&self, cx: &App) -> SharedString {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.view.read(cx).title())
+    }
+
+    /// 连接目标（状态栏「连接」一栏用）。
+    pub(crate) fn target(&self) -> &SessionTarget {
+        &self.target
+    }
+}
+
+impl BasePanel for SessionPane {
+    fn panel_name(&self) -> &'static str {
+        "terminal-session"
+    }
+
+    /// 面板可被关闭（自绘标签栏的 `×` 走应用层，这里保持一致）。
+    fn closable(&self, _: &App) -> bool {
+        true
+    }
+
+    /// 不做 dock 的「最大化单面板」：会绕过中间列的状态栏。
+    fn zoomable(&self, _: &App) -> bool {
+        false
+    }
+
+    /// 记下自己所在的标签组。
+    fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, _: &mut Context<Self>) {
+        self.group = Some(group);
+    }
+
+    /// 切到本会话：把键盘焦点交给它的终端，并让根视图记下「当前会话」。
+    ///
+    /// ⚠️ 同步信息一律走 [`AppRoot::defer_after_update`]：这里可能发生在根视图自己的
+    /// 更新过程中（新建 / 关闭会话都会触发 dock 重新选面板），同步改会重入。
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !active {
+            return;
+        }
+        let focus = self.view.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        let pane = cx.entity().entity_id();
+        AppRoot::defer_after_update(self.root.clone(), cx, move |root, _, cx| {
+            root.set_active_pane(pane, cx)
+        });
+    }
+}
+
+impl Panel for SessionPane {
+    /// 标签上的文字（自绘标签栏取它当标题）。
+    fn tab_name(&self, cx: &App) -> Option<SharedString> {
+        Some(self.name(cx))
+    }
+
+    /// 标签栏由 dock 提供，不要额外的面板标题栏。
+    fn title_bar(&self, _: &App) -> bool {
+        false
+    }
+
+    /// 不要内边距：终端背景要铺满标签栏底边线与状态栏之间。
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
+
+    /// 不做单面板最大化（同 `zoomable`）。
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+        None
+    }
+
+    /// 标签栏右端的工具栏按钮：新建终端（关闭按钮在每个标签上，见 [`crate::tab_bar`]）。
+    ///
+    /// 工具栏区只画当前组当前面板的按钮，所以「新建」得先把「本组」记到根视图上，
+    /// 否则新会话会被 `add_panel_view` 塞进 center 的第一个标签组。
+    fn toolbar_buttons(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<Vec<Button>> {
+        let root = self.root.clone();
+        let group = self.group.clone();
+        Some(vec![
+            Button::new("new-terminal")
+                .icon(IconName::Plus)
+                .tooltip("新建终端")
+                .on_click(move |_, window, cx| {
+                    // 先告诉根视图「新会话进这一组」，再走统一的 `NewTerminal` 入口。
+                    let group = group.clone();
+                    let root = root.clone();
+                    let _ = root.update(cx, |root, _| root.set_pending_session_group(group));
+                    window.dispatch_action(Box::new(NewTerminal), cx);
+                }),
+        ])
+    }
+}
+
+impl EventEmitter<PanelEvent> for SessionPane {}
+
+impl Focusable for SessionPane {
+    /// 焦点始终归终端的视图（面板自己不抢焦点）。
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.view.read(cx).focus_handle(cx)
+    }
+}
+
+impl Render for SessionPane {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // 面板内容就是终端本体（`TerminalView` 是 `size_full`，dock 会给它确定尺寸）。
+        div().size_full().child(self.view.clone())
     }
 }

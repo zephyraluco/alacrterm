@@ -135,7 +135,7 @@ impl AppRoot {
         // 此时这条状态栏本身仍要在，因为折叠侧的「展开」按钮挂在这里。
         let metrics = match self.terminals.get(self.active) {
             Some(session) => render_session_metrics(
-                &session.target,
+                session.target(cx),
                 self.monitor.metrics(),
                 session.view.read(cx).has_exited(),
                 cx,

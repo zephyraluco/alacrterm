@@ -37,11 +37,13 @@ impl AppRoot {
     /// 放在这里而不是 `AppRoot::new` 里：那里拿不到已构造好的实体句柄，
     /// 而 `main` 的建窗闭包里正好有 `Entity<AppRoot>`。
     pub(crate) fn register_actions(root: WeakEntity<Self>, cx: &mut App) {
-        // —— 关闭会话：不需要窗口，直接 update 即可 ——
+        // —— 关闭会话：要从 dock 里摘掉面板（需要窗口），让出一拍再执行 ——
         let close_root = root.clone();
         cx.on_action(move |action: &CloseSession, cx: &mut App| {
             let index = action.index;
-            let _ = close_root.update(cx, |this, cx| this.close_terminal(index, cx));
+            Self::defer_after_update(close_root.clone(), cx, move |this, window, cx| {
+                this.close_terminal(index, window, cx)
+            });
         });
 
         // —— 新建终端：要开对话框（需要窗口），让出一拍再执行 ——

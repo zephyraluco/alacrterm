@@ -211,8 +211,8 @@ impl AppRoot {
             SidebarMenuItem::new(session.title(cx))
                 .icon(IconName::SquareTerminal)
                 .active(ix == self.active)
-                .on_click(move |_, _, cx| {
-                    let _ = this.update(cx, |this, cx| this.set_active_tab(ix, cx));
+                .on_click(move |_, window, cx| {
+                    let _ = this.update(cx, |this, cx| this.set_active_tab(ix, window, cx));
                 })
                 .context_menu(move |menu, _, _| {
                     menu.menu("关闭会话", Box::new(CloseSession { index: ix }))
@@ -320,7 +320,7 @@ impl AppRoot {
                 };
                 (
                     session.title(cx),
-                    session.target.label(),
+                    session.target(cx).label(),
                     pid,
                     state.to_string(),
                 )

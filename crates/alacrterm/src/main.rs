@@ -16,8 +16,10 @@
 //!
 //! 本文件只保留程序入口、根视图 [`AppRoot`]（共享状态 + 布局装配 + 设置弹窗）。
 //! 窗内只有三级结构：标题栏 / 主体 / 状态栏。主体是两级嵌套的可拖拽分栏组
-//! （官方 resizable 面板组）：内层 `main-split` = 左侧边栏 | 终端，
+//! （官方 resizable 面板组）：内层 `main-split` = 左侧边栏 | 中间列，
 //! 外层 `right-split` = 内层 | 右侧边栏；弹窗层也在此装配。
+//! 中间列里的**终端区**额外包了一层 dock（[`terminal_panel`]，gpui-kit `DockArea`
+//! 的 center）——侧边栏不进 dock，仍由上面的分栏面板管宽度与折叠。
 //!
 //! 折叠规则：**左侧边栏折叠**时，它连同活动栏图标一起让位给终端
 //! （图标由状态栏按折叠状态显示 / 隐藏）；**右侧边栏折叠**时整块让位给终端。
@@ -44,7 +46,7 @@ mod welcome;
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, Hsla,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _, WeakEntity, Window,
+    ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
     WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use gpui_kit::{
@@ -52,6 +54,7 @@ use gpui_kit::{
     component::{
         ActiveTheme as _, Root, Sizable as _, Theme, ThemeMode, TitleBar,
         button::{Button, ButtonVariants as _},
+        dock::{DockArea, DockEvent, TabGroup},
         h_flex,
         resizable::{ResizableState, h_resizable, resizable_panel},
         v_flex,
@@ -65,6 +68,8 @@ use sidebar_panel::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SidebarView,
 };
 use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
+use tab_bar::TerminalDockSkin;
+use terminal_panel::SessionPane;
 
 /// 应用（或切换）界面主题，并重新压上我们的主题覆盖。
 ///
@@ -179,24 +184,24 @@ pub(crate) struct SessionRequest {
     pub(crate) target: SessionTarget,
 }
 
-/// 一个终端会话：终端视图 + 显示名 + 连接目标。
+/// 一个终端会话：终端视图 + 它在 dock 里的面板。
 ///
-/// 之所以不直接用 `TerminalView::title()`：它的标题来自终端通过 OSC 上报的内容，
-/// 而对话框里的「名称」是用户命名的连接名，需要优先展示（标签页 / 侧边栏 / 状态栏）。
+/// 显示名与连接目标放在面板上（标签栏要读名字，状态栏要读连接目标，放一处不会不同步）；
+/// 用户命名的连接名优先于终端自己上报的 OSC 标题。
 pub(crate) struct Session {
     pub(crate) view: Entity<TerminalView>,
-    /// 用户填写的名称；`None` 表示未填写，回退到终端自身标题。
-    pub(crate) name: Option<SharedString>,
-    /// 连接目标，供状态栏显示连接状态。
-    pub(crate) target: SessionTarget,
+    pub(crate) pane: Entity<SessionPane>,
 }
 
 impl Session {
     /// 会话显示名：优先用户命名，否则用终端标题（无标题时为「终端」）。
     pub(crate) fn title(&self, cx: &App) -> SharedString {
-        self.name
-            .clone()
-            .unwrap_or_else(|| self.view.read(cx).title())
+        self.pane.read(cx).name(cx)
+    }
+
+    /// 连接目标（状态栏「连接」一栏用）。
+    pub(crate) fn target<'a>(&self, cx: &'a App) -> &'a SessionTarget {
+        self.pane.read(cx).target()
     }
 }
 
@@ -215,14 +220,17 @@ struct AppRoot {
     sidebar_view: SidebarView,
     /// 右侧边栏是否可见（由状态栏右端的折叠开关切换）。
     right_sidebar_visible: bool,
-    /// 标签栏滚动句柄：跟踪 tabs 横向滚动，激活会话时把选中标签滚入可视区。
-    tab_scroll_handle: ScrollHandle,
-    /// 鼠标当前悬停的终端标签下标（`None` = 没有悬停任何标签）。
+    /// 终端会话的 dock（[`crate::terminal_panel`]）：一个会话 = center 里的一块面板。
     ///
-    /// 自绘标签栏（[`crate::tab_bar`]）用它决定关闭按钮是否渲染：gpui-pre 既没有
-    /// `visible_on_hover` / `invisible`，又不能只靠透明度隐藏（会留下看不见但
-    /// 仍可点击的热区），所以把悬停态存下来。
-    hovered_tab: Option<usize>,
+    /// 左右侧边栏**不在 dock 里**（仍是下面的分栏组）；没有会话时整块 dock 换成欢迎页。
+    dock: Entity<DockArea>,
+    /// dock 布局变化的订阅：会话表顺序 / 成员都要跟着 dock 走。
+    ///
+    /// 事件在 effect 阶段回调，那时 dock 的更新已结束，可以直接 `read` 它。
+    dock_layout_sub: Option<Subscription>,
+    /// 「下一个新建的会话放进哪个标签组」（标签栏 `+` 按钮设置，用一次即清空）：
+    /// `add_panel_view` 只会塞进第一个标签组，靠它才能落回用户点的那一组。
+    pending_session_group: Option<WeakEntity<TabGroup>>,
     /// 左侧边栏 / 终端分栏面板组（`main-split`）的共享状态。
     ///
     /// 实体由根视图持有（而非交给组件内部的 keyed state），这样侧边栏折叠再展开、
@@ -284,14 +292,16 @@ impl AppRoot {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let dock = Self::build_dock(window, cx);
         let mut this = Self {
             terminals: Vec::new(),
             active: 0,
             sidebar_visible: true,
             sidebar_view: SidebarView::Sessions,
             right_sidebar_visible: true,
-            tab_scroll_handle: ScrollHandle::new(),
-            hovered_tab: None,
+            dock,
+            dock_layout_sub: None,
+            pending_session_group: None,
             resize_state: cx.new(|_| ResizableState::default()),
             right_resize_state: cx.new(|_| ResizableState::default()),
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
@@ -302,10 +312,40 @@ impl AppRoot {
             monitor: SystemMonitor::new(),
             background_focus: cx.focus_handle(),
         };
+        // 会话表跟着 dock 的布局走：拖标签换位 / 拖出分屏 / 从面板菜单关掉面板，
+        // 都会在这里把顺序、成员与当前会话同步过来。
+        this.dock_layout_sub = Some(cx.subscribe_in(
+            &this.dock,
+            window,
+            |root, _, event, _window, cx| {
+                if matches!(event, DockEvent::LayoutChanged) {
+                    root.sync_sessions_with_dock(cx);
+                }
+            },
+        ));
         this.spawn_terminal(window, cx);
         // 启动状态栏指标采样（CPU / 内存 / 网络），窗口存活期间持续运行。
         Self::start_metrics_sampling(cx);
         this
+    }
+
+    /// 建立终端会话的 dock（[`crate::terminal_panel`]）。
+    ///
+    /// 布局**不锁定**：标签可拖动换位、拖到边缘能把 center 分屏（终端只进 center，
+    /// 侧边栏不进 dock）。皮肤是我们自绘的（`tab_bar`）。
+    fn build_dock(window: &mut Window, cx: &mut Context<Self>) -> Entity<DockArea> {
+        let root = cx.weak_entity();
+        let dock = cx.new(|cx| {
+            // 皮肤 = gpui-kit 的 `DockSkin` + 自绘标签栏（见 `tab_bar`）。
+            let skin = TerminalDockSkin::new(cx, root);
+            DockArea::new("terminal-dock", None, window, cx).with_renderer(skin)
+        });
+
+        dock.update(cx, |area, cx| {
+            // 不锁布局 ⇒ 标签可拖动重排 / 拖出分屏；面板由会话创建流程添加。
+            area.set_locked(false, window, cx);
+        });
+        dock
     }
 
     /// 确保两侧边栏保持各自的「期望宽度」，宽度变化全部由中间那一列吸收。
@@ -347,6 +387,11 @@ impl AppRoot {
                 });
             }
         }
+    }
+
+    /// 记下「下一个新建的会话该进哪一组」（标签栏 `+` 按钮调用）。
+    pub(crate) fn set_pending_session_group(&mut self, group: Option<WeakEntity<TabGroup>>) {
+        self.pending_session_group = group;
     }
 
     /// 把一个「需要窗口 + 需要 &mut 根视图」的操作推迟到本次窗口更新之后执行。
@@ -407,20 +452,18 @@ impl AppRoot {
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 主体：侧边栏与终端容器由各自的容器模块渲染，两者之间是可拖拽的分隔条。
-        // 活动栏已并入底部状态栏（见 `status_bar` 模块），此处不再有左侧竖栏。
+        // 主体：侧边栏与终端由各自的模块渲染，中间是可拖拽分隔条（活动栏已并入状态栏）。
 
-        // 侧边栏宽度只由用户拖拽决定：容器尺寸变化带来的按比例重排先钉回去，
-        // 免得窗口一变宽侧边栏就跟着变宽（见 `pin_sidebar_widths`）。
+        // 侧边栏宽度只由用户拖拽决定：容器尺寸变化引起的比例重排先钉回去。
         self.pin_sidebar_widths(window, cx);
 
-        // 终端容器：所有标签页关闭后整个容器一起关闭（标签栏 / 终端全部消失）。
-        let terminal_container = (!self.terminals.is_empty())
-            .then(|| self.render_terminal_container(cx));
-
-        // 中间列 = 终端区（标签页全关时显示欢迎页）+ **公共状态栏**（常驻不消失）。
-        // 底部三块状态栏的宽度就是各自列的宽度：两边的状态栏随侧边栏一起宽窄变化
-        // （它们在各自的侧边栏容器里，见 `sidebar_panel`），中间这块铺满中间列。
+        // 中间列 = 终端 dock + 公共状态栏（常驻）；状态栏在 dock 外面，
+        // 没有会话时整块 dock 换成欢迎页。
+        let terminal_area = if self.terminals.is_empty() {
+            self.render_welcome(cx)
+        } else {
+            self.dock.clone().into_any_element()
+        };
         let mid_column = v_flex()
             .h_full()
             .w_full()
@@ -431,19 +474,13 @@ impl Render for AppRoot {
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
-                    // 没有会话 = 中间容器整体关闭，改显示欢迎页（`welcome` 模块）。
-                    .child(
-                        terminal_container
-                            .unwrap_or_else(|| self.render_welcome(cx)),
-                    ),
+                    .child(terminal_area),
             )
             .child(self.render_status_bar(cx))
             .into_any_element();
 
-        // 主体分两级装配（见 `AppRoot::right_resize_state` 的说明：两组面板各自持有
-        // 宽度，互不干扰）：
-        //   内层 `main-split`：左侧边栏 | 中间列（左侧不可见时中间列直接铺满）
-        //   外层 `right-split`：内层 | 右侧边栏（右侧不可见时只渲染内层）
+        // 两级嵌套分栏（两组面板各自持有宽度，互不干扰）：
+        //   main-split = 左侧边栏 | 中间列；right-split = 内层 | 右侧边栏
         let center = if self.sidebar_visible {
             h_resizable("main-split")
                 // 绑定根视图持有的状态实体：侧边栏折叠再展开后宽度不会丢失。
