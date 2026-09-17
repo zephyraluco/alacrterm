@@ -420,6 +420,30 @@ themes/*.json ──(config::preload_themes: ThemeRegistry::load_themes_from_str
   { "dark_theme": "Catppuccin Mocha", "light_theme": null }
   ```
 
+- ⚠️ **换模式/配色时两个窗口必须同一帧变色:主题开关不能带动画**(2026-09-17 修「设置界面和
+  主界面切换主题时有延迟、不同步」):gpui-pre-windows 在某个窗口连续重绘期间会**丢掉**另一个
+  窗口的绘制请求——`gpui-pre/src/window.rs` 的 `on_request_frame` 回调开头
+  `if draw_in_progress() { …ValidateRect(handle); return }`(注释说"平台会重新失效,最多晚一个
+  vsync"),而 Windows 后端**没有** `frame_waker` / `schedule_frame`(用 trait 默认的
+  `None` / 空实现),被丢掉的请求只能等下一次 `WM_PAINT`(由 vsync 线程 `RedrawWindow` 触发)
+  重来。于是设置窗口里「深色主题」开关的**弹簧把手动画**(`component/src/switch.rs` 的
+  `spring((id, "thumb"), …)`,取自 `cx.theme().motion_tokens().spring_move`)一跑,
+  主窗口就被饿死:
+  - 实测(120Hz,`target/settings_probe.ps1` + 临时在 `AppRoot::render` / `SettingsWindow::render`
+    打时间戳):点一次主题开关,设置窗口在 250ms 内连画 **31 帧**(每 8.3ms 一帧),
+    **主窗口这 250ms 一帧都没画**,动画结束后 8ms 才补上 ⇒ 就是用户看到的"主界面慢半拍"。
+  - 对照实验:`cx.set_reduce_motion(true)`(弹簧瞬时到位)⇒ 设置窗口只画 1 帧、主窗口 **12ms**
+    后跟着画;把主题切换换成定时器触发(没有点击)也一样,说明与输入无关;
+    **动画中途再补一次 `cx.refresh_windows()` 无效** ⇒ 丢帧在平台层,不是 effect 队列的问题。
+  - 修法:「深色主题」不走 `SettingField::switch`,改用 `settings_window.rs::theme_mode_switch`
+    ——`SettingField::render` + **同一个 `Switch` 组件**(外观/尺寸/禁用态一致),但把
+    **element id 绑上当前模式**(`("theme-mode-switch", usize::from(dark))`):换模式 = 换一把新
+    id = 弹簧状态新建时 `at_rest_on_target` 直接返回(`base/src/motion.rs:573` 的提前分支)
+    ⇒ **没有动画**,两个窗口在同一帧变色。实测点开关后设置窗口 +1ms、主窗口 **+23ms** 重绘
+    (修前 255ms)。⚠️ 代价只有这一项开关的把手不再滑动(主题切换本就是整屏跳变);
+    侧边栏折叠、弹窗等其它动画不受影响。「深色/浅色模式配色」下拉框那条路径实测 +17ms,
+    不需要处理。
+
 - **文件格式**:每个文件是一个 `ThemeSet`(`{ name, author, themes: [ThemeConfig, ...] }`),
   **一个文件可含多套主题**(深浅变体),所以选择用的是文件内 `themes[].name`
   (如 `"Catppuccin Mocha"`),与文件名无关。

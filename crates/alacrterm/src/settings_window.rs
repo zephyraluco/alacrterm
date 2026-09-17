@@ -30,11 +30,12 @@ use gpui::{
     WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Root, ThemeMode, TitleBar, h_flex,
+    ActiveTheme as _, Disableable as _, Icon, Root, Sizable as _, ThemeMode, TitleBar, h_flex,
     setting::{
         AnySettingField, NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
         Settings,
     },
+    switch::Switch,
     v_flex,
 };
 use terminal_view::RenderSettings;
@@ -90,27 +91,8 @@ impl SettingsWindow {
             .group(
                 SettingGroup::new()
                     .item(
-                        SettingItem::new(
-                            "深色主题",
-                            SettingField::switch(
-                                // 以全局 Theme 为唯一状态来源。
-                                |cx: &App| cx.theme().mode.is_dark(),
-                                |val: bool, cx: &mut App| {
-                                    let mode = if val {
-                                        ThemeMode::Dark
-                                    } else {
-                                        ThemeMode::Light
-                                    };
-                                    // 统一入口：应用主题并重新压下分栏拖拽条
-                                    // 线条的透明覆盖（见 `crate::change_theme`）。
-                                    // 传 `None` 时不会自动刷新窗口，需手动刷新
-                                    // 所有窗口（含本设置窗口）。
-                                    crate::change_theme(mode, cx);
-                                    cx.refresh_windows();
-                                },
-                            ),
-                        )
-                        .description("切换深色 / 浅色界面主题，与终端背景保持一致。"),
+                        SettingItem::new("深色主题", theme_mode_switch())
+                            .description("切换深色 / 浅色界面主题，与终端背景保持一致。"),
                     )
                     .item(
                         SettingItem::new("深色模式配色", theme_dropdown(cx, ThemeMode::Dark))
@@ -268,6 +250,36 @@ impl SettingsWindow {
                     )),
             )
     }
+}
+
+/// 「深色主题」开关。
+///
+/// ⚠️ 不用 `SettingField::switch`：它的把手是弹簧动画，而 gpui-pre-windows 在某个窗口
+/// 连续重绘期间会**丢掉**另一个窗口的绘制请求 ⇒ 动画的那 250ms 里主窗口完全不重绘
+/// （观感就是「主界面慢半拍」）。这里把 element id 绑上当前模式：换模式 = 换一把新 id
+/// = 弹簧状态新建即已就位，因此没有动画、两个窗口同一帧一起变色。外观与其它开关完全
+/// 一致（同一个 `Switch` 组件）。机制与实测见 `docs/terminal-architecture.md`。
+fn theme_mode_switch() -> SettingField<SharedString> {
+    SettingField::render(move |options, _window, cx| {
+        let dark = cx.theme().mode.is_dark();
+        Switch::new(("theme-mode-switch", usize::from(dark)))
+            .checked(dark)
+            .disabled(options.is_disabled())
+            .with_size(options.size())
+            .on_click(move |next: &bool, _window, cx| {
+                let mode = if *next {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                };
+                // 统一入口：应用主题并重新压下分栏拖拽条线条的透明覆盖
+                // （见 `crate::change_theme`）；`None` 窗口参数不会自动刷新，
+                // 需手动刷新所有窗口（含本设置窗口）。
+                crate::change_theme(mode, cx);
+                cx.refresh_windows();
+            })
+            .into_any_element()
+    })
 }
 
 /// 主题下拉框：值 = 注册表里的主题名，空串 = 跟随 gpui-kit 内置主题。
