@@ -24,12 +24,8 @@
 //! 主题是全局状态（`Theme::global`），因此设置窗口与主窗口共享同一套配色，
 //! 切换深浅色后需要 `cx.refresh_windows()` 让所有窗口（含本窗口）重绘。
 
-use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Context, FontWeight, IntoElement,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, FontWeight, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
     WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
@@ -151,57 +147,91 @@ impl SettingsWindow {
                             )
                         },
                     ))
-                    .item(number_item(
-                        &self.app_root,
+                    .item(render_item(
                         "字号",
                         "终端字体大小（逻辑像素），6 ~ 48。",
-                        NumberFieldOptions {
-                            min: 1.0,
-                            max: 48.0,
-                            step: 1.0,
+                        {
+                            let root = self.app_root.clone();
+                            SettingField::number_input(
+                                NumberFieldOptions {
+                                    min: 6.0,
+                                    max: 48.0,
+                                    step: 1.0,
+                                },
+                                |cx: &App| {
+                                    config::as_number(config::settings(cx).render.font_size.as_f32())
+                                },
+                                move |value: f64, cx: &mut App| {
+                                    update_render(&root, cx, |render| render.font_size = px(value as f32));
+                                },
+                            )
                         },
-                        (6.0, 48.0),
-                        |render| render.font_size.as_f32(),
-                        |render, value| render.font_size = px(value),
                     ))
-                    .item(number_item(
-                        &self.app_root,
+                    .item(render_item(
                         "字重",
                         "100 ~ 900，常用 400（常规）/ 700（粗体）。",
-                        NumberFieldOptions {
-                            min: 1.0,
-                            max: 900.0,
-                            step: 100.0,
+                        {
+                            let root = self.app_root.clone();
+                            SettingField::number_input(
+                                NumberFieldOptions {
+                                    min: 100.0,
+                                    max: 900.0,
+                                    step: 100.0,
+                                },
+                                |cx: &App| {
+                                    config::as_number(config::settings(cx).render.font_weight.0)
+                                },
+                                move |value: f64, cx: &mut App| {
+                                    update_render(&root, cx, |render| {
+                                        render.font_weight = FontWeight(value as f32)
+                                    });
+                                },
+                            )
                         },
-                        (100.0, 900.0),
-                        |render| render.font_weight.0,
-                        |render, value| render.font_weight = FontWeight(value),
                     ))
-                    .item(number_item(
-                        &self.app_root,
+                    .item(render_item(
                         "行高倍数",
                         "行高 = 字号 × 该倍数，0.8 ~ 2.5（小于 1.0 会重叠）。",
-                        NumberFieldOptions {
-                            min: 0.1,
-                            max: 2.5,
-                            step: 0.05,
+                        {
+                            let root = self.app_root.clone();
+                            SettingField::number_input(
+                                NumberFieldOptions {
+                                    min: 0.8,
+                                    max: 2.5,
+                                    step: 0.05,
+                                },
+                                |cx: &App| {
+                                    config::as_number(config::settings(cx).render.line_height_multiplier)
+                                },
+                                move |value: f64, cx: &mut App| {
+                                    update_render(&root, cx, |render| {
+                                        render.line_height_multiplier = value as f32
+                                    });
+                                },
+                            )
                         },
-                        (0.8, 2.5),
-                        |render| render.line_height_multiplier,
-                        |render, value| render.line_height_multiplier = value,
                     ))
-                    .item(number_item(
-                        &self.app_root,
+                    .item(render_item(
                         "最小对比度",
                         "APCA 最小对比度 Lc（0 = 关闭），0 ~ 106；过低的前景色会被抬亮。",
-                        NumberFieldOptions {
-                            min: 0.0,
-                            max: 106.0,
-                            step: 5.0,
+                        {
+                            let root = self.app_root.clone();
+                            SettingField::number_input(
+                                NumberFieldOptions {
+                                    min: 0.0,
+                                    max: 106.0,
+                                    step: 5.0,
+                                },
+                                |cx: &App| {
+                                    config::as_number(config::settings(cx).render.minimum_contrast)
+                                },
+                                move |value: f64, cx: &mut App| {
+                                    update_render(&root, cx, |render| {
+                                        render.minimum_contrast = value as f32
+                                    });
+                                },
+                            )
                         },
-                        (0.0, 106.0),
-                        |render| render.minimum_contrast,
-                        |render, value| render.minimum_contrast = value,
                     ))
                     .item(render_item(
                         "光标形状",
@@ -270,105 +300,6 @@ fn render_item(
     field: impl AnySettingField + 'static,
 ) -> SettingItem {
     SettingItem::new(title, field).description(description)
-}
-
-/// 造一个数字类的终端渲染参数项。
-///
-/// ⚠️ **组件的 `widget.min` 故意放到 1（只挡负数），它只是「能打出字」的下限**：
-/// gpui-component 的 `NumberField`（`setting/fields/number.rs`）在**每次按键**就
-/// `value.clamp(min, max)`，并且只要钳动过就把输入框的文本**改写**成钳后的值：
-/// `min = 100`（字重）时你敲下的 `2`、`20` 会被当场换成 `100`，后面敲的字符只能接在
-/// `100` 后面 ⇒ 永远打不出 `200`（粘贴整串却能成功，因为一次 Change 的值就是完整的）。
-/// `max` 取真实上限，因为超出上限被钳回上限正是想要的行为。
-///
-/// 真正的范围由 [`type_render`] 在提交时钳，见那里的说明。
-fn number_item(
-    root: &WeakEntity<AppRoot>,
-    title: &'static str,
-    description: &'static str,
-    widget: NumberFieldOptions,
-    range: (f32, f32),
-    read: impl Fn(&RenderSettings) -> f32 + 'static,
-    write: impl Fn(&mut RenderSettings, f32) + 'static,
-) -> SettingItem {
-    let root = root.clone();
-    // 两个闭包会被「取值」「设值」「去抖提交」三处用到，用 `Rc` 共享。
-    let read: Rc<dyn Fn(&RenderSettings) -> f32> = Rc::new(read);
-    let write: Rc<dyn Fn(&mut RenderSettings, f32)> = Rc::new(write);
-    let read_value = read.clone();
-    let read_commit = read.clone();
-    let write_commit = write.clone();
-
-    render_item(
-        title,
-        description,
-        SettingField::number_input(
-            widget,
-            move |cx: &App| config::as_number(read_value(&config::settings(cx).render)),
-            move |input: f64, cx: &mut App| {
-                type_render(
-                    &root,
-                    cx,
-                    range,
-                    input as f32,
-                    read_commit.clone(),
-                    write_commit.clone(),
-                );
-            },
-        ),
-    )
-}
-
-/// 数字框输入的提交（去抖）窗口：连着敲键只提交最后一次。
-const NUMBER_COMMIT_DELAY: Duration = Duration::from_millis(350);
-
-/// 最新一次输入的代次，用来判断去抖回调是否已被后续输入取代。
-static COMMIT_GENERATION: AtomicU64 = AtomicU64::new(0);
-
-/// 处理数字框里的一次输入（每次按键都会调到这里）。
-///
-/// 两步：
-/// ① **原样**写进全局 —— 绝不能在这里钳：组件渲染时会比对自己记的 `initial_value`
-///    与取值闭包读到的值，一旦不相等就**把输入框文本改写成全局值**。于是「钳」或
-///    「跳过」都会把用户刚敲下的 `2` 抹成旧值（实测：拖选 `100` 后敲 `2` 会立刻变回
-///    `100`，后续的 `0`、`0` 就接在了 `100` 后面 ⇒ 得到 `900`）；
-/// ② 等 [`NUMBER_COMMIT_DELAY`] 再把**钳进 `range`** 的值推给存活会话并落盘 ——
-///    去抖能避免「字号敲到一半发 `1` 给 PTY」这种退化尺寸，也免得每敲一键写一次文件。
-///
-/// 代价：全局（即输入框显示）保留用户原样输入，所以把**超范围**的数字留在框里不动时，
-/// 文件与终端用的是钳后的值（各字段的 `description` 里已经写明范围）。
-fn type_render(
-    root: &WeakEntity<AppRoot>,
-    cx: &mut App,
-    range: (f32, f32),
-    input: f32,
-    read: Rc<dyn Fn(&RenderSettings) -> f32>,
-    write: Rc<dyn Fn(&mut RenderSettings, f32)>,
-) {
-    {
-        let mut render = config::settings(cx).render.clone();
-        write(&mut render, input);
-        config::settings_mut(cx).render = render;
-    }
-
-    let generation = COMMIT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let root = root.clone();
-    cx.spawn(async move |cx: &mut AsyncApp| {
-        cx.background_executor().timer(NUMBER_COMMIT_DELAY).await;
-        if COMMIT_GENERATION.load(Ordering::SeqCst) != generation {
-            // 之后又敲了键：交给那一次的提交，本次作废（否则会把中间态写进文件）。
-            return;
-        }
-        let _ = root.update(cx, |root, cx| {
-            let render = config::settings(cx).render.clone();
-            let clamped = read(&render).clamp(range.0, range.1);
-            let mut committed = render;
-            write(&mut committed, clamped);
-            config::save_render_settings(&committed);
-            root.apply_render_settings(committed, cx);
-        });
-    })
-    .detach();
 }
 
 /// 光标形状下拉框的候选项：值用的就是配置文件里的写法（与 `config` 里的

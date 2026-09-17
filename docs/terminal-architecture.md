@@ -236,7 +236,7 @@ struct SessionRequest { name: Option<SharedString>, shell: Shell, target: Sessio
 - **入口有两个**:主窗口标题栏右侧的文字按钮「设置」,以及快捷键 `Ctrl+,`(经 `actions::OpenSettings`,绑在 `None` context 上——焦点在终端里也能触发;`main` 建窗时 `cx.bind_keys` 注册)
 - 内容为 gpui-kit `Settings` 组件,分**两页**(左侧导航 / 搜索框由组件自绘):
   - **主题** ← 深浅模式开关 + 「深色模式配色」「浅色模式配色」两个下拉框(列出 `themes/` 里该模式的主题 + 首项「跟随 gpui-kit(默认)」)
-  - **终端** ← 字体 / 字号 / 字重 / 行高倍数 / 最小对比度 / 光标形状 / 光标闪烁(四个数字字段是自建字段,原因见下一节)
+  - **终端** ← 字体 / 字号 / 字重 / 行高倍数 / 最小对比度 / 光标形状 / 光标闪烁(四个数字字段用内置的 `SettingField::number_input`,见下一节)
 - **组件铺满客户区**(用户要求):外层只留 `flex_1().min_h_0()` 的布局壳,**不要 `p_*`**——
   组件自己的导航栏 / 页面各自有留白,外面再包一圈会让整块与窗口边缘隔出一道缝。
   实测:去掉 `p_4()` 后导航栏底色从 x=29 提前到 x=9(即客户区起点,窗口边框 x=0..8 是
@@ -271,18 +271,22 @@ Entity**,所以可配置项必须放在 gpui `Global` 里(`config::Settings`,含
   `config/app.json` 选中的 `Catppuccin Mocha` + `font_size: 18` 都照旧生效
   (标签栏 `#0B0B11`、终端区亮像素 4416,介于 15 与 20 之间)✓
 
-#### 数字字段为什么不用 `SettingField::number_input`
+#### 数字字段:直接用 `SettingField::number_input`(上游已修)
 
-设置页的四个数字字段(字号 / 字重 / 行高倍数 / 最小对比度)走**自建字段**
-(`settings_window.rs::number_item` + `NumberFieldState`),不用 gpui-kit 内置的
-`SettingField::number_input`。原因是上游 `NumberField`
-(`gpui-component/src/setting/fields/number.rs`)有两处行为不可用:
+设置页的四个数字字段(字号 / 字重 / 行高倍数 / 最小对比度)直接写 gpui-kit 内置的
+`SettingField::number_input`(`settings_window.rs` 的「终端」页,与其他字段一样包一层
+`render_item`),`min` / `max` / `step` 各写一次;取值闭包 `config::as_number(…)`、
+设值闭包走 `update_render`(全局 → 落盘 → 推给存活会话),所以每敲一键即时生效
+(输入期间允许越界中间态,终端拿到的是钳过的值)。没有 `number_item` 之类的包装函数。
 
-1. **`NumberFieldOptions::step` 无效**:`InputState` 造出来时 `number_step` 已是
+⚠️ 曾经不能用:gpui-kit **0.6.0(crates.io 版)** 的 `NumberField`
+(`crates/component/src/setting/fields/number.rs`)有两处行为不可用:
+
+1. **`NumberFieldOptions::step` 是死代码**:`InputState` 造出来时 `number_step` 已是
    `Some(Fixed(1.))`(`gpui-base/src/input/base/state.rs` 的 `new_in_mode`),
    于是 `apply_number_step` 自己步进并 `return`,**不会**发 `NumberInputEvent::Step`
-   ——而组件只在那个事件的 handler 里读 `options.step`(死代码)。实测:字重 `step: 100`
-   点一次 `+`,400 → **401**;行高 `step: 0.05`,1.3 → **2.3**。
+   ——组件只在那个事件的 handler 里读 `options.step`。实测:字重 `step: 100` 点一次 `+`,
+   400 → **401**;行高 `step: 0.05`,1.3 → **2.3**。
 2. **钳制发生在每次按键**:组件在 `InputEvent::Change` 里做
    `value.clamp(min, max)` → 写设置 → `input.set_value(钳后文本)`,而
    `set_value` 会把光标留在文本末尾 ⇒ 下一个按键是**追加**。于是 min 高一点的字段
@@ -291,27 +295,18 @@ Entity**,所以可配置项必须放在 gpui `Global` 里(`config::Settings`,含
    的文档写明「输入期间允许越界,失焦才钳」,但它只在设过 `number_min/max` 时才生效,
    而 `NumberField` 从没设过。
 
-自建字段的做法(`number_item(title, description, (min, max, step), root, get, set)`):
+修复在上游(`longbridge/gpui-kit` commit `d604a2ac` *setting: Fix delegate number step and
+clamp to InputState*,#3099):`step` / `min` / `max` 现在直接设到 `InputState`
+(`set_step` / `set_min` / `set_max`),**输入期间允许越界中间态、失焦才钳**;
+`Change` 只把**钳过的副本**交给设置(并同步它自己的 `initial_value`),**绝不改写输入框文本**
+——不可解析的中间态(`-` / 空串 / `1.`)原样留着等下一个按键补完。因此 `Cargo.toml` 里
+`gpui-kit` 从 crates.io 的 `0.6` 换成 **git main**(`gpui-kit = { git = "…/gpui-kit", … }`),
+由 `Cargo.lock` 锁到含该修复的修订;换回 crates.io 版本会把这套毛病一并换回来。
 
-- 用 `SettingField::render(|options, window, cx| …)` 换掉内置字段,状态放
-  `window.use_keyed_state("number-field-{page}-{group}-{item}")`(key 必须含三项序号,
-  否则同页多个字段会抢同一个 state),内含 `Entity<InputState>`、`committed: f64`
-  与订阅;
-- `InputState::new(window, cx).default_value(…).step(step).min(min).max(max)`——step/min/max
-  交给输入框自己:步进走 `step_value(..)`(还会保留小数位、到边界时不动),
-  输入期间允许越界中间态,失焦时由 `clamp_number_value` 收口;
-- 订阅 `InputEvent::Change` / `Blur`,**只把「钳过的副本」提交给配置,绝不改动输入框文本**;
-  回调里用 `cx.defer_in` 延后一拍再碰输入框(订阅回调可能就发生在它的可变借用里);
-- 反向同步(外部改值 → 回写文本)用 `committed` 做守卫:只有传进来的值 ≠ 上次提交的值
-  才 `set_value`,否则会把用户正在输入的中间态顶掉;失焦时若框里是空 / 不可解析的内容,
-  补回 `committed`。
+历史绕行(已删除,不要再照抄):`type_render` + 350ms 去抖提交;更早还有
+`SettingField::render` + 自建 `NumberFieldState`(`Entity<InputState>` + `committed` 守卫)。
 
-实测(125% DPI,`target/settings_probe.ps1`):字重选中 `400` 输入 `200` ⇒
-`config/terminal.json` 的 `font_weight` = **200.0**(旧实现 900);字号选中 `16` 输入 `12` ⇒
-`font_size` = **12.0**(旧实现 `6` → `48`);点 `+`:字重 400 → **500**(step 100)、
-行高 1.3 → **1.35**(step 0.05)✓。上游修好 `NumberField` 后可以直接换回内置字段。
-
-⚠️ 探针为此加了 `-Drag 'x1,y1;x2,y2'`:用 PostMessage 发
+⚠️ 探针里的 `-Drag 'x1,y1;x2,y2'`:用 PostMessage 发
 `WM_MOUSEMOVE + LEFTDOWN + 多步 MOVE(MK_LBUTTON) + LEFTUP` 做拖拽选择,用于选中输入框里
 的旧值再覆写——`Ctrl+A` / `Backspace` 这类**走动作派发**的键用 PostMessage 送不进去。
 
