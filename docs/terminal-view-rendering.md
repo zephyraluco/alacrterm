@@ -1,6 +1,6 @@
 # terminal_view 渲染原理分析
 
-> 生成日期:2026-08-06(更新于 2026-08-09)
+> 生成日期:2026-08-06(更新于 2026-08-09;2026-09-19 补 §7.4 拖选完整时序)
 > 分析对象:`crates/terminal_view`(从 Zed 的 `terminal_view` crate 移植精简的独立视图 crate)
 > 文件结构:`src/lib.rs`(TerminalView 生命周期/输入)、`src/terminal_element.rs`(三阶段渲染管线核心)、`src/contrast.rs`(APCA 对比度)
 > 关联:`crates/terminal`(Terminal 实体)与 `docs/terminal-architecture.md`
@@ -499,6 +499,46 @@ impl InputHandler for TerminalInputHandler {
 - 鼠标模式(应用开启 SGR/UTF8 鼠标协议):事件编码为转义序列写回 PTY;`register_mouse_listeners` 仅在 `mode.intersects(Modes::MOUSE_MODE)` 时注册中/右键的按下与抬起处理
 - Alt 悬停:节流刷新超链接检测(`FindHyperlink`),命中时 `paint` 阶段设置 `PointingHand` 光标样式
 
+### 7.4 拖选(框选)的完整时序
+
+拖选是**唯一一条「输入改状态」与「重绘」分属两跳的路径**:鼠标事件由 `TerminalElement` 收下并**直接调用模型** `Terminal::mouse_*`,而选区真正生效要等下一帧 `prepaint → Terminal::sync` 消费内部事件队列。因此这里涉及**两座桥**,缺一不可:
+
+| 桥 | 位置 | 作用 |
+|---|---|---|
+| 通知桥 `observe` | `TerminalView::new` 里 `cx.observe(&terminal, \|_, _, cx\| cx.notify())` | 把 `mouse_drag` 里打在 **`Terminal` 实体**上的 `cx.notify()` 变成「**本视图重绘**」⇒ 队列才会被 `sync` 消费 |
+| 事件桥 `subscribe` | `lib.rs:147` `cx.subscribe(&terminal, ..)` → `handle_terminal_event`(`lib.rs:222`) | 收 `Event::Wakeup` / `SelectionsChanged` ⇒ `cx.notify()`(`lib.rs:228`) |
+
+⚠️ **只挂 `subscribe`、不挂 `observe`** 是曾经的真实 bug(已修):`subscribe` 收的是 **`Event`**,收不到 **`notify`**,于是「排了队列但没人重绘」⇒ 队列要等光标闪烁 / 输出等别的重绘才被顺带消费。实测(release,125% DPI,1393×884,填屏后真实拖选)选区每秒只更新 **2~4 次**(明显一卡一卡),补上 `observe` 后恢复到 **43~54 次/秒**(≈帧率,跟手)。早期 `TerminalView` 是根视图的**非缓存**子视图,任何一帧都会重新 `render` 从而顺带 `sync`,把这个缺陷掩盖了;换成 dock 的 `.cached(...)` 面板后才暴露出来。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as 鼠标输入
+    participant E as TerminalElement<br/>(视图的渲染产物)
+    participant T as Terminal（模型）
+    participant V as TerminalView
+
+    M->>E: MouseMove（按下状态）+ on_mouse_down
+    E->>T: terminal.mouse_drag(e, ..)
+    T->>T: 排 InternalEvent::UpdateSelection（terminal.rs:2015 附近）
+    E->>T: cx.notify()  ← 通知打给 Terminal
+    Note over V,T: 下一帧
+    T-->>V: observe 收到通知 → V 自己 cx.notify()
+    V->>V: TerminalView::render → TerminalElement::prepaint（:1180）
+    V->>T: terminal.sync(window, cx)（terminal_element.rs:1291）← **消费队列**
+    T->>T: process_terminal_event(UpdateSelection) → 真改了选区
+    T-->>V: cx.emit(Event::SelectionsChanged)（terminal.rs:1341）
+    V->>V: subscribe 收到 → handle_terminal_event → cx.notify()（lib.rs:228）→ 把新选画画出来
+```
+
+**要点归纳**
+
+1. **输入是「元素 → 模型」**,不是「视图 → 模型」:`TerminalElement`(属于视图侧)直接调 `terminal.mouse_down / mouse_drag`,同时 `cx.notify()` 打在 `Terminal` 上 —— `Terminal` 没有 `impl Render`,它的通知**只对观察者有意义**。
+2. **命令是排队的**:`SetSelection` / `UpdateSelection` / `Copy` / `Scroll` 都进 `Terminal::events`,而**唯一的消费点是 `Terminal::sync`**(`terminal.rs:1826`,`pop_front` 全仓仅此一处),由 `TerminalElement::prepaint`(`:1291`)调用 ⇒ **「鼠标操作生效」⟺「视图重绘一次」**。
+3. **两座桥都是「视图主动订阅模型」**:模型不转发、也不知道视图存在(`observe` 收 `notify`、`subscribe` 收 `Event`)。模型侧改了状态而视图侧没接到信号时,表现就是「操作没反应 / 慢半拍」。
+4. **一次拖拽事件 ≈ 一帧**:`sync` 在 `prepaint` 里发生在 `layout_grid` **之前**,所以本轮就画出新选区;`SelectionsChanged` 又触发一次 `notify`(与下一次鼠标事件的重绘合并),实测拖选期间帧率 ≈ 鼠标事件率(43~54 次/秒)。
+5. **对照:输出 / 打字 / 滚轮为什么不需要第一座桥** —— 输出走 `Event::Wakeup`(跨线程发的事件)、打字靠 PTY 回显、滚轮在 `TerminalElement::on_scroll_wheel` 里以**视图的** `Context` 调 `cx.notify()`;三者都直接落到「视图重绘」,只有拖选依赖 `observe` 这座桥。
+
 ---
 
 ## 8. 滚动
@@ -547,7 +587,8 @@ sequenceDiagram
     participant W as gpui Window
 
     Note over T,W: 每帧
-    T-->>V: Event::Wakeup / SelectionsChanged → cx.notify()
+    T-->>V: ① 事件:Event::Wakeup / SelectionsChanged(subscribe)
+    T-->>V: ② 通知:cx.notify()(observe)—— 鼠标拖选走这条
     V->>E: render() 构建元素(focus 兜底 + set_window_title)
     W->>E: request_layout(relative(1.) 撑满)
     W->>E: prepaint(bounds)
@@ -559,6 +600,8 @@ sequenceDiagram
     E->>W: content_mask → 背景 → 背景矩形 → 高亮 → 文本 → 块字符 → IME → 光标
     Note over E,W: paint 中注册 InputHandler、鼠标监听、光标样式
 ```
+
+> 鼠标拖选(框选)的逐帧细节、两座桥(observe / subscribe)的分工与踩过的坑,见 §7.4。
 
 ## 附录:渲染关键常量
 

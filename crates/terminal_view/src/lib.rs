@@ -153,8 +153,13 @@ impl TerminalView {
 
                 cx.update(|app| {
                     let _ = this.update(app, |this, cx| {
-                        this.terminal = Some(terminal);
+                        this.terminal = Some(terminal.clone());
                         this.subscription = Some(subscription);
+                        // 终端实体的**通知**也要让本视图重绘：鼠标交互（拖选 / 滚轮 / 点击）
+                        // 只排一条 `InternalEvent` + notify（通知的是 `Terminal`），而那条队列
+                        // 要等 `TerminalElement::prepaint` 里的 `sync` 才被消费 —— 视图不重绘
+                        // 就等于「拖选不跟手」。原因与实测见 `docs/terminal-architecture.md` §4.4。
+                        cx.observe(&terminal, |_, _, cx| cx.notify()).detach();
                         cx.notify();
                     });
                 });

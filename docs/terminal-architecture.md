@@ -485,6 +485,42 @@ graph LR
 
 结果缓存于 `RegexSearches`(上限 5000)。
 
+#### 交互类 `InternalEvent` 的消费时机(框选「不跟手」的根因)
+
+`mouse_down` / `mouse_drag` / `scroll_wheel` 都只做一件事:往 `Terminal::events` 队列里排一条
+`InternalEvent`(如 `UpdateSelection`)并 `cx.notify()` —— **通知的是 `Terminal` 实体,不是视图**。
+而那条队列只在 `TerminalElement::prepaint` 调用的 `Terminal::sync` 里被 `pop_front` 消费,所以
+「鼠标操作生效」的前提是 **`TerminalView` 自己也重绘**。
+
+`TerminalView::new` 里因此必须同时挂两条线:
+
+- `cx.subscribe(&terminal, ..)` —— 收 `Event::Wakeup` / `SelectionsChanged` 等**事件**;
+- `cx.observe(&terminal, |_, _, cx| cx.notify())` —— 收 Terminal 的**通知**(上面那类鼠标交互走的就是它)。
+
+实测(release,125% DPI,窗口 1393×884,命令行 `1..200 | % { "line $_" }` 填屏后真实拖选):
+
+| | 拖选期间 `SelectionsChanged` 次数/秒 | 画面 |
+|---|---|---|
+| 只有 `subscribe` | **2~4** | 选区每秒只跳 2~4 次,明显一卡一卡 |
+| 加上 `observe` | **43~54**(≈ 帧率) | 选区跟手 |
+
+**为什么「改用 dock 之后才卡」**:dock 面板走 `panel.cached(...)`,`TerminalView` 不再是根视图的
+非缓存子视图 —— 早先任何一帧都会重新 render 从而顺带 `sync`,把这个缺陷掩盖了。
+
+#### 顺带量到的每帧成本(排查同类问题的参照)
+
+一次完整重绘(整窗口重建元素树 + 布局 + prepaint + paint + DirectX 提交)在 125% DPI、
+1393×884、`1..200` 填屏时的实测值:
+
+| 构建 | 每帧 CPU | 其中 UI 元素阶段 | 其中终端元素 |
+|---|---|---|---|
+| debug(`opt-level=0`) | ~12ms | ~7.5ms | prepaint 0.5ms + paint 0.8ms |
+| release | ~4ms | ~0.85ms | — |
+
+结论:终端本身不是瓶颈;贵的是「每帧把整棵树重建一遍」,dock 又比 dock 之前的直接挂载每帧多约
+3ms(debug 实测,多出 DockArea/TabGroup/content_frame/`overflow_y_scroll` 容器/cached 包装这几层)。
+想再优化,方向是把每帧不变的子树(侧边栏 / 状态栏 / 标题栏)做成 entity + `.cached(...)`。
+
 ### 4.5 标题 / 进程信息(`pty_info.rs`)
 
 - `ProcessIdGetter`:Unix 用 `tcgetpgrp` 取前台进程组;Windows 用 `GetProcessId(handle)`,为 0 时回落 `fallback_pid`
