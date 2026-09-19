@@ -24,9 +24,9 @@
 use gpui::{AnyElement, App, Context, IntoElement, ParentElement as _, Pixels, Styled as _, div, px};
 use gpui_kit::component::{ActiveTheme as _, h_flex, status_bar::StatusBar};
 
-use crate::AppRoot;
 use crate::status_metrics::{SessionMetrics, format_bytes, format_rate};
-use crate::SessionTarget;
+use crate::terminal_panel::SessionTarget;
+use crate::AppRoot;
 
 /// 三条状态栏统一的高度。
 ///

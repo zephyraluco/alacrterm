@@ -19,7 +19,7 @@
 //!
 //! ⚠️ **界面主题默认不启用任何导入的主题**：与 gpui-kit 开箱行为一致，用它的内置
 //! `Default Dark` / `Default Light`（`config/app.json` 里没写主题名就是这样）。
-//! 换主题必须走 [`set_theme`]，它内部再调 [`crate::change_theme`]——只 `Theme::change`
+//! 换主题必须走 [`set_theme`]，它内部再调 [`change_theme`]——只 `Theme::change`
 //! 会把 `sidebar_border` 的透明覆盖冲掉。
 
 use std::collections::HashMap;
@@ -392,7 +392,7 @@ pub(crate) fn load_themes(cx: &mut App) {
     // 主题文件里写 `sidebar.border` 会在热重载后画出来）。
     cx.observe_global::<ThemeRegistry>(|cx| {
         let mode = Theme::global(cx).mode;
-        crate::change_theme(mode, cx);
+        change_theme(mode, cx);
     })
     .detach();
 
@@ -458,10 +458,45 @@ pub(crate) fn theme_options(cx: &App, mode: ThemeMode) -> Vec<(SharedString, Sha
     options
 }
 
+/// 应用（或切换）界面主题，并重新压上我们的主题覆盖。
+///
+/// 配色默认与 gpui-kit 开箱一致（内置 `Default Dark` / `Default Light`）；用哪套由
+/// `config/app.json` 决定（设置窗口的「主题」页可改）——**换主题走 [`set_theme`]**，
+/// 它选好主题后调本函数投影。
+///
+/// **分栏边界的那条竖线统一由拖拽条（`ResizeHandle`）来画**：它静止时会在边界处
+/// 画一条 1px 线，`h_full` 贯穿整列（含两侧状态栏行）。所以我们要做的是**反方向**的
+/// 覆盖——把侧边栏组件自己那条边框关掉：`Sidebar` 内部固定 `Side::Left → border_r_1()`
+/// / `Side::Right → border_l_1()`，颜色取 `cx.theme().sidebar_border`（默认 = `border`，
+/// 与拖拽条同色）。把它置为透明后，左右边界就只剩拖拽条那一条线，宽度天然一致。
+///
+/// ⚠️ 只做一次不够：`Theme::change()` 会把整套配色**投影**回主题 global（包含
+/// `sidebar_border`，也会盖掉主题文件里的 `sidebar.border`），所以**每次**换主题、
+/// 以及主题文件热重载后都要重新压（见 [`load_themes`] 里的全局观察者）。
+/// 设置窗口的深浅色开关已经改走本函数，以后新增换主题的地方也必须走它。
+///
+/// ⚠️ 副作用：`sidebar_border` 还兼作侧边栏菜单「嵌套项缩进导线」的颜色
+/// （gpui-component `sidebar/menu.rs`），它也会一起变成透明。
+///
+/// **列表选中色改用 `accent`**：gpui-kit 的 `ListItem`（会话树的行）默认用
+/// `list_active` 画选中底色，而本仓库的 Hybrid Dark 把它压到了 6% 不透明度
+/// （`list.active.background = #15678a10`，见 `themes/hybrid.json`）——淡到和悬停底色
+/// 分不出来。关掉 `list.active_highlight` 后它改用 `accent`（= `#31393a`，与侧边栏
+/// 顶部选中的视图标签同色），「当前会话」才一眼可辨。副作用：表格 / 其他列表的选中
+/// 底色也会跟着变（本应用目前只有会话树用 `ListItem`）。
+///
+/// 传 `None` 作为窗口参数（与原先一致）：调用方需要自行 `cx.refresh_windows()`。
+pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
+    Theme::change(mode, None, cx);
+    let theme = Theme::global_mut(cx);
+    theme.sidebar_border = Hsla::transparent_black();
+    theme.list.active_highlight = false;
+}
+
 /// 选定某个模式（深 / 浅）用哪套主题，`None` = 跟随 gpui-kit 内置主题。
 ///
 /// 一次做完三件事：挂到 `Theme` 的槽位、记进全局 [`Settings`]、写回 `config/app.json`；
-/// 最后走 [`crate::change_theme`] 重新投影——**换主题必须走它**，否则
+/// 最后走 [`change_theme`] 重新投影——**换主题必须走它**，否则
 /// `sidebar_border` 的透明覆盖会被配色投影冲掉（见 `change_theme` 的说明）。
 pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut App) {
     if !apply_theme_slot(name.as_ref(), mode, cx) {
@@ -481,7 +516,7 @@ pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut Ap
 
     // 改的是「另一个模式」时也要调：`Theme::change` 顺带把覆盖压回去。
     let mode = Theme::global(cx).mode;
-    crate::change_theme(mode, cx);
+    change_theme(mode, cx);
     cx.refresh_windows();
 }
 

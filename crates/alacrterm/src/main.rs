@@ -6,11 +6,12 @@
 //! - `crates/util`          —— Shell 探测 / 路径工具（来自 Zed）
 //!
 //! 应用外壳按「左右两条侧边栏 + 一条共用状态栏」拆分为独立文件：
-//! - [`sidebar_panel`]  —— 左 / 右侧边栏（+ 顶部可拖动的视图标签与两枚折叠开关）
-//! - [`terminal_panel`] —— 中间容器：标签栏 + 终端
+//! - [`sidebar_panel`]  —— 左 / 右侧边栏（+ 顶部可拖动的视图标签与两枚折叠开关），
+//!   以及侧边栏「会话」列表的记录模型与渲染（[`sidebar_panel::sessions`]）
+//! - [`terminal_panel`] —— 中间容器：标签栏 + 终端，以及运行时句柄 [`terminal_panel::Session`]
 //! - [`welcome`]        —— 终端容器关闭后中间列的欢迎页（默认背景板）
 //! - [`status_bar`]     —— **全程序共用的唯一状态栏**（常驻窗口底部，见下）
-//! - [`connection_dialog`] —— 「新建终端」建连对话框（IP / 端口 / 名称 / 用户名 / 密码）
+//! - [`dialog`]         —— 对话框：「新建会话」（SSH 参数）/「新建文件夹」
 //! - [`settings_window`]  —— 主窗口的从属设置子窗口（非对话框）
 //! - [`status_metrics`]   —— 状态栏指标采样（连接状态 / CPU / 内存 / 网络）
 //!
@@ -21,19 +22,28 @@
 //! 中间列里的**终端区**额外包了一层 dock（[`terminal_panel`]，gpui-kit `DockArea`
 //! 的 center）——侧边栏不进 dock，仍由上面的分栏面板管宽度与折叠。
 //!
+//! **两条独立的线**（务必区分，它们是本应用最容易混淆的一对概念）：
+//! - **会话记录**（[`SessionEntry`]，侧边栏「会话」列表）：只是连接参数与分组结构
+//!   （文件夹可以嵌套，行上不显示「里面有几条」）。列表形态参考 MobaXterm：
+//!   顶层直接是用户自己建的文件夹与记录（**没有自动生成的根文件夹**）；
+//!   状态栏左下角 `+` 建文件夹、右下角 `+` 新建会话（**总是落在顶层**），
+//!   文件夹行右键可以「在这里新建会话」；双击记录才开终端。
+//! - **终端会话**（[`AppRoot::terminals`]，dock 里的标签页）：真正在跑的终端，
+//!   由标签栏的 `+`（本地终端）或双击某条记录创建，关掉标签只影响终端。
+//!
 //! 折叠规则：**左侧边栏折叠**时，它连同顶部的视图标签一起让位给终端；**右侧边栏折叠**时整块让位给终端。
 //! **终端标签页全部关闭**时中间容器消失，中间列改显示欢迎页（[`welcome`]，
-//! 见 [`AppRoot::render_welcome`]；之后可从欢迎页或左侧边栏会话条目的右键菜单
-//! 「新建终端」重新打开）。这些情况都**不影响底部状态栏**（三条状态栏常驻），
-//! 而侧边栏的「折叠 / 展开」开关与「设置」入口都在**标题栏**（右端 / 左端）：
-//! 标题栏永远在，因此不会出现「窗口全空、没有任何恢复入口」的死角。
+//! 见 [`AppRoot::render_welcome`]；之后可从欢迎页的「新建终端」或标签栏的 `+`
+//! 重新开一个本地终端，或双击侧边栏里的会话记录连远端）。这些情况都**不影响底部状态栏**
+//! （三条状态栏常驻），而侧边栏的「折叠 / 展开」开关与「设置」入口都在**标题栏**
+//! （右端 / 左端）：标题栏永远在，因此不会出现「窗口全空、没有任何恢复入口」的死角。
 
 mod actions;
 mod assets;
 mod config;
-mod connection_dialog;
 #[cfg(windows)]
 mod conpty_backend;
+mod dialog;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
@@ -43,68 +53,31 @@ mod terminal_panel;
 mod welcome;
 
 use gpui::{
-    App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, px, size,
+    App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render,
+    SharedString, Styled as _, Subscription, WeakEntity, Window, WindowBounds, WindowHandle,
+    WindowOptions, div, px, size,
 };
 use gpui_kit::{
     QuitMode,
     component::{
-        ActiveTheme as _, Root, Sizable as _, Theme, ThemeMode, TitleBar,
+        ActiveTheme as _, Root, Sizable as _, ThemeMode, TitleBar,
         button::{Button, ButtonVariants as _},
         dock::{DockArea, DockEvent, TabGroup},
         h_flex,
         resizable::{ResizableState, h_resizable, resizable_panel},
-        tree::{TreeItem, TreeState},
+        tree::{TreeState},
         v_flex,
     },
 };
-use terminal_view::TerminalView;
-use util::shell::Shell;
-
 use sidebar_panel::{
     RIGHT_SIDEBAR_DEFAULT_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH, RIGHT_SIDEBAR_MIN_WIDTH,
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SidebarTabs, SidebarView,
 };
+use sidebar_panel::sessions::{SessionEntry, SessionPath};
 use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
 use tab_bar::TerminalDockSkin;
-use terminal_panel::SessionPane;
-
-/// 应用（或切换）界面主题，并重新压上我们的主题覆盖。
-///
-/// 配色默认与 gpui-kit 开箱一致（内置 `Default Dark` / `Default Light`）；用哪套由
-/// `config/app.json` 决定（设置窗口的「主题」页可改）——**换主题走
-/// [`config::set_theme`]**，它选好主题后调本函数投影。
-///
-/// **分栏边界的那条竖线统一由拖拽条（`ResizeHandle`）来画**：它静止时会在边界处
-/// 画一条 1px 线，`h_full` 贯穿整列（含两侧状态栏行）。所以我们要做的是**反方向**的
-/// 覆盖——把侧边栏组件自己那条边框关掉：`Sidebar` 内部固定 `Side::Left → border_r_1()`
-/// / `Side::Right → border_l_1()`，颜色取 `cx.theme().sidebar_border`（默认 = `border`，
-/// 与拖拽条同色）。把它置为透明后，左右边界就只剩拖拽条那一条线，宽度天然一致。
-///
-/// ⚠️ 只做一次不够：`Theme::change()` 会把整套配色**投影**回主题 global（包含
-/// `sidebar_border`，也会盖掉主题文件里的 `sidebar.border`），所以**每次**换主题、
-/// 以及主题文件热重载后都要重新压。设置窗口的深浅色开关已经改走本函数，
-/// 以后新增换主题的地方也必须走它。
-///
-/// ⚠️ 副作用：`sidebar_border` 还兼作侧边栏菜单「嵌套项缩进导线」的颜色
-/// （gpui-component `sidebar/menu.rs`），它也会一起变成透明。
-///
-/// **列表选中色改用 `accent`**：gpui-kit 的 `ListItem`（会话树的行）默认用
-/// `list_active` 画选中底色，而本仓库的 Hybrid Dark 把它压到了 6% 不透明度
-/// （`list.active.background = #15678a10`，见 `themes/hybrid.json`）——淡到和悬停底色
-/// 分不出来。关掉 `list.active_highlight` 后它改用 `accent`（= `#31393a`，与侧边栏
-/// 顶部选中的视图标签同色），「当前会话」才一眼可辨。副作用：表格 / 其他列表的选中
-/// 底色也会跟着变（本应用目前只有会话树用 `ListItem`）。
-///
-/// 传 `None` 作为窗口参数（与原先一致）：调用方需要自行 `cx.refresh_windows()`。
-pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
-    Theme::change(mode, None, cx);
-    let theme = Theme::global_mut(cx);
-    theme.sidebar_border = Hsla::transparent_black();
-    theme.list.active_highlight = false;
-}
+use terminal_panel::Session;
 
 fn main() {
     // 必须在建第一个 PTY **之前**执行：决定 conpty.dll 命中与否（看该模块文档）。
@@ -127,8 +100,8 @@ fn main() {
             config::install(cx);
             config::load_themes(cx);
             config::apply_saved_themes(cx);
-            // 终端为深色背景，应用主题跟随使用暗色。
-            change_theme(ThemeMode::Dark, cx);
+            // 终端为深色背景，应用主题跟随使用暗色（压覆盖的细节见 `config::change_theme`）。
+            config::change_theme(ThemeMode::Dark, cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(
@@ -154,66 +127,6 @@ fn main() {
         });
 }
 
-/// 会话的连接目标：决定状态栏「连接状态」一栏显示什么。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SessionTarget {
-    /// 本地系统 shell。
-    Local,
-    /// 通过 ssh 连接的远端主机。
-    Ssh {
-        user: String,
-        host: String,
-        port: String,
-    },
-}
-
-impl SessionTarget {
-    /// 状态栏显示用的简短描述。
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Local => "本地".to_string(),
-            Self::Ssh { user, host, port } => {
-                if user.is_empty() {
-                    format!("SSH {host}:{port}")
-                } else {
-                    format!("SSH {user}@{host}:{port}")
-                }
-            }
-        }
-    }
-}
-
-/// 新建会话所需的参数（显示名 + 要启动的 shell + 连接目标）。
-pub(crate) struct SessionRequest {
-    /// 用户填写的显示名；`None` 表示回退到终端自身标题。
-    pub(crate) name: Option<SharedString>,
-    /// 要启动的 shell（本地系统 shell，或 `ssh` 等外部命令）。
-    pub(crate) shell: Shell,
-    /// 连接目标（用于状态栏展示）。
-    pub(crate) target: SessionTarget,
-}
-
-/// 一个终端会话：终端视图 + 它在 dock 里的面板。
-///
-/// 显示名与连接目标放在面板上（标签栏要读名字，状态栏要读连接目标，放一处不会不同步）；
-/// 用户命名的连接名优先于终端自己上报的 OSC 标题。
-pub(crate) struct Session {
-    pub(crate) view: Entity<TerminalView>,
-    pub(crate) pane: Entity<SessionPane>,
-}
-
-impl Session {
-    /// 会话显示名：优先用户命名，否则用终端标题（无标题时为「终端」）。
-    pub(crate) fn title(&self, cx: &App) -> SharedString {
-        self.pane.read(cx).name(cx)
-    }
-
-    /// 连接目标（状态栏「连接」一栏用）。
-    pub(crate) fn target<'a>(&self, cx: &'a App) -> &'a SessionTarget {
-        self.pane.read(cx).target()
-    }
-}
-
 /// 应用根视图：装配标题栏 + 左侧容器 + 右侧容器 + 弹窗层。
 ///
 /// 只保存两个容器共享的状态；容器各自的渲染与逻辑见
@@ -223,23 +136,34 @@ struct AppRoot {
     terminals: Vec<Session>,
     /// 当前显示的终端下标。
     active: usize,
+    /// 侧边栏「会话」列表的**条目树**（文件夹 / 记录，见 [`SessionEntry`]）。
+    ///
+    /// 顺序 = 列表里的显示顺序。只有侧边栏状态栏的 `+` / 右键菜单会往这里加条目；
+    /// 条目与 [`AppRoot::terminals`] **没有对应关系**（双击记录才按它开一个终端）。
+    session_entries: Vec<SessionEntry>,
     /// 左侧边栏是否可见（只由标题栏右端的折叠开关切换；顶部标签不会改变它）。
     sidebar_visible: bool,
     /// 左侧边栏的标签（顺序 + 当前选中）；标签可以拖到右栏或在本栏内换位。
     left_tabs: SidebarTabs,
-    /// 「会话」视图那棵树（gpui-kit `Tree`）的根项：一个文件夹 + 每个会话一片子项。
+    /// 展开着的文件夹路径。
     ///
-    /// ⚠️ 自己持有这棵「主副本」：展开状态存在 `TreeItem` 内部那个**共享的**
-    /// `Rc<RefCell<..>>` 上，同步时把它的 clone 交给 `TreeState`，
-    /// 用户的展收状态才能在 `set_items` 重建后保留下来。
-    session_tree_root: TreeItem,
-    /// 「会话」树的交互状态（展开 / 选中 / 滚动 / 键盘导航）。
+    /// 会话树的展开状态**本可以**存在 `TreeItem` 内部（共享的 `Rc<RefCell<..>>`），
+    /// 但条目树每次同步都会重建 `TreeItem` ⇒ 那样会每刷一次就全部收起。
+    /// 所以这里自己留一份：同步时按它给 `TreeItem::expanded(..)` 赋值，
+    /// 同时它也是[【算行数】](AppRoot::visible_session_rows)的依据
+    /// （树的高度必须手算，见 [`crate::sidebar_panel`]）。
+    expanded_folders: Vec<SessionPath>,
+    /// 「会话」树的交互状态（选中 / 滚动 / 键盘导航）。
     session_tree: Entity<TreeState>,
-    /// 上一次同步树用的内容签名（标题 + 是否当前会话）：变了才重建 items
-    /// （`set_items` 会 notify，每帧无条件调用会自激）。
-    session_tree_sig: Vec<(SharedString, bool)>,
-    /// 「会话」树状态变化的订阅：展开 / 收起会改变整棵树的高度（按行数算出来的），
-    /// 所以树一变就得让根视图重算一次——不能等下一次指标采样。
+    /// 上一次同步树用的内容签名（条目类型 + 名字，含被收起的分支）：
+    /// 变了才重建 items（`set_items` 会 notify，每帧无条件调用会自激）。
+    ///
+    /// ⚠️ `None` = 还没同步过：不能用「空 `Vec`」同时表达「没同步过」与「一条都没有」——
+    /// 后者会让首次同步被当成「签名没变」跳掉，树就永远拿不到 items。
+    session_tree_sig: Option<Vec<(SharedString, bool, usize)>>,
+    /// 会话树的事件订阅：[`TreeEvent`](gpui_kit::component::tree::TreeEvent)
+    /// （用户展开 / 收起文件夹）⇒ 记进 [`AppRoot::expanded_folders`] 并重绘
+    /// （行数变了，树的高度要重算）。
     session_tree_sub: Option<Subscription>,
     /// 右侧边栏是否可见（由标题栏右端的折叠开关切换）。
     right_sidebar_visible: bool,
@@ -321,13 +245,13 @@ impl AppRoot {
         let mut this = Self {
             terminals: Vec::new(),
             active: 0,
+            session_entries: Vec::new(),
             sidebar_visible: true,
             // 默认：左栏是「会话」，右栏是「会话信息」（都可以拖动改变）。
             left_tabs: SidebarTabs::new(vec![SidebarView::Sessions]),
-            // 会话树：默认展开（空文件夹没有 caret，加上第一个会话后就会展开）。
-            session_tree_root: TreeItem::new("sessions", "0 个会话").expanded(true),
+            expanded_folders: Vec::new(),
             session_tree: cx.new(|cx| TreeState::new(cx)),
-            session_tree_sig: Vec::new(),
+            session_tree_sig: None,
             session_tree_sub: None,
             right_sidebar_visible: true,
             right_tabs: SidebarTabs::new(vec![SidebarView::SessionInfo]),
@@ -356,8 +280,11 @@ impl AppRoot {
             },
         ));
         this.spawn_terminal(window, cx);
-        // 树的展收会改变「整棵树多高」（高度按行数算），所以树的变化要立刻回传到根视图。
-        this.session_tree_sub = Some(cx.observe(&this.session_tree, |_, _, cx| cx.notify()));
+        // 文件夹展开 / 收起会改变「树一共多少行」（高度按行数算），
+        // 所以树的事件要立刻回传到根视图。
+        this.session_tree_sub = Some(cx.subscribe(&this.session_tree, |root, _, event, cx| {
+            root.on_session_tree_event(event, cx);
+        }));
         // 启动状态栏指标采样（CPU / 内存 / 网络），窗口存活期间持续运行。
         Self::start_metrics_sampling(cx);
         this

@@ -1,9 +1,14 @@
 //! 终端会话：生命周期（新建 / 激活 / 关闭）+ 它们在 dock 里的面板 [`SessionPane`]。
 //!
 //! 一个会话 = dock 的 `center` 里一块面板，标签栏是自绘的（[`crate::tab_bar`]）；
-//! 中间列 = `v_flex[dock, 公共状态栏]`。本模块是会话的**单一入口**：新建 / 激活 /
-//! 关闭都集中在这里，侧边栏列表与标签栏按钮都经由它，保证会话表
-//! （[`AppRoot::terminals`]）与 dock 面板一一对应、顺序一致。
+//! 中间列 = `v_flex[dock, 公共状态栏]`。本模块是**终端实例**的单一入口：新建 / 激活 /
+//! 关闭都集中在这里，标签栏的 `+`、欢迎页与侧边栏记录的「打开」都经由它，
+//! 保证会话表（[`AppRoot::terminals`]）与 dock 面板一一对应、顺序一致。
+//!
+//! 两条入口的区别（详见 [`crate::main`] 模块文档）：
+//! - [`AppRoot::spawn_terminal`]：直接开一个**本地**终端（标签栏 `+` / 欢迎页）；
+//! - [`AppRoot::spawn_session`]：按给定参数开终端（双击侧边栏的会话记录）。
+//! 两者都会新建终端实例；侧边栏**添加记录**不走本模块（[`AppRoot::add_session_record`]）。
 //!
 //! 会话进程结束时终端不消失（网格与标签保留，状态栏显示「已断开」）；全部关掉后
 //! 中间列显示欢迎页（[`AppRoot::render_welcome`]）。
@@ -25,20 +30,90 @@ use gpui_kit::component::{
     },
 };
 use terminal_view::{RenderSettings, TerminalView};
+use util::shell::Shell;
 
-use crate::actions::NewTerminal;
+use crate::actions::NewLocalTerminal;
 use crate::assets::IconName;
 use crate::config;
-use crate::{AppRoot, Session, SessionRequest, SessionTarget};
+use crate::AppRoot;
+
+/// 会话的连接目标：决定状态栏「连接状态」一栏显示什么。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionTarget {
+    /// 本地系统 shell。
+    Local,
+    /// 通过 ssh 连接的远端主机。
+    Ssh {
+        user: String,
+        host: String,
+        port: String,
+    },
+}
+
+impl SessionTarget {
+    /// 状态栏显示用的简短描述。
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Local => "本地".to_string(),
+            Self::Ssh { user, host, port } => {
+                if user.is_empty() {
+                    format!("SSH {host}:{port}")
+                } else {
+                    format!("SSH {user}@{host}:{port}")
+                }
+            }
+        }
+    }
+}
+
+/// 新建会话所需的参数（显示名 + 要启动的 shell + 连接目标）。
+///
+/// 两个来源：标签栏 `+` / 欢迎页的本地终端（[`AppRoot::spawn_terminal`]），
+/// 以及双击侧边栏记录（[`crate::sidebar_panel::sessions::SessionRecord::request`]）。
+pub(crate) struct SessionRequest {
+    /// 用户填写的显示名；`None` 表示回退到终端自身标题。
+    pub(crate) name: Option<SharedString>,
+    /// 要启动的 shell（本地系统 shell，或 `ssh` 等外部命令）。
+    pub(crate) shell: Shell,
+    /// 连接目标（用于状态栏展示）。
+    pub(crate) target: SessionTarget,
+}
+
+/// 一个终端会话：终端视图 + 它在 dock 里的面板。
+///
+/// 显示名与连接目标放在面板上（标签栏要读名字，状态栏要读连接目标，放一处不会不同步）；
+/// 用户命名的连接名优先于终端自己上报的 OSC 标题。
+///
+/// ⚠️ 与侧边栏的会话**记录**（[`crate::sidebar_panel::sessions::SessionRecord`]）是两条
+/// 独立的线：记录只是连接参数，同一条记录可以开任意多个本结构，关掉也不影响记录。
+pub(crate) struct Session {
+    pub(crate) view: Entity<TerminalView>,
+    pub(crate) pane: Entity<SessionPane>,
+}
+
+impl Session {
+    /// 会话显示名：优先用户命名，否则用终端标题（无标题时为「终端」）。
+    pub(crate) fn title(&self, cx: &App) -> SharedString {
+        self.pane.read(cx).name(cx)
+    }
+
+    /// 连接目标（状态栏「连接」一栏用）。
+    pub(crate) fn target<'a>(&self, cx: &'a App) -> &'a SessionTarget {
+        self.pane.read(cx).target()
+    }
+}
 
 impl AppRoot {
-    /// 新建一个本地终端会话。
+    /// 新建一个**本地**终端会话（标签栏 `+` / 欢迎页的「新建终端」）。
+    ///
+    /// 远端会话不从这里进：先用侧边栏状态栏的 `+` 建一条记录，再双击它
+    /// （[`AppRoot::open_session_record`]）。
     pub(crate) fn spawn_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.spawn_session(
             SessionRequest {
                 name: None,
-                shell: util::shell::Shell::System,
-                target: crate::SessionTarget::Local,
+                shell: Shell::System,
+                target: SessionTarget::Local,
             },
             window,
             cx,
@@ -47,8 +122,7 @@ impl AppRoot {
 
     /// 按给定参数新建会话（PTY 在后台启动），并挂成 dock 里的一块面板。
     ///
-    /// 参数来自 [`ConnectionForm`](crate::connection_dialog::ConnectionForm)（显示名 /
-    /// shell / 连接目标）。
+    /// `request` 来自一条会话记录（[`crate::sidebar_panel::sessions::SessionRecord::request`]）。
     pub(crate) fn spawn_session(
         &mut self,
         request: SessionRequest,
@@ -131,28 +205,6 @@ impl AppRoot {
                 .view
                 .update(cx, |view, cx| view.set_render_settings(settings.clone(), cx));
         }
-    }
-
-    /// 激活指定的终端会话（点标签由 dock 自己处理）。
-    ///
-    /// 选中动作交给 dock（`select_panel`）——它会回调面板的 `set_active`。
-    pub(crate) fn set_active_tab(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.terminals.get(index) else {
-            // 全部标签已关闭：无会话可激活，中间列显示欢迎页（见 `render_welcome`）。
-            self.active = 0;
-            cx.notify();
-            return;
-        };
-        let panel = panel_handle(session.pane.clone()).panel_id(cx);
-        self.dock
-            .update(cx, |area, cx| area.select_panel(panel, window, cx));
-        self.active = index;
-        cx.notify();
     }
 
     /// dock 面板报告「我成为当前会话」时同步下标（[`SessionPane::set_active`] 调用），
@@ -363,7 +415,11 @@ impl Panel for SessionPane {
         None
     }
 
-    /// 标签栏右端的工具栏按钮：新建终端（关闭按钮在每个标签上，见 [`crate::tab_bar`]）。
+    /// 标签栏右端的工具栏按钮：新建**本地**终端（关闭按钮在每个标签上，见 [`crate::tab_bar`]）。
+    ///
+    /// 标签栏的 `+` 只负责「快速开一个本地终端」，**不弹任何对话框**；要连远端请先用
+    /// 侧边栏「会话」栏底部状态栏右下角的 `+` 建一条记录，再双击那条记录
+    /// （[`AppRoot::open_session_record`]）。
     ///
     /// 工具栏区只画当前组当前面板的按钮，所以「新建」得先把「本组」记到根视图上，
     /// 否则新会话会被 `add_panel_view` 塞进 center 的第一个标签组。
@@ -373,13 +429,13 @@ impl Panel for SessionPane {
         Some(vec![
             Button::new("new-terminal")
                 .icon(IconName::Plus)
-                .tooltip("新建终端")
+                .tooltip("新建本地终端")
                 .on_click(move |_, window, cx| {
-                    // 先告诉根视图「新会话进这一组」，再走统一的 `NewTerminal` 入口。
+                    // 先告诉根视图「新会话进这一组」，再走统一的 `NewLocalTerminal` 入口。
                     let group = group.clone();
                     let root = root.clone();
                     let _ = root.update(cx, |root, _| root.set_pending_session_group(group));
-                    window.dispatch_action(Box::new(NewTerminal), cx);
+                    window.dispatch_action(Box::new(NewLocalTerminal), cx);
                 }),
         ])
     }

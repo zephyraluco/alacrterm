@@ -273,9 +273,9 @@ fn theme_mode_switch() -> SettingField<SharedString> {
                     ThemeMode::Light
                 };
                 // 统一入口：应用主题并重新压下分栏拖拽条线条的透明覆盖
-                // （见 `crate::change_theme`）；`None` 窗口参数不会自动刷新，
+                // （见 `crate::config::change_theme`）；`None` 窗口参数不会自动刷新，
                 // 需手动刷新所有窗口（含本设置窗口）。
-                crate::change_theme(mode, cx);
+                config::change_theme(mode, cx);
                 cx.refresh_windows();
             })
             .into_any_element()

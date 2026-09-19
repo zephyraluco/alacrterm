@@ -22,7 +22,7 @@ use gpui_kit::base::h_flex;
 use gpui_kit::component::{ActiveTheme as _, IconNamed as _, v_flex};
 
 use crate::AppRoot;
-use crate::actions::NewTerminal;
+use crate::actions::NewLocalTerminal;
 use crate::assets::IconName;
 
 /// 欢迎页内容列宽：整列居中，列内元素左对齐（同 zed 欢迎页）。
@@ -122,7 +122,7 @@ impl AppRoot {
                                         Some(NEW_TERMINAL_SHORTCUT),
                                         cx,
                                         |_, window, cx| {
-                                            window.dispatch_action(Box::new(NewTerminal), cx)
+                                            window.dispatch_action(Box::new(NewLocalTerminal), cx)
                                         },
                                     ))
                                     .child(self.welcome_action(
