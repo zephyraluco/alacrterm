@@ -6,7 +6,7 @@
 //! - `crates/util`          —— Shell 探测 / 路径工具（来自 Zed）
 //!
 //! 应用外壳按「左右两条侧边栏 + 一条共用状态栏」拆分为独立文件：
-//! - [`sidebar_panel`]  —— 左 / 右侧边栏（+ 顶部视图段控与两枚折叠开关）
+//! - [`sidebar_panel`]  —— 左 / 右侧边栏（+ 顶部可拖动的视图标签与两枚折叠开关）
 //! - [`terminal_panel`] —— 中间容器：标签栏 + 终端
 //! - [`welcome`]        —— 终端容器关闭后中间列的欢迎页（默认背景板）
 //! - [`status_bar`]     —— **全程序共用的唯一状态栏**（常驻窗口底部，见下）
@@ -21,7 +21,7 @@
 //! 中间列里的**终端区**额外包了一层 dock（[`terminal_panel`]，gpui-kit `DockArea`
 //! 的 center）——侧边栏不进 dock，仍由上面的分栏面板管宽度与折叠。
 //!
-//! 折叠规则：**左侧边栏折叠**时，它连同顶部的视图段控一起让位给终端；**右侧边栏折叠**时整块让位给终端。
+//! 折叠规则：**左侧边栏折叠**时，它连同顶部的视图标签一起让位给终端；**右侧边栏折叠**时整块让位给终端。
 //! **终端标签页全部关闭**时中间容器消失，中间列改显示欢迎页（[`welcome`]，
 //! 见 [`AppRoot::render_welcome`]；之后可从欢迎页或左侧边栏会话条目的右键菜单
 //! 「新建终端」重新打开）。这些情况都**不影响底部状态栏**（三条状态栏常驻），
@@ -56,6 +56,7 @@ use gpui_kit::{
         dock::{DockArea, DockEvent, TabGroup},
         h_flex,
         resizable::{ResizableState, h_resizable, resizable_panel},
+        tree::{TreeItem, TreeState},
         v_flex,
     },
 };
@@ -64,7 +65,7 @@ use util::shell::Shell;
 
 use sidebar_panel::{
     RIGHT_SIDEBAR_DEFAULT_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH, RIGHT_SIDEBAR_MIN_WIDTH,
-    SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SidebarView,
+    SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SidebarTabs, SidebarView,
 };
 use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
 use tab_bar::TerminalDockSkin;
@@ -90,10 +91,19 @@ use terminal_panel::SessionPane;
 /// ⚠️ 副作用：`sidebar_border` 还兼作侧边栏菜单「嵌套项缩进导线」的颜色
 /// （gpui-component `sidebar/menu.rs`），它也会一起变成透明。
 ///
+/// **列表选中色改用 `accent`**：gpui-kit 的 `ListItem`（会话树的行）默认用
+/// `list_active` 画选中底色，而本仓库的 Hybrid Dark 把它压到了 6% 不透明度
+/// （`list.active.background = #15678a10`，见 `themes/hybrid.json`）——淡到和悬停底色
+/// 分不出来。关掉 `list.active_highlight` 后它改用 `accent`（= `#31393a`，与侧边栏
+/// 顶部选中的视图标签同色），「当前会话」才一眼可辨。副作用：表格 / 其他列表的选中
+/// 底色也会跟着变（本应用目前只有会话树用 `ListItem`）。
+///
 /// 传 `None` 作为窗口参数（与原先一致）：调用方需要自行 `cx.refresh_windows()`。
 pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
-    Theme::global_mut(cx).sidebar_border = Hsla::transparent_black();
+    let theme = Theme::global_mut(cx);
+    theme.sidebar_border = Hsla::transparent_black();
+    theme.list.active_highlight = false;
 }
 
 fn main() {
@@ -213,12 +223,28 @@ struct AppRoot {
     terminals: Vec<Session>,
     /// 当前显示的终端下标。
     active: usize,
-    /// 左侧边栏是否可见（只由标题栏右端的折叠开关切换；顶部视图段控不会改变它）。
+    /// 左侧边栏是否可见（只由标题栏右端的折叠开关切换；顶部标签不会改变它）。
     sidebar_visible: bool,
-    /// 左侧边栏当前视图（由顶部的视图段控切换；点击当前视图那段是空操作）。
-    sidebar_view: SidebarView,
+    /// 左侧边栏的标签（顺序 + 当前选中）；标签可以拖到右栏或在本栏内换位。
+    left_tabs: SidebarTabs,
+    /// 「会话」视图那棵树（gpui-kit `Tree`）的根项：一个文件夹 + 每个会话一片子项。
+    ///
+    /// ⚠️ 自己持有这棵「主副本」：展开状态存在 `TreeItem` 内部那个**共享的**
+    /// `Rc<RefCell<..>>` 上，同步时把它的 clone 交给 `TreeState`，
+    /// 用户的展收状态才能在 `set_items` 重建后保留下来。
+    session_tree_root: TreeItem,
+    /// 「会话」树的交互状态（展开 / 选中 / 滚动 / 键盘导航）。
+    session_tree: Entity<TreeState>,
+    /// 上一次同步树用的内容签名（标题 + 是否当前会话）：变了才重建 items
+    /// （`set_items` 会 notify，每帧无条件调用会自激）。
+    session_tree_sig: Vec<(SharedString, bool)>,
+    /// 「会话」树状态变化的订阅：展开 / 收起会改变整棵树的高度（按行数算出来的），
+    /// 所以树一变就得让根视图重算一次——不能等下一次指标采样。
+    session_tree_sub: Option<Subscription>,
     /// 右侧边栏是否可见（由标题栏右端的折叠开关切换）。
     right_sidebar_visible: bool,
+    /// 右侧边栏的标签（含义同 [`AppRoot::left_tabs`]）。
+    right_tabs: SidebarTabs,
     /// 终端会话的 dock（[`crate::terminal_panel`]）：一个会话 = center 里的一块面板。
     ///
     /// 左右侧边栏**不在 dock 里**（仍是下面的分栏组）；没有会话时整块 dock 换成欢迎页。
@@ -296,8 +322,15 @@ impl AppRoot {
             terminals: Vec::new(),
             active: 0,
             sidebar_visible: true,
-            sidebar_view: SidebarView::Sessions,
+            // 默认：左栏是「会话」，右栏是「会话信息」（都可以拖动改变）。
+            left_tabs: SidebarTabs::new(vec![SidebarView::Sessions]),
+            // 会话树：默认展开（空文件夹没有 caret，加上第一个会话后就会展开）。
+            session_tree_root: TreeItem::new("sessions", "0 个会话").expanded(true),
+            session_tree: cx.new(|cx| TreeState::new(cx)),
+            session_tree_sig: Vec::new(),
+            session_tree_sub: None,
             right_sidebar_visible: true,
+            right_tabs: SidebarTabs::new(vec![SidebarView::SessionInfo]),
             dock,
             dock_layout_sub: None,
             pending_session_group: None,
@@ -323,6 +356,8 @@ impl AppRoot {
             },
         ));
         this.spawn_terminal(window, cx);
+        // 树的展收会改变「整棵树多高」（高度按行数算），所以树的变化要立刻回传到根视图。
+        this.session_tree_sub = Some(cx.observe(&this.session_tree, |_, _, cx| cx.notify()));
         // 启动状态栏指标采样（CPU / 内存 / 网络），窗口存活期间持续运行。
         Self::start_metrics_sampling(cx);
         this
@@ -451,7 +486,10 @@ impl AppRoot {
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 主体：侧边栏与终端由各自的模块渲染，中间是可拖拽分隔条（视图段控在侧边栏顶部）。
+        // 主体：侧边栏与终端由各自的模块渲染，中间是可拖拽分隔条（视图标签在侧边栏顶部）。
+
+        // 会话表变了就同步进会话树（`TreeState` 是快照，必须在渲染前对齐，见该方法文档）。
+        self.sync_session_tree(cx);
 
         // 侧边栏宽度只由用户拖拽决定：容器尺寸变化引起的比例重排先钉回去。
         self.pin_sidebar_widths(window, cx);
