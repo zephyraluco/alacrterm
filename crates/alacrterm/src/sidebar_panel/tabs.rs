@@ -7,7 +7,7 @@
 //!
 //! 标签数据(顺序 + 选中)在 [`SidebarTabs`],由它所属的那条 [`Sidebar`](super::Sidebar) 持有;
 //! 本模块只画标签、把交互转发回那个实体(换位 / 跨栏搬运全在 `Sidebar` 的方法里,
-//! 视图内容见 [`super::sessions`] / [`super::session_info`])。
+//! 视图内容见 [`super::sessions`] / [`super::files`])。
 
 use gpui::{
     AnyElement, AppContext as _, Context, CursorStyle, InteractiveElement as _, IntoElement,

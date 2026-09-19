@@ -5,11 +5,9 @@
 //! 视图标签条 + 当前视图内容 + 底部状态栏)。根视图只把它 `.child(..)` 摆进分栏面板,
 //! 不再代它渲染。
 //!
-//! 跨组件的数据只有两处:
-//! - [`sessions::SessionsState`]:「会话」视图的内容(记录树),两条侧边栏共用同一个实体
-//!   ([`SidebarView::Sessions`] 那个标签落在哪一侧,就由哪一侧把它摆出来);
-//! - `root`(弱引用):会话信息视图要读终端表 —— Zed 式反向引用
-//!   (`ProjectPanel` 也持有 `WeakEntity<Workspace>`),比自己再开一个实体简单。
+//! 跨组件的数据全部是**共享实体**:
+//! - [`sessions::SessionsState`] / [`files::FilesState`]:「会话」与「文件管理器」两个视图的
+//!   内容,两条侧边栏共用同一份实体(标签落在哪一侧,就由哪一侧把它摆出来)。
 //!
 //! 其余分工:
 //! - **视图标签条**([`tabs`]):挂在 `Sidebar::header` 上 ⇒ 固定在顶部、不随内容滚动、
@@ -47,10 +45,11 @@ use crate::actions::{NewFolder, NewSession};
 use crate::assets::IconName;
 use crate::status_bar::STATUS_BAR_HEIGHT;
 
-mod session_info;
+pub(crate) mod files;
 pub(crate) mod sessions;
 mod tabs;
 
+use files::FilesState;
 use sessions::SessionsState;
 
 /// 顶部视图标签条的高度(标签本身与拖拽预览卡片共用)。
@@ -68,9 +67,6 @@ pub(crate) const RIGHT_SIDEBAR_DEFAULT_WIDTH: Pixels = px(240.);
 pub(crate) const RIGHT_SIDEBAR_MIN_WIDTH: Pixels = px(150.);
 /// 右侧边栏拖拽时的最大宽度。
 pub(crate) const RIGHT_SIDEBAR_MAX_WIDTH: Pixels = px(460.);
-
-/// 右侧边栏的名称：作它那个视图的标签文字，也作面板里的段落标题。
-pub(crate) const RIGHT_SIDEBAR_LABEL: &str = "会话信息";
 
 /// 侧边栏的哪一侧（标签可以在这两侧之间拖动）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -103,10 +99,10 @@ impl SidebarSide {
 /// 可以停放在任一侧边栏的视图（[`SidebarTabs`] 里的元素）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarView {
-    /// 终端会话列表。
+    /// 终端会话列表（记录树）。
     Sessions,
-    /// 当前会话的只读信息。
-    SessionInfo,
+    /// 当前终端工作目录下的文件树。
+    Files,
 }
 
 impl SidebarView {
@@ -114,7 +110,7 @@ impl SidebarView {
     fn label(self) -> &'static str {
         match self {
             Self::Sessions => "会话",
-            Self::SessionInfo => RIGHT_SIDEBAR_LABEL,
+            Self::Files => "文件管理器",
         }
     }
 
@@ -122,7 +118,7 @@ impl SidebarView {
     fn tooltip(self) -> &'static str {
         match self {
             Self::Sessions => "终端会话",
-            Self::SessionInfo => "当前会话的信息",
+            Self::Files => "当前终端目录下的内容",
         }
     }
 
@@ -130,7 +126,7 @@ impl SidebarView {
     fn id(self) -> &'static str {
         match self {
             Self::Sessions => "sessions",
-            Self::SessionInfo => "session-info",
+            Self::Files => "files",
         }
     }
 }
@@ -208,8 +204,8 @@ pub(crate) struct Sidebar {
     split_width: Option<Pixels>,
     /// 「会话」视图的状态（记录树）：两条侧边栏共用同一个实体。
     sessions: Entity<SessionsState>,
-    /// 根视图（弱引用）：会话信息视图要读终端表。
-    root: WeakEntity<AppRoot>,
+    /// 「文件管理器」视图的状态（文件树）：两条侧边栏共用同一个实体。
+    files: Entity<FilesState>,
     /// 另一条侧边栏：标签跨栏拖动时要把视图从它那儿取过来。
     sibling: Option<WeakEntity<Sidebar>>,
 }
@@ -218,15 +214,15 @@ impl Sidebar {
     pub(crate) fn new(
         side: SidebarSide,
         sessions: Entity<SessionsState>,
-        root: WeakEntity<AppRoot>,
+        files: Entity<FilesState>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             side,
-            // 默认：左栏是「会话」，右栏是「会话信息」（都可以拖动改变）。
+            // 默认：左栏是「会话」，右栏是「文件管理器」（都可以拖动改变）。
             tabs: match side {
                 SidebarSide::Left => SidebarTabs::new(vec![SidebarView::Sessions]),
-                SidebarSide::Right => SidebarTabs::new(vec![SidebarView::SessionInfo]),
+                SidebarSide::Right => SidebarTabs::new(vec![SidebarView::Files]),
             },
             visible: true,
             width: match side {
@@ -236,7 +232,7 @@ impl Sidebar {
             resize: cx.new(|_| ResizableState::default()),
             split_width: None,
             sessions,
-            root,
+            files,
             sibling: None,
         }
     }
@@ -386,11 +382,7 @@ impl Render for Sidebar {
         // ⇒ 用 [`SidebarContent`] 统一。
         let content = match active {
             Some(SidebarView::Sessions) => SidebarContent::Sessions(self.sessions.clone()),
-            Some(SidebarView::SessionInfo) => SidebarContent::Menu(
-                self.root
-                    .read_with(&*cx, |root, cx| root.render_session_info_menu(cx))
-                    .unwrap_or_else(|_| SidebarMenu::new()),
-            ),
+            Some(SidebarView::Files) => SidebarContent::Files(self.files.clone()),
             // 标签全被拖走的空标签条：给一句提示，否则整列看上去是坏的。
             None => SidebarContent::Menu(
                 SidebarMenu::new().child(SidebarMenuItem::new("把标签拖到这里").disable(true)),
@@ -500,13 +492,15 @@ pub(crate) fn toggle_button(sidebar: &Entity<Sidebar>, cx: &mut Context<AppRoot>
     .into_any_element()
 }
 
-/// `SidebarWidget::child` 只接受单一类型，而侧边栏内容有两类（会话树实体 / 内置菜单）
+/// `SidebarWidget::child` 只接受单一类型，而侧边栏内容有几类（视图实体 / 内置菜单）
 /// ⇒ 用一个枚举把它们的类型统一起来。
 #[derive(Clone)]
 enum SidebarContent {
     /// 「会话」视图的实体（它自己实现 `Render`，见 [`SessionsState`]）。
     Sessions(Entity<SessionsState>),
-    /// 内置菜单（会话信息 / 空标签条提示）。
+    /// 「文件管理器」视图的实体（它自己实现 `Render`，见 [`FilesState`]）。
+    Files(Entity<FilesState>),
+    /// 内置菜单（空标签条提示）。
     Menu(SidebarMenu),
 }
 
@@ -531,6 +525,7 @@ impl SidebarItem for SidebarContent {
             // 实体自己渲染自己：这里只把它摆进侧边栏的内容位（`div` 负责给出宽度与
             // 由内容决定的高度，`SidebarItem::render` 的返回类型也才统一）。
             Self::Sessions(sessions) => div().w_full().child(sessions).into_any_element(),
+            Self::Files(files) => div().w_full().child(files).into_any_element(),
             Self::Menu(menu) => menu.render(id, window, cx).into_any_element(),
         }
     }

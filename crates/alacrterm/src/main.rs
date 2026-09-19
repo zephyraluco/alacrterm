@@ -72,6 +72,7 @@ use sidebar_panel::{
     RIGHT_SIDEBAR_MAX_WIDTH, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
     Sidebar, SidebarSide, toggle_button,
 };
+use sidebar_panel::files::FilesState;
 use sidebar_panel::sessions::SessionsState;
 use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
 use tab_bar::TerminalDockSkin;
@@ -142,6 +143,11 @@ struct AppRoot {
     ///
     /// 记录与 [`AppRoot::terminals`] **没有对应关系**（双击记录才按它开一个终端）。
     sessions: Entity<SessionsState>,
+    /// 侧边栏「文件管理器」视图的状态（当前终端工作目录下的文件树），
+    /// 见 [`sidebar_panel::files::FilesState`]。两条侧边栏共用这一个实体。
+    ///
+    /// 根目录由本视图每帧从当前会话的 cwd 同步进去（见 [`AppRoot::render`]）。
+    files: Entity<FilesState>,
     /// 终端会话的 dock（[`crate::terminal_panel`]）：一个会话 = center 里的一块面板。
     ///
     /// 左右侧边栏**不在 dock 里**（仍是下面的分栏组）；没有会话时整块 dock 换成欢迎页。
@@ -189,13 +195,14 @@ impl AppRoot {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock = Self::build_dock(window, cx);
-        // 三个子组件实体：会话列表（两条侧边栏共用）+ 左右两条侧边栏。
+        // 三个子组件实体：会话列表 + 文件管理器（两条侧边栏共用）+ 左右两条侧边栏。
         let sessions = cx.new(SessionsState::new);
-        let root = cx.weak_entity();
+        let files = cx.new(FilesState::new);
         let left_sidebar = cx.new(|cx| {
-            Sidebar::new(SidebarSide::Left, sessions.clone(), root.clone(), cx)
+            Sidebar::new(SidebarSide::Left, sessions.clone(), files.clone(), cx)
         });
-        let right_sidebar = cx.new(|cx| Sidebar::new(SidebarSide::Right, sessions.clone(), root, cx));
+        let right_sidebar =
+            cx.new(|cx| Sidebar::new(SidebarSide::Right, sessions.clone(), files.clone(), cx));
         // 两条侧边栏互指：标签跨栏拖动时要把视图从另一条实体取过来（见 `Sidebar::take_dragged`）。
         left_sidebar.update(cx, |sidebar, _| sidebar.connect(right_sidebar.downgrade()));
         right_sidebar.update(cx, |sidebar, _| sidebar.connect(left_sidebar.downgrade()));
@@ -206,6 +213,7 @@ impl AppRoot {
             left_sidebar,
             right_sidebar,
             sessions,
+            files,
             dock,
             dock_layout_sub: None,
             pending_session_group: None,
@@ -316,6 +324,15 @@ impl Render for AppRoot {
 
         // 会话表变了就同步进会话树（`TreeState` 是快照，必须在渲染前对齐，见该方法文档）。
         self.sessions.update(cx, |sessions, cx| sessions.sync_tree(cx));
+
+        // 文件管理器的根目录 = 当前会话的工作目录：本地会话取 PTY 进程的 cwd（读的是采样
+        // 缓存，很便宜），目录真变了才重建树。⚠️ PowerShell 的 `cd` 不改变进程工作目录，
+        // 所以「跟随 cd」只对真正切换工作目录的壳（cmd / bash / wsl 等）成立。
+        let cwd = self
+            .terminals
+            .get(self.active)
+            .and_then(|session| session.view.read(cx).working_directory(cx));
+        self.files.update(cx, |files, cx| files.sync(cwd, cx));
 
         // 侧边栏宽度只由用户拖拽决定：容器尺寸变化引起的比例重排先钉回去（见子实体）。
         self.left_sidebar

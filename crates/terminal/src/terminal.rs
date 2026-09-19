@@ -1,6 +1,7 @@
 mod mappings;
 
 mod alacritty;
+mod platform;
 mod pty_info;
 
 use anyhow::{Result, bail};
@@ -621,6 +622,9 @@ pub fn insert_zed_terminal_env(env: &mut HashMap<String, String>) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     TitleChanged,
+    /// PowerShell 上报了新工作目录（仅 Windows，见 [platform]）：标题没变，监听方重读目录即可。
+    #[cfg(windows)]
+    PwshPathChanged,
     BreadcrumbsChanged,
     CloseTerminal,
     Bell,
@@ -902,6 +906,13 @@ impl TerminalBuilder {
                     args: Option<Vec<String>>,
                     title_override: Option<String>,
                 ) -> Self {
+                    // 没带参数时给 PowerShell 装上「上报当前目录」的 prompt 包装（见 [platform]）；
+                    // 用户自己指定过参数就不动，免得跟他的 `-Command` 打架。
+                    #[cfg(windows)]
+                    let args = args.or_else(|| {
+                        let extra = platform::integration_args(&program);
+                        (!extra.is_empty()).then_some(extra)
+                    });
                     log::debug!("Using {program} as shell");
                     Self {
                         program,
@@ -1011,6 +1022,8 @@ impl TerminalBuilder {
 
                 selection_head: None,
                 breadcrumb_text: String::new(),
+                #[cfg(windows)]
+                shell_reported_cwd: None,
                 scroll_px: px(0.),
                 next_link_id: 0,
                 selection_phase: SelectionPhase::Ended,
@@ -1139,6 +1152,10 @@ pub struct Terminal {
     pub selection_head: Option<Point>,
 
     pub breadcrumb_text: String,
+    /// shell 自己上报的工作目录（仅 Windows，见 [platform]）：PowerShell 的 `cd` 不改进程 cwd，
+    /// 只有它跟得上，所以优先于 [PtyProcessInfo](crate::pty_info) 那条。
+    #[cfg(windows)]
+    shell_reported_cwd: Option<PathBuf>,
     title_override: Option<String>,
     scroll_px: Pixels,
     next_link_id: usize,
@@ -1187,6 +1204,11 @@ impl Terminal {
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         match event {
             TerminalBackendEvent::Title(title) => {
+                // PowerShell 上报的工作目录（见 [platform]）：只更新目录，不动标题。
+                #[cfg(windows)]
+                if self.apply_reported_cwd(&title, cx) {
+                    return;
+                }
                 // ignore default shell program title change as windows always sends those events
                 // and it would end up showing the shell executable path in breadcrumbs
                 #[cfg(windows)]
@@ -1258,6 +1280,20 @@ impl Terminal {
                 self.register_task_finished(Some(exit_status), cx);
             }
         }
+    }
+
+    /// 这条标题是 shell 上报的工作目录吗（见 [platform]）？是就更新并返回 `true` ——
+    /// 调用方据此不动标题。
+    #[cfg(windows)]
+    fn apply_reported_cwd(&mut self, title: &str, cx: &mut Context<Self>) -> bool {
+        let Some(path) = platform::parse_cwd_title(title) else {
+            return false;
+        };
+        if self.shell_reported_cwd.as_ref() != Some(&path) {
+            self.shell_reported_cwd = Some(path);
+            cx.emit(Event::PwshPathChanged);
+        }
+        true
     }
 
     pub fn selection_started(&self) -> bool {
@@ -2251,6 +2287,11 @@ impl Terminal {
             // the working directory on the client and persist that.
             None
         } else {
+            // shell 上报的位置优先（PowerShell 的 `cd` 不改进程 cwd，见 `platform`）。
+            #[cfg(windows)]
+            if let Some(path) = self.shell_reported_cwd.clone() {
+                return Some(path);
+            }
             self.client_side_working_directory()
         }
     }

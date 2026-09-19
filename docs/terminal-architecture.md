@@ -111,7 +111,7 @@ crates/
         mod.rs                  # Sidebar 实体(标签/折叠/宽度 + Render) + toggle_button + SidebarContent
         tabs.rs                 # 顶部视图标签条(点选 + 拖动换位 / 拖到另一条侧边栏)
         sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + Render)
-        session_info.rs         # 「会话信息」视图
+        files.rs                # FilesState(文件管理器:当前终端目录的文件树 + Render)
       dialog/                   # 对话框(§3.4)
         mod.rs                  # 共同约定(表单实体先建 / 页脚自拼 / on_ok 兜底校验)
         connection.rs           # 「新建会话」:只加一条 SSH 记录
@@ -132,6 +132,7 @@ crates/
       alacritty.rs              # alacritty_terminal 桥接层
       alacritty/hyperlinks.rs   # OSC 8 / URL 正则 / 路径猜测
       pty_info.rs               # sysinfo 进程查询
+      platform.rs               # 平台差异(当前只有 Windows 一段:PowerShell 的 prompt 包装上报工作目录)
       mappings/                 # keys.rs mouse.rs colors.rs
   util/                         # shell 探测、路径工具
 ```
@@ -180,9 +181,9 @@ fn main() {
 
 `AppRoot::render` 只负责装配:`h_resizable("right-split")[h_resizable("main-split")[左栏, 中间列], 右栏]`;容器渲染方法统一返回 `AnyElement`(edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,同一渲染树里连续 `&mut cx` 会借用冲突)。
 
-**状态与渲染都归子组件**:一条侧边栏 = 一个实体(`Entity<Sidebar>`,左右各一个,见 `sidebar_panel/mod.rs`),它自带标签 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 视图标签条 + 当前视图内容 + 底部状态栏);根视图只把它 `.child(..)` 摆进分栏面板、把 `sidebar_panel::toggle_button` 摆进标题栏。「会话」列表也是实体(`Entity<SessionsState>`,见 `sidebar_panel/sessions.rs`),记录树 + 展开状态 + `TreeState` + 增删改 + **它自己的渲染**都在里面,两条侧边栏共用它。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 指标采样器 / 背景焦点);渲染时 `read` 出装配所需的值,交互回调 `update` 回实体。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 侧边栏实体持一个 `WeakEntity<AppRoot>`:会话信息视图要读终端表(Zed 式反向引用,`ProjectPanel` 也持 `WeakEntity<Workspace>`);两条侧边栏互持 `sibling` 弱引用,标签跨栏拖动的「从另一条取视图」靠它。⚠️ 还没上 `.cached()`(留给 `docs/gpui-architecture.md` §优化顺序):子件实体自己 `notify` 只影响窗口脏标记,每帧仍旧重建整棵树。
+**状态与渲染都归子组件**:一条侧边栏 = 一个实体(`Entity<Sidebar>`,左右各一个,见 `sidebar_panel/mod.rs`),它自带标签 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 视图标签条 + 当前视图内容 + 底部状态栏);根视图只把它 `.child(..)` 摆进分栏面板、把 `sidebar_panel::toggle_button` 摆进标题栏。「会话」列表也是实体(`Entity<SessionsState>`,见 `sidebar_panel/sessions.rs`),记录树 + 展开状态 + `TreeState` + 增删改 + **它自己的渲染**都在里面,两条侧边栏共用它。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 指标采样器 / 背景焦点);渲染时 `read` 出装配所需的值,交互回调 `update` 回实体。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 两条侧边栏互持 `sibling` 弱引用,标签跨栏拖动的「从另一条取视图」靠它。⚠️ 还没上 `.cached()`(留给 `docs/gpui-architecture.md` §优化顺序):子件实体自己 `notify` 只影响窗口脏标记,每帧仍旧重建整棵树。
 
-- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成,不给状态栏算面板宽度。**两条侧边栏顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,实现见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**(不因只有一项而隐藏)。样式照 **VS Code 的面板标签**:纯文字、无边框、按内容宽度左对齐,只有悬停 / 选中的那块有圆角浅灰底 ⇒ 标签是**手绘**的 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` 也不用 `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时才点亮成插入提示,免得高亮把标签尺寸顶变。**标签可以在两条侧边栏之间自由拖动**:同一栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置,`[A,B]` 拖 A 到 B 上得到 `[B,A]`),拖到另一栏 = 把视图搬过去并选中它;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区域兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧的顺序与选中项存在各自的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;标签条为空时该栏显示「把标签拖到这里」提示。视图目前只有两个:`Sessions`(会话,`sidebar_panel/sessions.rs`)与 `SessionInfo`(会话信息,`sidebar_panel/session_info.rs`),内容各自一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。
+- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成,不给状态栏算面板宽度。**两条侧边栏顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,实现见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**(不因只有一项而隐藏)。样式照 **VS Code 的面板标签**:纯文字、无边框、按内容宽度左对齐,只有悬停 / 选中的那块有圆角浅灰底 ⇒ 标签是**手绘**的 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` 也不用 `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时才点亮成插入提示,免得高亮把标签尺寸顶变。**标签可以在两条侧边栏之间自由拖动**:同一栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置,`[A,B]` 拖 A 到 B 上得到 `[B,A]`),拖到另一栏 = 把视图搬过去并选中它;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区域兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧的顺序与选中项存在各自的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;标签条为空时该栏显示「把标签拖到这里」提示。视图目前只有两个:`Sessions`(会话,`sidebar_panel/sessions.rs`)与 `Files`(文件管理器,`sidebar_panel/files.rs`),内容各自一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。
 
 #### 会话列表(文件夹树:记录 + 拖放)
 
@@ -201,7 +202,7 @@ fn main() {
 - ⚠️ `SessionsState::sync_tree` 在每次 `AppRoot::render` 开头(经 `sessions.update(..)`)按签名(`(名字, 是否文件夹, 层级)` 全量、含被收起的子树)同步,**签名没变就直接返回**:`TreeState::set_items` 会 notify,每帧无条件调用会自激成死循环。⚠️ 签名用 `Option<Vec<..>>`,`None` = 还没同步过——用空 `Vec` 表达「没同步过」会让首次同步被当成「签名没变」跳掉,树永远拿不到 items(实测:侧边栏一片空白)。
 - **选中**:树自己的 `selected_ix`(行点击设置),**不再**跟当前终端挂钩(列表是记录,「当前会话」由标签栏体现)。⚠️ `ListItem` 默认用 `list_active` 画选中底色,本仓库的 Hybrid Dark 把它压到了 6% 不透明度(`list.active.background = #15678a10`),淡到跟悬停底色分不出来 ⇒ [`config::change_theme`] 里关掉 `list.active_highlight`,改用 `accent`(`#31393a`,与侧边栏顶部选中的视图标签同色),再配上 `font_medium` + `sidebar_accent_foreground` 文字色。
 - **右键菜单**挂在组件级 `Tree::context_menu` 上(记录行 / 文件夹行各一套);**列表为空**时树是 0 行、什么也画不出来,`SessionsState::render` 会改成一句提示文字。
-- 因为 `Sidebar::child` 只吃单一类型,树与内置菜单用 `SidebarContent` 枚举统一(`Collapsible + SidebarItem` 转发)。会话信息视图仍是 `SidebarMenu`,**两层都不再套 `SidebarGroup`**(后者固定渲染一行 `h_8()` 段标题,而标题已经在顶部标签上了)。`Sidebar` 的 id 带侧与当前视图名,让各视图分别记住段落展开状态。
+- 因为 `Sidebar::child` 只吃单一类型,各视图与内置菜单用 `SidebarContent` 枚举统一(`Collapsible + SidebarItem` 转发;视图实体自己实现 `Render`,枚举里只把它 `div().w_full().child(..)` 摆进内容位)。**两层都不再套 `SidebarGroup`**(后者固定渲染一行 `h_8()` 段标题,而标题已经在顶部标签上了)。`Sidebar` 的 id 带侧与当前视图名。
 - **两条侧边状态栏**:显示「会话」视图的那条两端各一枚按钮(左下 = 新建文件夹,右下 = 新建会话),其余情况是空条(只为与中间那条等高);两栏都不放折叠开关(已移到标题栏)。宽度与那一组 `ResizableState` 都在各自的 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 钉回期望宽度)。
 - **中间列**:`v_flex[终端区 dock, 公共状态栏]`;公共状态栏在 dock 外面且常驻。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」(直接开一个本地终端)/「打开设置」两行操作)。
 - **分两层嵌套**:`main-split` = 左栏 | 中间列,`right-split` = 内层 | 右栏(面板宽度按下标存在 `ResizableState`,三面板同组会互相挤)。
@@ -217,6 +218,19 @@ fn main() {
 - **公共状态栏**(`status_bar::render_status_bar`):只放当前会话指标(无会话时「无会话」,`.right(metrics)`)。⚠️ 侧边栏可见性**只由标题栏右端那两枚开关**改变;因为标题栏常驻,状态栏里不再需要任何「展开」入口。
 - **三条状态栏等高**:`status_bar::STATUS_BAR_HEIGHT` = 28px;状态栏里带图标的按钮要显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把状态栏撑高——目前两侧那条已无任何内容)。
 - **分栏竖线只由拖拽条画**:侧边栏状态栏都不画 `border_*_1`,主题的 `sidebar_border` 置透明(`config::change_theme` 里设)。⚠️ 换主题必须走 `config::change_theme(mode, cx)`;⚠️ `sidebar_border` 兼作侧边栏菜单「嵌套项缩进导线」的颜色,会一起消失。
+
+#### 文件管理器(当前终端目录下的文件树)
+
+> 状态与渲染都在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(根目录 + 目录项缓存 + 展开状态 + `TreeState` + 它自己的 `Render`);作为 `SidebarContent::Files(Entity<FilesState>)` 摆进侧边栏内容位。默认停在**右侧边栏**(左栏是「会话」),两条侧边栏共用同一个实体。
+
+- **根目录 = 当前会话的工作目录**:`AppRoot::render` 每帧把当前会话的 `TerminalView::working_directory(cx)`(→ `Terminal::working_directory`,本地会话取 PTY 前台进程的 cwd,读的是 `PtyProcessInfo` 的采样缓存,很便宜)交给 `FilesState::sync`;目录真变了才清空整棵树重新读。无会话 / 远端(SSH)会话拿不到 ⇒ `None`,面板显示一句提示。
+- **目录来源有两层**:① shell 自己上报的位置(**仅 Windows**:`$PWD`,经 `platform` 的 shell 集成,见 §4.5 —— 只有这样才能让 PowerShell 跟得上 `cd`,其他平台没有这一层);② PTY 前台进程的真实工作目录(`pty_info` 采样,给 cmd / bash / wsl 兜底)。`Terminal::working_directory()` 优先 ①、再回落 ②;远端(SSH)会话两者都没有 ⇒ `None`,面板显示一句提示。实测:pwsh 里 `cd docs` 与 `cd ../crates` 都立刻跟着换根目录。
+- **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 读**一层**目录项(慢盘 / 超大目录不卡界面),回填前核对**代次**(`generation`,换根目录时 +1 ⇒ 在途结果直接丢掉)。排序 = 目录在前、名字不区分大小写。
+- ⚠️ **未加载的目录必须挂一个占位子项**(label「加载中…」):gpui-kit 的 `TreeItem::is_folder()` 就是「有没有子项」,没有子项的行既没有 caret、点击也不会展开(`TreeState::toggle_expand` 对非 folder 直接 return)⇒ 子目录永远打不开。`visible_rows` 的行数算法必须与 `build_items` + `TreeState::add_entry` 的展平规则**逐条一致**(含这条占位)。
+- 行类型同样**编码在行 id 前缀**里(`dir-0-2` / `file-1` / `loading-0-2`),判类型不用 `TreeEntry::is_folder()`(空目录 / 未加载目录都会被判反——前者没有子项、后者挂着占位子项)。目录行 = caret(有子项时)+ 文件夹图标 + 名字,文件行 = 文件图标 + 名字(视图**只读**,行点击只展开 / 收起,不打开文件),占位行是灰字。
+- 展开状态存 `FilesState::expanded`(下标链),由 `cx.subscribe(&tree, ..)` 收 `TreeEvent::{Expanded,Collapsed}` 回写(与 `SessionsState` 同一套理由:`set_items` 会重建 `TreeItem`)。
+- 顶部一行显示当前根目录,右端两枚按钮:**上一级**(`go_up`,手动往上浏览整块磁盘)与**重新加载**(`reload`,目录内容会变而树不监听文件系统)。因此 `FilesState` 把「终端 cwd」(`cwd`)与「显示中的根目录」(`root`)分开存:只有 **cwd 变化**才把 `root` 拉回终端所在目录,手动向上不会被每帧的 `sync` 顶回去。
+- 高度与 `SessionsState` 同样处理:`.h(行数 × TREE_ROW_HEIGHT)`(行数手算,`Tree` 是虚拟列表 + `size_full()`);`sync_tree` 也靠 `(根目录, (名字, 是否目录, 层级) 全量)` 签名挡住每帧 `set_items`(`TreeState::set_items` 会 notify,否则自激)。
 
 ### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)
 
@@ -576,6 +590,8 @@ graph LR
 - `ProcessIdGetter`:Unix 用 `tcgetpgrp` 取前台进程组;Windows 用 `GetProcessId(handle)`,为 0 时回落 `fallback_pid`
 - `emit_title_changed_if_changed`(每次 `Wakeup` 触发):后台用 `sysinfo` 刷新进程信息,比较 `cwd` / `name` 变化后才发 `Event::TitleChanged`
 - Windows 特判:`shell_program == title` 时忽略 shell 自身的 OSC 标题事件(否则 breadcrumb 会显示 `pwsh.exe` 路径)
+- **shell 集成**(`platform.rs` 里 Windows 那一段,文件整体 `#![cfg(windows)]`,`mod platform;` 本身无条件声明 —— 平台差异统一收在这个模块):PowerShell 的 `cd`(`Set-Location`)只改 `$PWD`、**不动进程的当前目录**(实测 `Set-Location C:\Windows` 之后 `[Environment]::CurrentDirectory` 不变)⇒ 只靠进程 cwd 的话,「跟随终端目录」的功能在 pwsh 下永远停在启动目录。所以启动 PowerShell(`pwsh` / `powershell`,且**用户没自带参数**)时追加 `-NoExit -EncodedCommand <base64(UTF-16LE 脚本)>`,注入一段 prompt 包装:画提示符前发一条 `ESC ] 2 ; alacrterm-cwd:<路径> BEL`,再调用原来的 prompt(注入脚本在 profile 之后执行,原 prompt 被存下来继续调用 ⇒ 用户的提示符样式不变)。⚠️ 各使用点全部包在 `#[cfg(windows)]` 里:`ShellParams::new` 的注入、`Terminal::apply_reported_cwd` 与 `working_directory()`、`Event::PwshPathChanged`(连枚举变体都是 Windows-only)⇒ **其他平台与其他终端的启动参数 / 标题处理 / 工作目录来源一律保持改动前的行为**。
+- ⚠️ 蹭「标题」通道的理由:`alacritty_terminal` 的 `EventLoop` 自己拥有 PTY 读取端(`EventLoop::new` 内部建 `Processor`、`pty_read` 私有)⇒ 我们**拿不到原始字节流**,它交给外面的通道只有 OSC 0/2 标题;而 alacritty 0.26 又**不认识 OSC 7**(全 crate 无 `SetWorkingDirectory` / `Pwd`)。收到带前缀的标题时 `Terminal` 只更新 `shell_reported_cwd` + `emit(Event::PwshPathChanged)`,**不改标题**(`breadcrumb_text` 不受影响)。非文件系统位置(如 `HKLM:`)没有 `ProviderPath` ⇒ 不上报,使用方保留上一次的目录。
 
 ---
 
@@ -587,7 +603,7 @@ graph LR
 
 **向上事件**(`Event`,`cx.emit` 给视图):
 
-`TitleChanged` / `BreadcrumbsChanged` / `CloseTerminal` / `Bell` / `Wakeup` / `BlinkChanged` / `SelectionsChanged` / `NewNavigationTarget` / `Open`
+`TitleChanged` / `PwshPathChanged`(仅 Windows) / `BreadcrumbsChanged` / `CloseTerminal` / `Bell` / `Wakeup` / `BlinkChanged` / `SelectionsChanged` / `NewNavigationTarget` / `Open`
 
 **后端事件**(`TerminalBackendEvent`,alacritty 回调 → channel):
 
@@ -601,6 +617,7 @@ graph LR
 |---|---|
 | `Wakeup` / `SelectionsChanged` | 仅 `cx.notify()` 触发重绘 |
 | `TitleChanged` / `BreadcrumbsChanged` | 读 `terminal.breadcrumb_text`(空则 `"终端"`)写入 `self.title` 并 `notify` |
+| `PwshPathChanged` | 仅 `cx.notify()`:PowerShell 上报了新工作目录(标题没变),文件管理器据此换根目录(仅 Windows,见 §4.5) |
 | `CloseTerminal` | 标记 `exited = true` 并 `notify()`(不退出应用),状态栏显示「已断开」 |
 
 ---

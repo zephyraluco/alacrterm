@@ -92,11 +92,6 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// 会话显示名：优先用户命名，否则用终端标题（无标题时为「终端」）。
-    pub(crate) fn title(&self, cx: &App) -> SharedString {
-        self.pane.read(cx).name(cx)
-    }
-
     /// 连接目标（状态栏「连接」一栏用）。
     pub(crate) fn target<'a>(&self, cx: &'a App) -> &'a SessionTarget {
         self.pane.read(cx).target()

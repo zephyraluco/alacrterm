@@ -226,6 +226,10 @@ impl TerminalView {
     ) {
         match event {
             TerminalEvent::Wakeup | TerminalEvent::SelectionsChanged => cx.notify(),
+            // PowerShell 上报了新的工作目录（见 `terminal::platform`）：重绘即可，
+            // 文件管理器下一帧会把根目录换过去。
+            #[cfg(windows)]
+            TerminalEvent::PwshPathChanged => cx.notify(),
             TerminalEvent::TitleChanged | TerminalEvent::BreadcrumbsChanged => {
                 if let Some(terminal) = &self.terminal {
                     terminal.read_with(cx, |terminal, _| {
@@ -391,6 +395,17 @@ impl TerminalView {
             .as_ref()
             .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.pid()))
             .map(|pid| pid.as_u32())
+    }
+
+    /// 终端当前的工作目录（供「文件管理器」侧边栏确定根目录）。
+    ///
+    /// 本地会话取 shell 自己上报的位置（Windows 的 PowerShell，见 `terminal::platform`）；
+    /// 拿不到时回落 PTY 前台进程的 cwd（`PtyProcessInfo` 采样，读的是缓存）。
+    /// 远端会话两者都没有，因此返回 `None`。目录变化会以事件上报，所以调用方每次渲染读一下即可。
+    pub fn working_directory(&self, cx: &App) -> Option<PathBuf> {
+        self.terminal
+            .as_ref()
+            .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.working_directory()))
     }
 
     /// 会话进程是否已结束（本地 shell 退出 / ssh 连接断开等）。
