@@ -3,7 +3,7 @@
 //! 窗口底部不再是整窗一条：三列各占自己的底边——
 //! - **左栏 / 右栏**：各自的状态栏在 [`crate::sidebar_panel`] 里，宽度随侧边栏一起变化
 //!   （侧边栏拖宽 / 拖窄时实时跟随，因为它们在同一个列容器里）；
-//!   **各自的折叠按钮就在那一条里**（连同展开时显示的图标）。
+//!   左栏那条里是活动栏图标（终端会话 / 关于），右栏那条里是「会话信息」标识。
 //! - **中间列**（本模块）：终端区下方这条公共状态栏。
 //!
 //! 三条状态栏的**高度必须一致**（三栏底边对齐，谁矮一点顶部就会错位）：
@@ -13,12 +13,10 @@
 //! 本模块只负责中间这条：
 //! - 右端：当前会话指标 —— 连接状态 / 连接目标 / 会话进程 CPU / 内存 / 系统网络速率，
 //!   数值由 [`crate::status_metrics`] 每 1.5s 采样一次；没有会话时只显示一句「无会话」。
-//! - 两端：**只有当某一侧边栏被折叠时**才出现该侧的「展开」按钮——
-//!   折叠后那一侧（连同它自己的状态栏与折叠按钮）整块不渲染，
-//!   否则就没有恢复入口了。按钮放在**它自己那一侧**：左栏的在最左端、
-//!   右栏的在最右端（与展开时它自己状态栏里的位置一致）。
 //!
-//! 「设置」入口不在状态栏，而在标题栏右侧的文字按钮上。
+//! 两侧边栏的折叠 / 展开开关与「设置」入口都在标题栏
+//! （[`crate::AppRoot::render_sidebar_toggles`] / [`crate::AppRoot::render`]），
+//! 标题栏常驻，所以状态栏里不再需要任何恢复入口。
 //!
 //! 指标各段的排版（弱化色标签 + 常规色数值、`·` 分隔）沿用原先终端状态栏的实现。
 
@@ -127,12 +125,10 @@ fn render_session_metrics(
 impl AppRoot {
     /// 中间列底部的**公共状态栏**（常驻中间列底部，见模块文档）。
     ///
-    /// 两侧边栏各自在自己的列里渲染状态栏（带着各自的折叠按钮），
-    /// 所以这里只在某一侧**折叠后**补上它的「展开」按钮：折叠时那侧整块消失，
-    /// 否则就没有恢复入口了。
+    /// 只放当前会话指标：两侧边栏的折叠开关与「设置」都在标题栏，标题栏常驻
+    /// ⇒ 这里不必再为折叠掉的侧边栏补「展开」入口。
     pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        // 当前会话指标：没有会话（标签页全部关闭）时给一句占位文案——
-        // 此时这条状态栏本身仍要在，因为折叠侧的「展开」按钮挂在这里。
+        // 当前会话指标：没有会话（标签页全部关闭）时给一句占位文案。
         let metrics = match self.terminals.get(self.active) {
             Some(session) => render_session_metrics(
                 session.target(cx),
@@ -146,21 +142,10 @@ impl AppRoot {
                 .into_any_element(),
         };
 
-        // 折叠掉的侧边栏在这里补一个「展开」按钮：左侧的放最左端，
-        // 右侧的放在指标之后（也就是最右端）——与它们展开时各自状态栏里的位置一致。
-        let bar = StatusBar::new();
-        let bar = if self.sidebar_visible {
-            bar
-        } else {
-            bar.left(self.sidebar_toggle_button(cx))
-        };
-        let bar = bar.right(metrics);
-        let bar = if self.right_sidebar_visible {
-            bar
-        } else {
-            bar.right(self.right_sidebar_toggle_button(cx))
-        };
-
-        bar.h(STATUS_BAR_HEIGHT).w_full().into_any_element()
+        StatusBar::new()
+            .right(metrics)
+            .h(STATUS_BAR_HEIGHT)
+            .w_full()
+            .into_any_element()
     }
 }

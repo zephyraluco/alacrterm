@@ -8,20 +8,21 @@
 //! - **右侧边栏**（[`AppRoot::render_right_sidebar_container`]）：终端右侧的面板，
 //!   当前展示当前会话的只读信息（名称 / 连接 / 进程 / 状态）；用 `Side::Right` 构造，
 //!   与左侧对称。
-//! - **两枚折叠开关**（[`AppRoot::sidebar_toggle_button`] /
-//!   [`AppRoot::right_sidebar_toggle_button`]）：分别渲染在**各自那一条状态栏**里
-//!   （左栏在自身状态栏的最左端、右栏在最右端），图标随各自的折叠状态变化。
-//!   左栏开关旁边还会渲染活动栏图标（[`AppRoot::render_activity_icons`]：终端会话 / 关于），
-//!   它们只在左侧边栏可见时显示，且**只切视图、不会折叠侧边栏**。
-//!   某一侧折叠后它那一整块（含自己的状态栏与开关）不渲染，改由中间那条公共状态栏
-//!   在**同一侧**补一枚「展开」按钮（左端 / 右端，见 [`crate::status_bar`]）。
+//! - **两枚折叠开关**（[`AppRoot::render_sidebar_toggles`]）：渲染在**标题栏右端**
+//!   （见 [`crate::AppRoot::render`]），图标随各自的折叠状态变化。标题栏常驻窗口顶部，
+//!   因此开关不受侧边栏折叠影响，折叠后仍点得到（唯一的恢复入口）。
+//! - **活动栏图标**（[`AppRoot::render_activity_icons`]）：在左栏自己那条状态栏里，
+//!   只在左侧边栏可见时渲染，且**只切视图、不会折叠侧边栏**。
 //!
 //! 两侧边栏用**两组嵌套的分栏面板**装配（内层 `main-split`、外层 `right-split`），
 //! 因为面板宽度按下标存在 `ResizableState` 里：三个面板挤在同一组时，
 //! 任一侧折叠都会让另一侧的下标漂移、拖出来的宽度丢失。
-//! 「设置」入口不在本模块，而在标题栏右侧的文字按钮上（见 [`crate::AppRoot::render`]）。
+//! 「设置」入口不在本模块，而在标题栏左侧的文字按钮上（见 [`crate::AppRoot::render`]）。
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement as _, Pixels, SharedString, Styled as _, px};
+use gpui::{
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    SharedString, Styled as _, div, px,
+};
 use gpui_kit::component::{
     Icon, Selectable as _, Side, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -65,8 +66,8 @@ pub(crate) enum SidebarView {
 impl AppRoot {
     /// 活动栏图标点击：切换左栏视图。
     ///
-    /// **只切视图，不改可见性**——折叠 / 展开只由状态栏里的折叠按钮负责，
-    /// 与右侧边栏一致（那边除折叠按钮外没有任何按钮会改可见性）。
+    /// **只切视图，不改可见性**——折叠 / 展开只由标题栏右端的折叠开关负责，
+    /// 与右侧边栏一致（那边除折叠开关外没有任何按钮会改可见性）。
     /// 因此点击**当前**视图图标是空操作（图标本来就只在侧边栏可见时渲染）。
     pub(crate) fn set_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.sidebar_view == view {
@@ -79,7 +80,7 @@ impl AppRoot {
         cx.notify();
     }
 
-    /// 设置左侧边栏是否显示（只由状态栏里的折叠按钮调用）。
+    /// 设置左侧边栏是否显示（只由标题栏里的折叠开关调用）。
     pub(crate) fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.sidebar_visible == visible {
             return;
@@ -88,7 +89,7 @@ impl AppRoot {
         cx.notify();
     }
 
-    /// 设置右侧边栏是否显示（状态栏右端的折叠开关调用）。
+    /// 设置右侧边栏是否显示（标题栏右端的折叠开关调用）。
     pub(crate) fn set_right_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.right_sidebar_visible == visible {
             return;
@@ -97,68 +98,71 @@ impl AppRoot {
         cx.notify();
     }
 
-    /// 右侧边栏折叠 / 展开开关（挂在**右栏自己那条状态栏的最右端**）。
+    /// 两枚侧边栏折叠 / 展开开关（渲染在**标题栏右端**，见 [`crate::AppRoot::render`]）。
     ///
-    /// 与左侧开关一样常驻：状态栏不随右侧边栏折叠消失，所以它是唯一的恢复入口。
-    /// 图标随状态变化（`PanelRightClose` ↔ `PanelRightOpen`）。
-    pub(crate) fn right_sidebar_toggle_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let expanded = self.right_sidebar_visible;
-        Button::new("right-sidebar-toggle")
-            .ghost()
-            .xsmall()
-            // 与左侧开关一致：图标按钮默认 20px 高，显式压到状态栏行高（16px）。
-            .h(px(16.))
-            .icon(if expanded {
-                IconName::PanelRightClose
-            } else {
-                IconName::PanelRightOpen
-            })
-            .tooltip(if expanded {
-                "折叠右侧边栏"
-            } else {
-                "展开右侧边栏"
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_right_sidebar_visible(!expanded, cx)
-            }))
-            .into_any_element()
-    }
-
-    /// 侧边栏折叠 / 展开开关（挂在**左栏自己那条状态栏的最左端**，即窗口左下角）。
+    /// 左枚控制左侧边栏、右枚控制右侧边栏，图标与提示随各自的折叠状态变化。
+    /// 放在标题栏而不是状态栏，是因为标题栏常驻窗口顶部：侧边栏折叠后那一整块
+    /// （连同它自己的状态栏）不再渲染，开关留在那里就会一起消失。
     ///
-    /// 图标与提示随状态变化：侧边栏可见时是「折叠」，隐藏时是「展开」。
-    /// 这是**唯一**能改变左侧边栏可见性的入口（活动栏图标只切视图，不会折叠它），
-    /// 与右侧边栏一致：那边也只有它自己那枚开关。另：折叠后这一整块不渲染，
-    /// 「展开」按钮改由中间那条公共状态栏的最左端提供，所以不存在「折叠完找不回来」。
-    pub(crate) fn sidebar_toggle_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let expanded = self.sidebar_visible;
-        Button::new("sidebar-toggle")
-            .ghost()
-            .xsmall()
-            // 图标按钮默认 20px 高，会把状态栏撑高（`text_xs` 行高≈16px），
-            // 这里显式压到 16px。
-            .h(px(16.))
-            .icon(if expanded {
-                IconName::PanelLeftClose
-            } else {
-                IconName::PanelLeftOpen
-            })
-            .tooltip(if expanded {
-                "折叠侧边栏"
-            } else {
-                "展开侧边栏"
-            })
-            .on_click(cx.listener(move |this, _, _, cx| this.set_sidebar_visible(!expanded, cx)))
+    /// ⚠️ 标题栏内容区整体是窗口拖拽区（`WindowControlArea::Drag`），其中的按钮必须包一层
+    /// `div().occlude()`，否则系统把点击当成「拖标题栏」、按钮收不到（原因见
+    /// [`crate::AppRoot::render`] 里的说明）。
+    pub(crate) fn render_sidebar_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
+        let left_expanded = self.sidebar_visible;
+        let right_expanded = self.right_sidebar_visible;
+        h_flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div().occlude().child(
+                    Button::new("sidebar-toggle")
+                        .ghost()
+                        .xsmall()
+                        .icon(if left_expanded {
+                            IconName::PanelLeftClose
+                        } else {
+                            IconName::PanelLeftOpen
+                        })
+                        .tooltip(if left_expanded {
+                            "折叠侧边栏"
+                        } else {
+                            "展开侧边栏"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_sidebar_visible(!left_expanded, cx)
+                        })),
+                ),
+            )
+            .child(
+                div().occlude().child(
+                    Button::new("right-sidebar-toggle")
+                        .ghost()
+                        .xsmall()
+                        .icon(if right_expanded {
+                            IconName::PanelRightClose
+                        } else {
+                            IconName::PanelRightOpen
+                        })
+                        .tooltip(if right_expanded {
+                            "折叠右侧边栏"
+                        } else {
+                            "展开右侧边栏"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_right_sidebar_visible(!right_expanded, cx)
+                        })),
+                ),
+            )
             .into_any_element()
     }
 
     /// 活动栏图标（终端会话 / 关于）。
     ///
     /// 原先是侧边栏左侧一条 44px 宽的竖栏，现已**整体迁移到左栏状态栏里**
-    /// （与折叠按钮同处一条，见 [`AppRoot::render_sidebar_container`]），横向排开：
+    /// （见 [`AppRoot::render_sidebar_container`]），横向排开：
     /// 侧边栏可见时才由那条状态栏渲染，折叠后不渲染（没有可切换的视图，留着只是占地方）。
     /// 点击**只切换视图**（`set_sidebar_view`）：不会折叠 / 展开侧边栏。
-    /// 设置入口不在这里——它是标题栏右侧的「设置」文字按钮（见 `AppRoot::render`）。
+    /// 设置入口不在这里——它是标题栏左侧的「设置」文字按钮（见 `AppRoot::render`）。
     ///
     /// 返回 [`AnyElement`] 而非 `impl IntoElement`：本 crate 是 edition 2024，
     /// `impl Trait` 会捕获 `&mut Context` 的生命周期，导致同一渲染树里
@@ -277,14 +281,13 @@ impl AppRoot {
             .flex_1()
             .min_h_0();
 
-        // 左栏自己的状态栏：折叠按钮 + 视图图标（终端会话 / 关于）。
+        // 左栏自己的状态栏：只放视图图标（终端会话 / 关于）。
         // 它与侧边栏同处一个列容器，宽度自然随侧边栏（拖分隔条时实时跟随）；
         // **不画右边框**：列分界的那条竖线统一由分栏拖拽条来画
         // （它 `h_full` 贯穿整列，也盖住这一行；见 `crate::change_theme` 的说明）。
         // 高度用 `STATUS_BAR_HEIGHT`：这条里没有文字，自然高度比含文字的那两条矮，
         // 不统一就会出现「左栏那条短一截」的错位。
         let status_bar = StatusBar::new()
-            .left(self.sidebar_toggle_button(cx))
             .left(self.render_activity_icons(cx))
             .h(STATUS_BAR_HEIGHT)
             .w_full();
@@ -357,8 +360,7 @@ impl AppRoot {
             .flex_1()
             .min_h_0();
 
-        // 右栏自己的状态栏：标识（图标 + 名称）在左、折叠按钮在右端——
-        // 与左栏那一条镜像对称（那边是「按钮在左端 + 图标在其右」）。
+        // 右栏自己的状态栏：只放标识（图标 + 名称）。
         // 同样**不画左边框**：列分界的竖线由分栏拖拽条统一画。
         let status_bar = StatusBar::new()
             .left(
@@ -369,7 +371,6 @@ impl AppRoot {
                     .child(Icon::new(IconName::Info).small())
                     .child(RIGHT_SIDEBAR_LABEL),
             )
-            .right(self.right_sidebar_toggle_button(cx))
             .h(STATUS_BAR_HEIGHT)
             .w_full();
 

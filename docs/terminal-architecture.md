@@ -164,12 +164,13 @@ fn main() {
 - 窗口 1100×700;`Assets` 来自 `assets.rs` 的 `icon_named!(IconName, "../../assets/icons")`(扫描图标目录生成枚举,并实现 `From<IconName> for AnyElement` / `RenderOnce`)
 - `Root` 是弹窗 / 通知 / 焦点恢复的宿主,但**不会自动渲染 Dialog 层**:需在渲染树里显式 `.children(Root::render_dialog_layer(window, cx))`
 - `TitleBar::window_options()` 内部为 `appears_transparent` + `app_owns_titlebar_drag`
+- 标题栏内容区(`TitleBar::new().child(..)`,见 §3.5)三段:左端 = 「设置」文字按钮([`AppRoot::open_settings_window`]),中段 = `flex_1` 的标题「Alacrterm」,右端 = 两枚侧边栏折叠开关(`AppRoot::render_sidebar_toggles`,左 / 右各一枚)。⚠️ 内容区整体是窗口拖拽区(`WindowControlArea::Drag`),其中的按钮都必须包 `div().occlude()`,否则点击被当成「拖标题栏」而收不到
 
 ### 3.2 布局装配(左右侧边栏 / 分栏 / dock 会话面板 / 底部三条状态栏)
 
 `AppRoot::render` 只负责装配:`h_resizable("right-split")[h_resizable("main-split")[左栏, 中间列], 右栏]`;容器渲染方法统一返回 `AnyElement`(edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,同一渲染树里连续 `&mut cx` 会借用冲突)。
 
-- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成,不给状态栏算面板宽度。左栏状态栏 = 折叠按钮 + 视图图标(终端会话 / 关于,只切视图);右栏状态栏 = 标识 + 折叠按钮(右端,与左栏镜像);宽度记忆在 `AppRoot` 的 `ResizableState` 上。
+- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成,不给状态栏算面板宽度。左栏状态栏 = 视图图标(终端会话 / 关于,只切视图);右栏状态栏 = 标识(图标 + 「会话信息」);两栏都不放折叠开关(已移到标题栏)。宽度记忆在 `AppRoot` 的 `ResizableState` 上。
 - **中间列**:`v_flex[终端区 dock, 公共状态栏]`;公共状态栏在 dock 外面且常驻。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」/「打开设置」两行操作)。
 - **分两层嵌套**:`main-split` = 左栏 | 中间列,`right-split` = 内层 | 右栏(面板宽度按下标存在 `ResizableState`,三面板同组会互相挤)。
 - **终端区 = dock,只用 center**(左右侧边栏不进 dock):每个会话一块 `SessionPane`,`add_panel_view(.., DockPlacement::Center, ..)` 挂入;`AppRoot::build_dock` 里 `set_locked(false)`。面板覆写 `title_bar(false)` / `inner_padding(false)` / `zoomable(false)` / `zoom_control() -> None`,`closable` 为真。⚠️ 注册必须走 `panel_handle`(裸 `Entity<P>` 时 skin 取不到表现层 trait,标签会退化成只写 `panel_name` 的标题栏)。
@@ -181,8 +182,8 @@ fn main() {
 - **接线**(`TabGroupContext` 是只读快照):点标签 → `select_tab(ix, ..)`;拖 → `on_drag(group.drag_panel(ix, cx)?)` + 自绘 `TabDragPreview`;落点 → `drag_over::<DragPanel>(..)` + `on_drop` 调 `group.drop_panel(drag.clone(), Some(ix), true, ..)`;中键 → 关会话。
 - **关会话三条路**:标签 `×` / 中键 / 侧边栏右键菜单(按下标)。前两条走 [`AppRoot::close_panel_id`](`AppRoot::close_panel_id`)(按面板 id 找下标);不走 dock 的 `TabGroup::close_panel`(它拒绝关最后一块面板,而本应用要支持全关到欢迎页)。
 - **会话表是 dock 的镜像**:`AppRoot::terminals` 顺序 = `dock.layout(Center).panels()`,成员 = dock 里还在的面板,由 `sync_sessions_with_dock` 在 `DockEvent::LayoutChanged` 与新建 / 关闭后同步。
-- **公共状态栏**(`status_bar::render_status_bar`):右端 = 当前会话指标(无会话时「无会话」);某侧被折叠时,该侧的「展开」按钮出现在公共状态栏对应的最左 / 最右端。⚠️ 侧边栏可见性**只由这两枚折叠按钮**改变。
-- **三条状态栏等高**:`status_bar::STATUS_BAR_HEIGHT` = 28px;状态栏里的图标按钮必须显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把状态栏撑高)。
+- **公共状态栏**(`status_bar::render_status_bar`):只放当前会话指标(无会话时「无会话」,`.right(metrics)`)。⚠️ 侧边栏可见性**只由标题栏右端那两枚开关**改变;因为标题栏常驻,状态栏里不再需要任何「展开」入口。
+- **三条状态栏等高**:`status_bar::STATUS_BAR_HEIGHT` = 28px;状态栏里的图标按钮(只剩左栏的视图图标)要显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把状态栏撑高)。
 - **分栏竖线只由拖拽条画**:侧边栏状态栏都不画 `border_*_1`,主题的 `sidebar_border` 置透明(`change_theme` 里设)。⚠️ 换主题必须走 `crate::change_theme(mode, cx)`;⚠️ `sidebar_border` 兼作侧边栏菜单「嵌套项缩进导线」的颜色,会一起消失。
 
 ### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)

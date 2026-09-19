@@ -22,12 +22,12 @@
 //! 的 center）——侧边栏不进 dock，仍由上面的分栏面板管宽度与折叠。
 //!
 //! 折叠规则：**左侧边栏折叠**时，它连同活动栏图标一起让位给终端
-//! （图标由状态栏按折叠状态显示 / 隐藏）；**右侧边栏折叠**时整块让位给终端。
+//! （图标由左栏状态栏按折叠状态显示 / 隐藏）；**右侧边栏折叠**时整块让位给终端。
 //! **终端标签页全部关闭**时中间容器消失，中间列改显示欢迎页（[`welcome`]，
 //! 见 [`AppRoot::render_welcome`]；之后可从欢迎页或左侧边栏会话条目的右键菜单
-//! 「新建终端」重新打开）。这些情况都**不影响底部状态栏**：它是全程序共用的一条、
-//! 常驻不消失，两端的「折叠 / 展开侧边栏」开关因此永远可点，
-//! 不会出现「窗口全空、没有任何恢复入口」的死角。
+//! 「新建终端」重新打开）。这些情况都**不影响底部状态栏**（三条状态栏常驻），
+//! 而侧边栏的「折叠 / 展开」开关与「设置」入口都在**标题栏**（右端 / 左端）：
+//! 标题栏永远在，因此不会出现「窗口全空、没有任何恢复入口」的死角。
 
 mod actions;
 mod assets;
@@ -214,11 +214,11 @@ struct AppRoot {
     terminals: Vec<Session>,
     /// 当前显示的终端下标。
     active: usize,
-    /// 左侧边栏是否可见（只由状态栏最左端的折叠按钮切换；活动栏图标不会改变它）。
+    /// 左侧边栏是否可见（只由标题栏右端的折叠开关切换；活动栏图标不会改变它）。
     sidebar_visible: bool,
     /// 左侧边栏当前视图（由状态栏里的活动栏图标切换；点击当前视图图标是空操作）。
     sidebar_view: SidebarView,
-    /// 右侧边栏是否可见（由状态栏右端的折叠开关切换）。
+    /// 右侧边栏是否可见（由标题栏右端的折叠开关切换）。
     right_sidebar_visible: bool,
     /// 终端会话的 dock（[`crate::terminal_panel`]）：一个会话 = center 里的一块面板。
     ///
@@ -543,9 +543,9 @@ impl Render for AppRoot {
             .track_focus(&self.background_focus)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_background_mouse_down))
             .bg(cx.theme().background)
-            // —— 顶部：自绘标题栏（图标 / 标题 / 设置入口 / 窗口控制）——
+            // ── 顶部：自绘标题栏（左：设置入口 / 中：标题 / 右：侧边栏开关 + 窗口控制）——
             // 标题栏内容区本身就是窗口拖拽区，但其中的按钮仍有自己的 hitbox，
-            // 点击会被正常派发（与窗口控制按钮同理），因此「设置」可以放在这里。
+            // 点击会被正常派发（与窗口控制按钮同理），因此这些按钮可以放在这里。
             .child(
                 TitleBar::new().child(
                     h_flex()
@@ -554,16 +554,7 @@ impl Render for AppRoot {
                         .gap(px(8.))
                         .items_center()
                         .child(
-                            div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().secondary_foreground)
-                                .child("Alacrterm"),
-                        )
-                        .child(
-                            // 设置入口：文字态按钮（无边框无底色，hover 提亮），
-                            // 靠 flex_1 的标题占位顶到内容区最右端、窗口控制按钮左侧。
+                            // 设置入口：文字态按钮（无边框无底色，hover 提亮），放在最左端。
                             //
                             // 必须 `div().occlude()` 包一层：标题栏内容区整体是窗口拖拽区
                             // （`WindowControlArea::Drag`），gpui 在 WM_NCHITTEST 里一旦命中
@@ -581,7 +572,18 @@ impl Render for AppRoot {
                                         }),
                                     ),
                             ),
-                        ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().secondary_foreground)
+                                .child("Alacrterm"),
+                        )
+                        // 侧边栏折叠开关（左 / 右各一枚），靠 flex_1 的标题顶到
+                        // 内容区最右端、窗口控制按钮左侧。两枚按钮各自包了 `occlude`。
+                        .child(self.render_sidebar_toggles(cx)),
                 ),
             )
             // —— 中部：主体（左侧边栏 | 中间列 | 右侧边栏）——
