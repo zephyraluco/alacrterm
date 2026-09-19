@@ -8,7 +8,7 @@
 //! 两条入口的区别（详见 [`crate::main`] 模块文档）：
 //! - [`AppRoot::spawn_terminal`]：直接开一个**本地**终端（标签栏 `+` / 欢迎页）；
 //! - [`AppRoot::spawn_session`]：按给定参数开终端（双击侧边栏的会话记录）。
-//! 两者都会新建终端实例；侧边栏**添加记录**不走本模块（[`AppRoot::add_session_record`]）。
+//! 两者都会新建终端实例；侧边栏**添加记录**不走本模块（[`SessionsState::add_record`](crate::sidebar_panel::sessions::SessionsState::add_record)）。
 //!
 //! 会话进程结束时终端不消失（网格与标签保留，状态栏显示「已断开」）；全部关掉后
 //! 中间列显示欢迎页（[`AppRoot::render_welcome`]）。

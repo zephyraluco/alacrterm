@@ -183,12 +183,12 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let form = ConnectionForm::new(window, cx);
-        // 对话框回调只有 &mut App，拿不到 AppRoot；用弱引用回到根视图加记录。
-        let root = cx.entity().downgrade();
+        // 加记录写的是**会话列表实体**（`SessionsState`）的状态，直接把它的句柄带进对话框。
+        let sessions = self.sessions.clone();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let form_for_ok = form.clone();
-            let root_for_ok = root.clone();
+            let sessions_for_ok = sessions.clone();
             let folder_for_ok = folder.clone();
             // 必填项是否齐全：驱动「添加」的禁用态与下方的提示行。
             let valid = form.is_valid(cx);
@@ -218,11 +218,9 @@ impl AppRoot {
                         return false;
                     };
                     let folder = folder_for_ok.clone();
-                    // 动作回调执行期间窗口仍在更新栈上，直接 update_in 会失败
-                    // （"entity has no current window"），交给 `defer_after_update` 让出一拍。
-                    AppRoot::defer_after_update(root_for_ok.clone(), cx, move |this, _, cx| {
-                        this.add_session_record(record, folder, cx);
-                    });
+                    // 只加记录、不开终端；列表状态在 `SessionsState` 里 ⇒ 直接写它
+                    // （不需要窗口，所以不必像「建终端」那样用 `defer_after_update`）。
+                    sessions_for_ok.update(cx, |state, cx| state.add_record(record, folder, cx));
                     // 返回 true 让对话框关闭。
                     true
                 })

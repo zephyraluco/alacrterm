@@ -16,7 +16,7 @@
 //!   数值由 [`crate::status_metrics`] 每 1.5s 采样一次；没有会话时只显示一句「无会话」。
 //!
 //! 两侧边栏的折叠 / 展开开关与「设置」入口都在标题栏
-//! （[`crate::AppRoot::render_sidebar_toggles`] / [`crate::AppRoot::render`]），
+//! （[`crate::sidebar_panel::toggle_button`] / [`crate::AppRoot::render`]），
 //! 标题栏常驻，所以状态栏里不再需要任何恢复入口。
 //!
 //! 指标各段的排版（弱化色标签 + 常规色数值、`·` 分隔）沿用原先终端状态栏的实现。

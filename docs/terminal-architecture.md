@@ -103,14 +103,14 @@ assets/
 crates/
   alacrterm/                    # 应用层(§3)
     src/
-      main.rs                   # 入口 + AppRoot(根视图)
+      main.rs                   # 入口 + AppRoot(根视图:跨组件共享状态 + 布局装配)
       terminal_panel.rs         # 会话生命周期 + SessionRequest/SessionTarget + Session + SessionPane
       tab_bar.rs                # 自绘标签栏
       status_bar.rs             # 公共状态栏;STATUS_BAR_HEIGHT 统一三条高度
       sidebar_panel/            # 左右侧边栏(§3.2)
-        mod.rs                  # 外壳:容器装配 / 视图标签数据 / 两枚折叠开关 / 两端按钮
+        mod.rs                  # Sidebar 实体(标签/折叠/宽度 + Render) + toggle_button + SidebarContent
         tabs.rs                 # 顶部视图标签条(点选 + 拖动换位 / 拖到另一条侧边栏)
-        sessions.rs             # 「会话」视图 + 记录模型(SessionEntry/Folder/Record/Path):文件夹树
+        sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + Render)
         session_info.rs         # 「会话信息」视图
       dialog/                   # 对话框(§3.4)
         mod.rs                  # 共同约定(表单实体先建 / 页脚自拼 / on_ok 兜底校验)
@@ -174,33 +174,35 @@ fn main() {
 - 窗口 1100×700;`Assets` 来自 `assets.rs` 的 `icon_named!(IconName, "../../assets/icons")`(扫描图标目录生成枚举,并实现 `From<IconName> for AnyElement` / `RenderOnce`)
 - `Root` 是弹窗 / 通知 / 焦点恢复的宿主,但**不会自动渲染 Dialog 层**:需在渲染树里显式 `.children(Root::render_dialog_layer(window, cx))`
 - `TitleBar::window_options()` 内部为 `appears_transparent` + `app_owns_titlebar_drag`
-- 标题栏内容区(`TitleBar::new().child(..)`,见 §3.5)三段:左端 = 「设置」文字按钮([`AppRoot::open_settings_window`]),中段 = `flex_1` 的标题「Alacrterm」,右端 = 两枚侧边栏折叠开关(`AppRoot::render_sidebar_toggles`,左 / 右各一枚)。⚠️ 内容区整体是窗口拖拽区(`WindowControlArea::Drag`),其中的按钮都必须包 `div().occlude()`,否则点击被当成「拖标题栏」而收不到
+- 标题栏内容区(`TitleBar::new().child(..)`,见 §3.5)三段:左端 = 「设置」文字按钮([`AppRoot::open_settings_window`]),中段 = `flex_1` 的标题「Alacrterm」,右端 = 两枚侧边栏折叠开关(`sidebar_panel::toggle_button`,左 / 右各一枚)。⚠️ 内容区整体是窗口拖拽区(`WindowControlArea::Drag`),其中的按钮都必须包 `div().occlude()`,否则点击被当成「拖标题栏」而收不到
 
 ### 3.2 布局装配(左右侧边栏 / 分栏 / dock 会话面板 / 底部三条状态栏)
 
 `AppRoot::render` 只负责装配:`h_resizable("right-split")[h_resizable("main-split")[左栏, 中间列], 右栏]`;容器渲染方法统一返回 `AnyElement`(edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,同一渲染树里连续 `&mut cx` 会借用冲突)。
 
-- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成,不给状态栏算面板宽度。**两条侧边栏顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,实现见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**(不因只有一项而隐藏)。样式照 **VS Code 的面板标签**:纯文字、无边框、按内容宽度左对齐,只有悬停 / 选中的那块有圆角浅灰底 ⇒ 标签是**手绘**的 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` 也不用 `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时才点亮成插入提示,免得高亮把标签尺寸顶变。**标签可以在两条侧边栏之间自由拖动**:同一栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置,`[A,B]` 拖 A 到 B 上得到 `[B,A]`),拖到另一栏 = 把视图搬过去并选中它;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区域兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧的顺序与选中项存在 `AppRoot::left_tabs` / `right_tabs`(`SidebarTabs`),**同一视图可出现在任一侧**;标签条为空时该栏显示「把标签拖到这里」提示。视图目前只有两个:`Sessions`(会话,`sidebar_panel/sessions.rs`)与 `SessionInfo`(会话信息,`sidebar_panel/session_info.rs`),内容各自一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。
+**状态与渲染都归子组件**:一条侧边栏 = 一个实体(`Entity<Sidebar>`,左右各一个,见 `sidebar_panel/mod.rs`),它自带标签 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 视图标签条 + 当前视图内容 + 底部状态栏);根视图只把它 `.child(..)` 摆进分栏面板、把 `sidebar_panel::toggle_button` 摆进标题栏。「会话」列表也是实体(`Entity<SessionsState>`,见 `sidebar_panel/sessions.rs`),记录树 + 展开状态 + `TreeState` + 增删改 + **它自己的渲染**都在里面,两条侧边栏共用它。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 指标采样器 / 背景焦点);渲染时 `read` 出装配所需的值,交互回调 `update` 回实体。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 侧边栏实体持一个 `WeakEntity<AppRoot>`:会话信息视图要读终端表(Zed 式反向引用,`ProjectPanel` 也持 `WeakEntity<Workspace>`);两条侧边栏互持 `sibling` 弱引用,标签跨栏拖动的「从另一条取视图」靠它。⚠️ 还没上 `.cached()`(留给 `docs/gpui-architecture.md` §优化顺序):子件实体自己 `notify` 只影响窗口脏标记,每帧仍旧重建整棵树。
+
+- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成,不给状态栏算面板宽度。**两条侧边栏顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,实现见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**(不因只有一项而隐藏)。样式照 **VS Code 的面板标签**:纯文字、无边框、按内容宽度左对齐,只有悬停 / 选中的那块有圆角浅灰底 ⇒ 标签是**手绘**的 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` 也不用 `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时才点亮成插入提示,免得高亮把标签尺寸顶变。**标签可以在两条侧边栏之间自由拖动**:同一栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置,`[A,B]` 拖 A 到 B 上得到 `[B,A]`),拖到另一栏 = 把视图搬过去并选中它;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区域兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧的顺序与选中项存在各自的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;标签条为空时该栏显示「把标签拖到这里」提示。视图目前只有两个:`Sessions`(会话,`sidebar_panel/sessions.rs`)与 `SessionInfo`(会话信息,`sidebar_panel/session_info.rs`),内容各自一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。
 
 #### 会话列表(文件夹树:记录 + 拖放)
 
-> 代码在 `sidebar_panel/sessions.rs`(树、行、拖放、记录增删都在那里;`sidebar_panel/mod.rs` 只在 `render_sidebar` 里调 `AppRoot::render_sessions_tree`)。
+> 状态与渲染都在 `sidebar_panel/sessions.rs` 的 `SessionsState` 实体里(记录模型 + 展开状态 + `TreeState` + 全部增删改 + 它的 `Render`);它作为 `SidebarContent::Sessions(Entity<SessionsState>)` 被摆进侧边栏的内容位。
 
 列表内容是**会话记录**(连接配置),与终端实例**完全无关**:一条记录有没有在跑终端,取决于用户是否双击过它;关掉终端也不影响列表。形态参考 MobaXterm —— **没有自动生成的根文件夹**,顶层直接就是用户自己建的文件夹(可嵌套)与记录;文件夹行只显示名字(**不显示「里面有几条」**)。
 
-- **数据**:`AppRoot::session_entries: Vec<SessionEntry>`,`enum SessionEntry { Folder(SessionFolder), Session(SessionRecord) }`;路径用 `SessionPath = Vec<usize>`(从顶层开始的下标链,`[]` = 顶层本身)。
+- **数据**:`SessionsState::entries: Vec<SessionEntry>`(私有,读写都经 `SessionsState` 的方法),`enum SessionEntry { Folder(SessionFolder), Session(SessionRecord) }`;路径用 `SessionPath = Vec<usize>`(从顶层开始的下标链,`[]` = 顶层本身)。
 - **加条目**:状态栏**左下角**文件夹图标(`NewFolder`,落顶层)、**右下角** `+`(`NewSession`,落顶层);文件夹行右键可以「在这里新建会话 / 新建子文件夹」(带 `folder` / `parent` 参数落进那个文件夹)。新条目一律**追加到目标目录末尾**,并顺手展开目标文件夹(否则新条目看不见)。
 - **删条目**:记录行右键「删除会话」、文件夹行右键「删除文件夹」(**连带**里面的内容)。两条都只改列表,不动已开的终端。
-- **开终端**:双击记录行(单击只选中)、或右键「打开会话」→ `OpenSession` → `AppRoot::open_session_record` → `spawn_session(record.request())`。同一条记录可以开任意多个终端。
-- **拖放**:记录行与文件夹行都能拖(载荷 `DragSessionEntry{path,label}` + 自绘 `SessionDragPreview`);落在**文件夹行**上 = 放进该文件夹,落在**会话行**上 = 放进它所在的那个目录,落在列表下方那条 16px 空白落点(`#session-tree-top-level-drop`)上 = **提到顶层**;`drag_over` 用 `tokens.accent` 高亮落点。合法性由 `AppRoot::move_session_entry` 把关:目标必须存在、且不能是**自己或自己的子孙**(否则会把子树拖成环)。⚠️ 移动时「跟随被拖动子树的展开标记」要一起搬到新路径(存的是相对路径),同一目录下排在源条目之后的展开标记下标要前移一位 —— 两个方向都有专门的 helper(`shift_path_after_removal` / `shift_paths_after_removal`)。
+- **开终端**:双击记录行(单击只选中)、或右键「打开会话」→ `OpenSession` → `AppRoot::open_session_record`(**跨组件:**向 `SessionsState` 要参数、再 `spawn_session`)。同一条记录可以开任意多个终端。
+- **拖放**:记录行与文件夹行都能拖(载荷 `DragSessionEntry{path,label}` + 自绘 `SessionDragPreview`);落在**文件夹行**上 = 放进该文件夹,落在**会话行**上 = 放进它所在的那个目录,落在列表下方那条 16px 空白落点(`#session-tree-top-level-drop`)上 = **提到顶层**;`drag_over` 用 `tokens.accent` 高亮落点。合法性由 `SessionsState::move_entry` 把关:目标必须存在、且不能是**自己或自己的子孙**(否则会把子树拖成环)。⚠️ 移动时「跟随被拖动子树的展开标记」要一起搬到新路径(存的是相对路径),同一目录下排在源条目之后的展开标记下标要前移一位 —— 两个方向都有专门的 helper(`shift_path_after_removal` / `shift_paths_after_removal`)。
 - **行**(`session_tree_row`,组件要求返回 `ListItem`):**同一目录下文件夹与会话同级**——两行都从 `pl(8px + depth × 16px)` 开始(不给会话行多加一个 caret 宽度的缩进,否则会话看上去低一级)。文件夹行 = 子项非空时才画的 caret + 文件夹图标 + 名字;会话行 = 地球图标 + 名字(记录目前只有 SSH 一种)。⚠️ **行类型由行 id 前缀判断**(`folder-0-2` / `session-1`,`row_id` / `session_row` 互转),**不能**用 `TreeEntry::is_folder()`:gpui-kit 的 `TreeItem::is_folder()` 是「有没有子项」的意思,**空文件夹会被当成叶子**(画成会话行、双击还想开终端)。caret 仍用 `entry.is_folder()`(空文件夹没有子项、点了也不会有反应)。
-- **展开状态存在 `AppRoot::expanded_folders`**(`Vec<SessionPath>`),**不在** `TreeItem` 里:条目树每次同步都重建 `TreeItem`(见下),存树里会每刷一次就全部收起。同步时按它给文件夹行 `.expanded(..)`;用户展收由 `cx.subscribe(&session_tree, ..)` 收 `TreeEvent::{Expanded,Collapsed}`(行 id → 路径)回写,并 `cx.notify()`。它同时是**算行数**的依据。
-- ⚠️ `Tree` 内部是**等高虚拟列表** + 链尾 `refine_style(size_full)` ⇒ 它塞进 `Sidebar` 自己的虚拟列表(自动高度)时拿不到确定高度、会塌成 0;因此渲染时必须 `.h(行数 × TREE_ROW_HEIGHT)`(`TREE_ROW_HEIGHT = 28px`),行数 = `AppRoot::visible_session_rows()`(只算展开的文件夹的子项)。渲染外层是 `v_flex[tree, 顶层落点条]`。
-- ⚠️ `sync_session_tree` 在每次 `render` 开头按签名(`(名字, 是否文件夹, 层级)` 全量、含被收起的子树)同步,**签名没变就直接返回**:`TreeState::set_items` 会 notify,每帧无条件调用会自激成死循环。⚠️ 签名用 `Option<Vec<..>>`,`None` = 还没同步过——用空 `Vec` 表达「没同步过」会让首次同步被当成「签名没变」跳掉,树永远拿不到 items(实测:侧边栏一片空白)。
+- **展开状态存在 `SessionsState::expanded`**(`Vec<SessionPath>`),**不在** `TreeItem` 里:条目树每次同步都重建 `TreeItem`(见下),存树里会每刷一次就全部收起。同步时按它给文件夹行 `.expanded(..)`;用户展收由 `SessionsState::new` 里的 `cx.subscribe(&tree, ..)` 收 `TreeEvent::{Expanded,Collapsed}`(行 id → 路径)回写,并 `cx.notify()`。它同时是**算行数**的依据。
+- ⚠️ `Tree` 内部是**等高虚拟列表** + 链尾 `refine_style(size_full)` ⇒ 它塞进 `Sidebar` 自己的虚拟列表(自动高度)时拿不到确定高度、会塌成 0;因此渲染时必须 `.h(行数 × TREE_ROW_HEIGHT)`(`TREE_ROW_HEIGHT = 28px`),行数 = `SessionsState::visible_rows()`(只算展开的文件夹的子项)。渲染外层是 `v_flex[tree, 顶层落点条]`。
+- ⚠️ `SessionsState::sync_tree` 在每次 `AppRoot::render` 开头(经 `sessions.update(..)`)按签名(`(名字, 是否文件夹, 层级)` 全量、含被收起的子树)同步,**签名没变就直接返回**:`TreeState::set_items` 会 notify,每帧无条件调用会自激成死循环。⚠️ 签名用 `Option<Vec<..>>`,`None` = 还没同步过——用空 `Vec` 表达「没同步过」会让首次同步被当成「签名没变」跳掉,树永远拿不到 items(实测:侧边栏一片空白)。
 - **选中**:树自己的 `selected_ix`(行点击设置),**不再**跟当前终端挂钩(列表是记录,「当前会话」由标签栏体现)。⚠️ `ListItem` 默认用 `list_active` 画选中底色,本仓库的 Hybrid Dark 把它压到了 6% 不透明度(`list.active.background = #15678a10`),淡到跟悬停底色分不出来 ⇒ [`config::change_theme`] 里关掉 `list.active_highlight`,改用 `accent`(`#31393a`,与侧边栏顶部选中的视图标签同色),再配上 `font_medium` + `sidebar_accent_foreground` 文字色。
-- **右键菜单**挂在组件级 `Tree::context_menu` 上(记录行 / 文件夹行各一套);**列表为空**时树是 0 行、什么也画不出来,`SessionTree::render` 会改成一句提示文字。
+- **右键菜单**挂在组件级 `Tree::context_menu` 上(记录行 / 文件夹行各一套);**列表为空**时树是 0 行、什么也画不出来,`SessionsState::render` 会改成一句提示文字。
 - 因为 `Sidebar::child` 只吃单一类型,树与内置菜单用 `SidebarContent` 枚举统一(`Collapsible + SidebarItem` 转发)。会话信息视图仍是 `SidebarMenu`,**两层都不再套 `SidebarGroup`**(后者固定渲染一行 `h_8()` 段标题,而标题已经在顶部标签上了)。`Sidebar` 的 id 带侧与当前视图名,让各视图分别记住段落展开状态。
-- **两条侧边状态栏**:显示「会话」视图的那条两端各一枚按钮(左下 = 新建文件夹,右下 = 新建会话),其余情况是空条(只为与中间那条等高);两栏都不放折叠开关(已移到标题栏)。宽度记忆在 `AppRoot` 的 `ResizableState` 上。
+- **两条侧边状态栏**:显示「会话」视图的那条两端各一枚按钮(左下 = 新建文件夹,右下 = 新建会话),其余情况是空条(只为与中间那条等高);两栏都不放折叠开关(已移到标题栏)。宽度与那一组 `ResizableState` 都在各自的 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 钉回期望宽度)。
 - **中间列**:`v_flex[终端区 dock, 公共状态栏]`;公共状态栏在 dock 外面且常驻。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」(直接开一个本地终端)/「打开设置」两行操作)。
 - **分两层嵌套**:`main-split` = 左栏 | 中间列,`right-split` = 内层 | 右栏(面板宽度按下标存在 `ResizableState`,三面板同组会互相挤)。
 - **终端区 = dock,只用 center**(左右侧边栏不进 dock):每个会话一块 `SessionPane`,`add_panel_view(.., DockPlacement::Center, ..)` 挂入;`AppRoot::build_dock` 里 `set_locked(false)`。面板覆写 `title_bar(false)` / `inner_padding(false)` / `zoomable(false)` / `zoom_control() -> None`,`closable` 为真。⚠️ 注册必须走 `panel_handle`(裸 `Entity<P>` 时 skin 取不到表现层 trait,标签会退化成只写 `panel_name` 的标题栏)。
@@ -231,10 +233,10 @@ struct SessionRecord { name: SharedString, user: String, host: String, port: Str
 type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3.2 会话列表)
 ```
 
-- **代码位置**(按使用方归属,没有单独的 `session.rs`):`SessionTarget` / `SessionRequest` 与运行时句柄 `Session` 同在 `terminal_panel.rs`(连接目标与打开参数只被终端实例 / 状态栏用);`SessionEntry` / `SessionFolder` / `SessionRecord` / `SessionPath` 在 `sidebar_panel/sessions.rs`(记录树的数据,以及该视图的增删改 / 拖放);`main.rs` 只留程序入口 + 根视图 `AppRoot`。
+- **代码位置与归属**(没有单独的 `session.rs`):`SessionTarget` / `SessionRequest` 与运行时句柄 `Session` 同在 `terminal_panel.rs`(终端实例那条线);`SessionEntry` / `SessionFolder` / `SessionRecord` / `SessionPath` 与**视图状态 `SessionsState`** 同在 `sidebar_panel/sessions.rs`(记录那条线:数据 + 增删改 + 拖放 + 树同步);`main.rs` 只留程序入口 + 根视图 `AppRoot`(跨组件共享状态 + 装配)。
 - `Session::title(cx)` / `Session::target(cx)` 都转调 `pane`(`SessionPane` 持有显示名 + 连接目标:标签栏读名字、状态栏读目标)。标题取自终端 **OSC 标题**(`breadcrumb_text`),不是 `Shell::WithArguments` 的 `title_override` ⇒ 自定义名称必须自己存。
 - 新建统一走 `AppRoot::spawn_session(SessionRequest { .. })`:`spawn_terminal`(本地系统 shell)与 `open_session_record`(按记录连 SSH)都经由它:建好 `TerminalView` 后包成 `SessionPane` 挂进 dock,再 `move_panel` 到该进的标签组(§3.2)。
-- ⚠️ **两条线不要混**:`AppRoot::session_entries`(会话记录:配置,§3.2 会话列表)与 `AppRoot::terminals`(终端实例:dock 面板)彼此独立 —— 记录可以 0 个终端,终端也可以不属于任何记录(标签栏 `+` 开的本地终端)。
+- ⚠️ **两条线不要混**:`SessionsState::entries`(会话记录:配置,§3.2 会话列表)与 `AppRoot::terminals`(终端实例:dock 面板)彼此独立 —— 记录可以 0 个终端,终端也可以不属于任何记录(标签栏 `+` 开的本地终端)。
 - 生命周期:`close_terminal`(→ `DockArea::remove_panel`)、`close_panel_id`(标签 `×` / 中键)、`sync_sessions_with_dock`;下标访问一律先 `get()`(允许会话为空)。dock 点标签会回调面板的 `set_active`,它用 `AppRoot::defer_after_update` 回写 `active`。(原先那个「按会话下标激活」的 `set_active_tab` 已随「双击记录才开终端」一起删除 —— 列表不再是终端表。)
 - 进程结束:只标记 `exited` 并 `notify`,状态栏显示「已断开」,标签与终端内容保留(§5)。
 

@@ -6,7 +6,7 @@
 //!
 //! 两个入口的触发点都在侧边栏（状态栏两端的两枚按钮 / 文件夹行的右键菜单），
 //! 统一走 [`crate::actions`] 的 action；真正的列表改动落在
-//! [`crate::sidebar_panel::sessions`] 的 `AppRoot` 方法上。
+//! [`crate::sidebar_panel::sessions::SessionsState`] 实体上（实体句柄随对话框一起传入）。
 //!
 //! 共同约定：
 //! - **表单实体必须在打开对话框之前创建**（构建闭包是 `Fn`，每帧都会被调用，
@@ -14,8 +14,9 @@
 //! - 页脚自己用 `DialogFooter` + `DialogClose` / `DialogAction` 拼（`Dialog`
 //!   不会自动生成确定 / 取消按钮）；
 //! - `on_ok` 里既做**兜底校验**（必填项缺失就 `return false`，不关对话框），
-//!   也负责把结果交给根视图 —— 动作回调期间窗口仍在更新栈上，所以要配
-//!   [`crate::AppRoot::defer_after_update`] 让出一拍。
+//!   也负责把结果交给会话列表实体；⚠️ 只有**需要窗口**的动作（开终端 / 开窗）才要配
+//!   [`crate::AppRoot::defer_after_update`]：回调期间窗口仍在更新栈上，直接 `update_in`
+//!   会失败。本模块两个对话框只改列表状态（`sessions.update(..)`），不用让拍。
 
 mod connection;
 mod folder;

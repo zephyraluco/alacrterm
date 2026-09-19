@@ -1,40 +1,43 @@
 //! 侧边栏(左侧 / 右侧):顶部可拖动的视图标签 + 视图内容 + 底部状态栏。
 //!
-//! 装配见 [`crate::AppRoot::render`]:
-//! - **两侧边栏**([`AppRoot::render_sidebar_container`] /
-//!   [`AppRoot::render_right_sidebar_container`]):实现是共享的 [`AppRoot::render_sidebar`],
-//!   两侧只有 `Side`(边框 / 折叠方向)与各自的标签数据不同。宽度由分栏面板(可拖拽
-//!   分隔条)决定,故自身只需 `w_full`;内容直接是 [`SidebarMenu`] 或会话树
-//!   (**不套 `SidebarGroup`**:它固定渲染一行段标题,而标题已经在顶部标签上了)。
-//! - **视图标签条**([`tabs`]):挂在 `Sidebar::header` 上 ⇒ 固定在顶部、不随内容滚动、
-//!   随侧边栏折叠一起隐藏。标签可以在两条侧边栏之间自由拖动(换位 / 换面板),顺序与
-//!   选中项存在 [`SidebarTabs`] 里(`AppRoot::left_tabs` / `right_tabs`)⇒
-//!   **每个视图可以出现在任一侧边栏的任意位置**。
-//! - **两枚折叠开关**([`AppRoot::render_sidebar_toggles`]):渲染在**标题栏右端**
-//!   (见 [`crate::AppRoot::render`]),图标随各自的折叠状态变化。标题栏常驻窗口顶部,
-//!   所以开关不受折叠影响、折叠后仍点得到(唯一的恢复入口)。
-//! - **两条侧边状态栏**:显示「会话」视图的那条两端各一枚按钮(左下 = 新建文件夹、
-//!   右下 = 新建会话),两者都**只加列表条目、不开终端**(见 [`crate::dialog`]);
-//!   其余情况是空条,保留只为与中间那条状态栏等高对齐。
+//! **一条侧边栏 = 一个实体**([`Sidebar`],左右各一个):自己的标签、折叠状态、期望宽度、
+//! 那一组分栏面板状态,以及**自己的渲染**([`Render`] 实现里装配
+//! 视图标签条 + 当前视图内容 + 底部状态栏)。根视图只把它 `.child(..)` 摆进分栏面板,
+//! 不再代它渲染。
 //!
-//! 两个视图的内容各自一个文件、互不相干:
-//! - [`sessions`]:会话列表(文件夹形式的记录树:增删、拖放、双击开终端);
-//! - [`session_info`]:当前会话的只读信息。
+//! 跨组件的数据只有两处:
+//! - [`sessions::SessionsState`]:「会话」视图的内容(记录树),两条侧边栏共用同一个实体
+//!   ([`SidebarView::Sessions`] 那个标签落在哪一侧,就由哪一侧把它摆出来);
+//! - `root`(弱引用):会话信息视图要读终端表 —— Zed 式反向引用
+//!   (`ProjectPanel` 也持有 `WeakEntity<Workspace>`),比自己再开一个实体简单。
+//!
+//! 其余分工:
+//! - **视图标签条**([`tabs`]):挂在 `Sidebar::header` 上 ⇒ 固定在顶部、不随内容滚动、
+//!   随侧边栏折叠一起隐藏。标签可以在两条侧边栏之间自由拖动(换位 / 换面板):同一栏内换位
+//!   是本实体自己的事,跨栏则经 `sibling` 弱引用把视图从另一条实体取过来
+//!   (Zed 里由 `Workspace` 协调,这里让两条侧边栏互指)。
+//! - **折叠开关**([`toggle_button`]):渲染在**标题栏右端**(由根视图摆放),图标随各自的
+//!   折叠状态变化。标题栏常驻窗口顶部,所以开关不受折叠影响、折叠后仍点得到(唯一的恢复入口)。
+//! - **两枚状态栏按钮**(显示「会话」视图的那条才有):左下 = 新建文件夹([`NewFolder`])、
+//!   右下 = 新建会话([`NewSession`]),两者都**只加列表条目、不开终端**(见 [`crate::dialog`])。
 //!
 //! 两侧边栏用**两组嵌套的分栏面板**装配(内层 `main-split`、外层 `right-split`),
 //! 因为面板宽度按下标存在 `ResizableState` 里:三个面板挤在同一组时,
-//! 任一侧折叠都会让另一侧的下标漂移、拖出来的宽度丢失。
+//! 任一侧折叠都会让另一侧的下标漂移、拖出来的宽度丢失。每组状态归对应的那条侧边栏
+//! ([`Sidebar::pin_width`] 每帧把宽度钉回期望值)。
+//!
 //! 「设置」入口不在本模块,而在标题栏左侧的文字按钮上(见 [`crate::AppRoot::render`])。
 
 use gpui::{
-    AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, SharedString, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Styled as _, WeakEntity, Window,
+    div, px,
 };
 use gpui_kit::component::{
     Collapsible, Side, Sizable as _,
     button::{Button, ButtonVariants as _},
-    h_flex,
-    sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem},
+    resizable::ResizableState,
+    sidebar::{Sidebar as SidebarWidget, SidebarItem, SidebarMenu, SidebarMenuItem},
     status_bar::StatusBar,
     v_flex,
 };
@@ -48,10 +51,11 @@ mod session_info;
 pub(crate) mod sessions;
 mod tabs;
 
-use sessions::SessionTree;
+use sessions::SessionsState;
 
 /// 顶部视图标签条的高度(标签本身与拖拽预览卡片共用)。
 pub(super) const TAB_HEIGHT: Pixels = px(24.);
+/// 左侧边栏默认宽度（分栏面板首次布局时的初始宽度）。
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: Pixels = px(220.);
 /// 侧边栏拖拽时的最小宽度（须大于组件内部的 `PANEL_MIN_SIZE` = 100px）。
 pub(crate) const SIDEBAR_MIN_WIDTH: Pixels = px(150.);
@@ -67,6 +71,7 @@ pub(crate) const RIGHT_SIDEBAR_MAX_WIDTH: Pixels = px(460.);
 
 /// 右侧边栏的名称：作它那个视图的标签文字，也作面板里的段落标题。
 pub(crate) const RIGHT_SIDEBAR_LABEL: &str = "会话信息";
+
 /// 侧边栏的哪一侧（标签可以在这两侧之间拖动）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarSide {
@@ -80,6 +85,17 @@ impl SidebarSide {
         match self {
             Self::Left => "left",
             Self::Right => "right",
+        }
+    }
+
+    /// 该侧边栏在**自己那一组**分栏面板里的下标。
+    ///
+    /// 左栏是 `main-split` 的第 0 个面板（后面还有中间列）；右栏是 `right-split` 的
+    /// 第 1 个面板（最后一个，`resize_panel` 会挤压前一个面板来给它让位）。
+    fn panel_index(self) -> usize {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
         }
     }
 }
@@ -119,7 +135,7 @@ impl SidebarView {
     }
 }
 
-/// 一条侧边栏上的标签：**顺序 + 当前选中**（标签可以拖到另一条侧边栏，见 [`DragSidebarTab`]）。
+/// 一条侧边栏上的标签：**顺序 + 当前选中**（标签可以拖到另一条侧边栏，见 [`tabs`]）。
 #[derive(Clone)]
 pub(crate) struct SidebarTabs {
     views: Vec<SidebarView>,
@@ -169,129 +185,236 @@ impl SidebarTabs {
     }
 }
 
-/// 拖动中的侧边栏标签（拖放载荷）。
-impl AppRoot {
-    /// 设置左侧边栏是否显示（只由标题栏里的折叠开关调用）。
-    pub(crate) fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.sidebar_visible == visible {
+// ---------------------------------------------------------------- 侧边栏实体
+
+/// 一条侧边栏（左 / 右各一个实体）。
+///
+/// **状态与渲染都在这里**：本实体实现 [`Render`]，整列 = 视图标签条 + 当前视图内容 +
+/// 底部状态栏；根视图只负责把它摆进分栏面板、把 [`toggle_button`] 摆进标题栏。
+pub(crate) struct Sidebar {
+    /// 我是哪一条（决定 `Side::Right`、分栏面板下标、元素 id）。
+    side: SidebarSide,
+    tabs: SidebarTabs,
+    visible: bool,
+    /// 本栏的「期望宽度」（逻辑像素）：用户拖拽分隔条后的宽度记在这里。
+    ///
+    /// 分栏容器在容器尺寸变化时会把面板按比例重排，于是窗口一变宽、侧边栏就跟着变宽；
+    /// 记下期望宽度后由 [`Sidebar::pin_width`] 把面板钉回去，让宽窄变化全部由中间那一列吸收。
+    width: Pixels,
+    /// 本栏那一组分栏面板的共享状态（左栏 = `main-split`，右栏 = `right-split`）。
+    resize: Entity<ResizableState>,
+    /// 上一次看到的容器宽度：分栏容器只在**容器宽度变化**的那次布局里重排面板，
+    /// 所以「和上次不一样」就等于「刚发生过重排」——[`Sidebar::pin_width`] 据此决定动不动手。
+    split_width: Option<Pixels>,
+    /// 「会话」视图的状态（记录树）：两条侧边栏共用同一个实体。
+    sessions: Entity<SessionsState>,
+    /// 根视图（弱引用）：会话信息视图要读终端表。
+    root: WeakEntity<AppRoot>,
+    /// 另一条侧边栏：标签跨栏拖动时要把视图从它那儿取过来。
+    sibling: Option<WeakEntity<Sidebar>>,
+}
+
+impl Sidebar {
+    pub(crate) fn new(
+        side: SidebarSide,
+        sessions: Entity<SessionsState>,
+        root: WeakEntity<AppRoot>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            side,
+            // 默认：左栏是「会话」，右栏是「会话信息」（都可以拖动改变）。
+            tabs: match side {
+                SidebarSide::Left => SidebarTabs::new(vec![SidebarView::Sessions]),
+                SidebarSide::Right => SidebarTabs::new(vec![SidebarView::SessionInfo]),
+            },
+            visible: true,
+            width: match side {
+                SidebarSide::Left => SIDEBAR_DEFAULT_WIDTH,
+                SidebarSide::Right => RIGHT_SIDEBAR_DEFAULT_WIDTH,
+            },
+            resize: cx.new(|_| ResizableState::default()),
+            split_width: None,
+            sessions,
+            root,
+            sibling: None,
+        }
+    }
+
+    /// 接上另一条侧边栏（两条都建好后由根视图调用一次）。
+    pub(crate) fn connect(&mut self, sibling: WeakEntity<Sidebar>) {
+        self.sibling = Some(sibling);
+    }
+
+    fn other(&self) -> Option<WeakEntity<Sidebar>> {
+        self.sibling.clone()
+    }
+
+    /// 本栏是否可见。
+    pub(crate) fn visible(&self) -> bool {
+        self.visible
+    }
+
+    /// 设置是否显示（只由标题栏里的折叠开关调用；值没变时什么都不做）。
+    pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
             return;
         }
-        self.sidebar_visible = visible;
+        self.visible = visible;
         cx.notify();
     }
 
-    /// 设置右侧边栏是否显示（标题栏右端的折叠开关调用）。
-    pub(crate) fn set_right_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.right_sidebar_visible == visible {
+    /// 折叠 / 展开（标题栏那枚开关）。
+    pub(crate) fn toggle(&mut self, cx: &mut Context<Self>) {
+        let visible = self.visible;
+        self.set_visible(!visible, cx);
+    }
+
+    /// 本栏的「期望宽度」。
+    pub(crate) fn width(&self) -> Pixels {
+        self.width
+    }
+
+    /// 记下拖拽后的宽度（分栏的 `on_resize` 回调里调）。
+    pub(crate) fn set_width(&mut self, width: Pixels) {
+        self.width = width;
+    }
+
+    /// 本栏那一组分栏面板的共享状态（根视图装配 `h_resizable` 时用）。
+    pub(crate) fn resize_state(&self) -> &Entity<ResizableState> {
+        &self.resize
+    }
+
+    /// 确保本栏保持「期望宽度」，宽度变化全部由中间那一列吸收（在 `AppRoot::render` 开头调）。
+    ///
+    /// 分栏容器在容器尺寸变化时会把**所有**面板按比例重排
+    /// （`ResizableState::adjust_to_container_size`）——于是缩放窗口、折叠另一侧边栏
+    /// 都会把侧边栏一起带宽 / 带窄。这里发现容器宽度与上次不同（即刚重排过）就立刻
+    /// `resize_panel` 钉回 [`Sidebar::width`]；多出来 / 少掉的空间自然落到中间那一列。
+    ///
+    /// 「只在容器宽度变过时才动手」很关键：拖拽分隔条不改变容器宽度，所以不会和用户抢宽度
+    /// （拖拽结果由 `on_resize` 回调记进 [`Sidebar::set_width`]）。期望宽度与当前宽度相同时
+    /// `ResizableState::resize_panel` 直接返回，因此可以每帧调用。
+    pub(crate) fn pin_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.visible {
             return;
         }
-        self.right_sidebar_visible = visible;
+        let width = self.width;
+        let container = self.resize.read(cx).container_size();
+        if self.split_width != Some(container) {
+            self.split_width = Some(container);
+            let index = self.side.panel_index();
+            self.resize.update(cx, |state, cx| {
+                state.resize_panel(index, width, window, cx);
+            });
+        }
+    }
+
+    /// 让本栏可见（拖放落地时意味着「用户在看它」）。
+    fn show(&mut self) {
+        self.visible = true;
+    }
+
+    /// 点击标签：切到它代表的视图。
+    ///
+    /// **只切视图，不改可见性**——折叠 / 展开只由标题栏那枚开关负责。
+    /// 因此点击**当前**标签是空操作。
+    fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !self.tabs.select(index) {
+            return;
+        }
+        // 标签只在侧边栏可见时渲染，所以这里其实必然是 true；
+        // 保留赋值是为了让「切视图 ⇒ 侧边栏可见」这个不变量不依赖渲染条件。
+        self.show();
         cx.notify();
     }
 
-    /// 两枚侧边栏折叠 / 展开开关（渲染在**标题栏右端**，见 [`crate::AppRoot::render`]）。
+    /// 把拖动的标签放到本栏的第 `index` 个标签处（占它的位置）。
     ///
-    /// 左枚控制左侧边栏、右枚控制右侧边栏，图标与提示随各自的折叠状态变化。
-    /// 放在标题栏而不是状态栏，是因为标题栏常驻窗口顶部：侧边栏折叠后那一整块
-    /// （连同它自己的状态栏）不再渲染，开关留在那里就会一起消失。
+    /// `index` 是**拖动前**本栏里的下标：先插入、再选中它，所以「拖到第 i 个标签上」的结果
+    /// 就是「这个视图落在第 i 个位置、其余顺延」。同一栏内拖动也是同一套语义（先抽走再按
+    /// 原下标插入），因此「把 A 拖到 B 上」在 `[A, B]` 这种只有两项时也能得到 `[B, A]`。
     ///
-    /// ⚠️ 标题栏内容区整体是窗口拖拽区（`WindowControlArea::Drag`），其中的按钮必须包一层
-    /// `div().occlude()`，否则系统把点击当成「拖标题栏」、按钮收不到（原因见
-    /// [`crate::AppRoot::render`] 里的说明）。
-    pub(crate) fn render_sidebar_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
-        let left_expanded = self.sidebar_visible;
-        let right_expanded = self.right_sidebar_visible;
-        h_flex()
-            .items_center()
-            .gap_1()
-            .child(
-                div().occlude().child(
-                    Button::new("sidebar-toggle")
-                        .ghost()
-                        .xsmall()
-                        .icon(if left_expanded {
-                            IconName::PanelLeftClose
-                        } else {
-                            IconName::PanelLeftOpen
-                        })
-                        .tooltip(if left_expanded {
-                            "折叠侧边栏"
-                        } else {
-                            "展开侧边栏"
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_sidebar_visible(!left_expanded, cx)
-                        })),
-                ),
-            )
-            .child(
-                div().occlude().child(
-                    Button::new("right-sidebar-toggle")
-                        .ghost()
-                        .xsmall()
-                        .icon(if right_expanded {
-                            IconName::PanelRightClose
-                        } else {
-                            IconName::PanelRightOpen
-                        })
-                        .tooltip(if right_expanded {
-                            "折叠右侧边栏"
-                        } else {
-                            "展开右侧边栏"
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_right_sidebar_visible(!right_expanded, cx)
-                        })),
-                ),
-            )
-            .into_any_element()
+    /// 来源是**另一条**侧边栏时，经 `sibling` 把视图从那条实体取出来（它自己会重绘）。
+    fn drop_tab(&mut self, drag: &tabs::DragSidebarTab, index: usize, cx: &mut Context<Self>) {
+        let Some(view) = self.take_dragged(drag, cx) else {
+            return;
+        };
+        self.tabs.insert_active(index, view);
+        self.show();
+        cx.notify();
     }
 
-    /// 某一侧顶部的标签条（点选 / 拖动换位 / 拖到另一栏，见 [`tab_bar`]）。
-    ///
-    /// 挂在 `Sidebar::header` 上 ⇒ 固定在顶部（不随内容滚动），侧边栏折叠时一起隐藏。
-    /// 设置入口不在这里——它是标题栏左侧的「设置」文字按钮（见 [`crate::AppRoot::render`]）。
-    ///
-    /// 返回 [`AnyElement`] 而非 `impl IntoElement`：本 crate 是 edition 2024，
-    /// `impl Trait` 会捕获 `&mut Context` 的生命周期，导致同一渲染树里
-    /// 一条侧边栏：顶部标签条 + 当前标签的内容 + 底部空状态栏。
-    ///
-    /// 两条侧边栏只有 `side`（`Side::Right` 决定内部边框 / 折叠动画方向）与各自的标签数据不同，
-    /// 所以共用这一个实现；`Sidebar` 的 id 带上侧与当前视图，让不同视图各自记住
-    /// 段落展开 / 收起状态（同一 id 会互相串）。
-    ///
-    /// 参考官方文档：<https://gpui-kit.com/zh-CN/component/sidebar/>
-    pub(crate) fn render_sidebar(&self, side: SidebarSide, cx: &mut Context<Self>) -> AnyElement {
-        let active = self.tabs(side).active_view();
-        // `Sidebar::child` 只吃单一类型，而两类内容（gpui-kit 会话树 / 内置菜单）类型不同
+    /// 追加到本栏末尾（拖到标签条空白处，或本栏为空时的兑现落点）。
+    fn append_tab(&mut self, drag: &tabs::DragSidebarTab, cx: &mut Context<Self>) {
+        let Some(view) = self.take_dragged(drag, cx) else {
+            return;
+        };
+        self.tabs.insert_active(usize::MAX, view);
+        self.show();
+        cx.notify();
+    }
+
+    /// 从拖动来源取出那个视图：来源是本栏就本地取，是另一条侧边栏就更新那条实体。
+    fn take_dragged(
+        &mut self,
+        drag: &tabs::DragSidebarTab,
+        cx: &mut Context<Self>,
+    ) -> Option<SidebarView> {
+        if drag.side == self.side {
+            return self.tabs.take(drag.index);
+        }
+        let sibling = self.other()?;
+        let index = drag.index;
+        sibling
+            .update(cx, |sibling, cx| {
+                let view = sibling.tabs.take(index);
+                if view.is_some() {
+                    cx.notify();
+                }
+                view
+            })
+            .ok()
+            .flatten()
+    }
+}
+
+impl Render for Sidebar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.tabs.active_view();
+        // `Sidebar::child` 只吃单一类型，而两类内容（会话树实体 / 内置菜单）类型不同
         // ⇒ 用 [`SidebarContent`] 统一。
         let content = match active {
-            Some(SidebarView::Sessions) => SidebarContent::Tree(self.render_sessions_tree()),
-            Some(SidebarView::SessionInfo) => SidebarContent::Menu(self.render_session_info_menu(cx)),
+            Some(SidebarView::Sessions) => SidebarContent::Sessions(self.sessions.clone()),
+            Some(SidebarView::SessionInfo) => SidebarContent::Menu(
+                self.root
+                    .read_with(&*cx, |root, cx| root.render_session_info_menu(cx))
+                    .unwrap_or_else(|_| SidebarMenu::new()),
+            ),
             // 标签全被拖走的空标签条：给一句提示，否则整列看上去是坏的。
             None => SidebarContent::Menu(
                 SidebarMenu::new().child(SidebarMenuItem::new("把标签拖到这里").disable(true)),
             ),
         };
 
-        // 宽度由外层分栏面板决定：必须 w_full，否则 Sidebar 会回落到内置默认宽度。
+        // 宽度由外层分栏面板决定：必须 w_full，否则会回落到组件内置默认宽度。
         // flex_1 + min_h_0：与下方**本栏自己的状态栏**同处一列，需能收缩。
         // 空白区域**不挂**右键菜单，只有会话条目有自己的右键菜单。
-        let sidebar = Sidebar::new(SharedString::from(format!(
+        let widget = SidebarWidget::new(SharedString::from(format!(
             "sidebar-{}-{}",
-            side.id(),
+            self.side.id(),
             active.map_or("empty", SidebarView::id)
         )))
         .w_full()
         // 顶部固定的标签条（不随下方内容滚动）。
-        .header(self.render_view_tabs(side, cx))
+        .header(self.render_tabs(cx))
         .child(content)
         .flex_1()
         .min_h_0();
         // 右栏用 Side::Right：组件内部的边框 / 折叠动画方向朝右。
-        let sidebar = match side {
-            SidebarSide::Left => sidebar,
-            SidebarSide::Right => sidebar.side(Side::Right),
+        let widget = match self.side {
+            SidebarSide::Left => widget,
+            SidebarSide::Right => widget.side(Side::Right),
         };
 
         // 这一栏自己的状态栏：默认是空条，只为与中间那条状态栏等高对齐。
@@ -305,7 +428,7 @@ impl AppRoot {
         let status_bar = match active {
             Some(SidebarView::Sessions) => status_bar
                 .left(
-                    Button::new(format!("new-folder-{}", side.id()))
+                    Button::new(format!("new-folder-{}", self.side.id()))
                         .ghost()
                         .xsmall()
                         .icon(IconName::FolderPlus)
@@ -315,7 +438,7 @@ impl AppRoot {
                         })),
                 )
                 .right(
-                    Button::new(format!("new-session-{}", side.id()))
+                    Button::new(format!("new-session-{}", self.side.id()))
                         .ghost()
                         .xsmall()
                         .icon(IconName::Plus)
@@ -331,26 +454,58 @@ impl AppRoot {
             .h_full()
             .w_full()
             .overflow_hidden()
-            .child(sidebar)
+            .child(widget)
             .child(status_bar)
-            .into_any_element()
-    }
-    /// 左侧边栏容器（见 [`AppRoot::render_sidebar`]）。
-    pub(crate) fn render_sidebar_container(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.render_sidebar(SidebarSide::Left, cx)
-    }
-
-    /// 右侧边栏容器（见 [`AppRoot::render_sidebar`]）。
-    pub(crate) fn render_right_sidebar_container(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.render_sidebar(SidebarSide::Right, cx)
     }
 }
-/// `Sidebar::child` 只接受单一类型，而侧边栏内容有两类（gpui-kit 会话树 / 内置菜单）
+
+/// 某一侧边栏的折叠 / 展开开关（根视图把它摆进**标题栏右端**）。
+///
+/// 图标与提示随折叠状态变化。放在标题栏而不是状态栏，是因为标题栏常驻窗口顶部：
+/// 侧边栏折叠后那一整块（连同它自己的状态栏）不再渲染，开关留在那里就会一起消失。
+///
+/// ⚠️ 标题栏内容区整体是窗口拖拽区（`WindowControlArea::Drag`），按钮必须包一层
+/// `div().occlude()`，否则系统把点击当成「拖标题栏」、按钮收不到（原因见
+/// [`crate::AppRoot::render`] 里的说明）。
+///
+/// 传 [`Entity<Sidebar>`] 而不是 `&Sidebar`：根视图的渲染上下文是 `Context<AppRoot>`，
+/// 拿不到 `&mut Context<Sidebar>`，而 `cx.listener` 又必须挂在后者的上下文里 ——
+/// 所以这里收实体句柄、按钮回调里再 `update` 回它。
+pub(crate) fn toggle_button(sidebar: &Entity<Sidebar>, cx: &mut Context<AppRoot>) -> AnyElement {
+    let side = sidebar.read(cx).side;
+    let expanded = sidebar.read(cx).visible;
+    let icon = match (side, expanded) {
+        (SidebarSide::Left, true) => IconName::PanelLeftClose,
+        (SidebarSide::Left, false) => IconName::PanelLeftOpen,
+        (SidebarSide::Right, true) => IconName::PanelRightClose,
+        (SidebarSide::Right, false) => IconName::PanelRightOpen,
+    };
+    let tooltip = match (side, expanded) {
+        (SidebarSide::Left, true) => "折叠侧边栏",
+        (SidebarSide::Left, false) => "展开侧边栏",
+        (SidebarSide::Right, true) => "折叠右侧边栏",
+        (SidebarSide::Right, false) => "展开右侧边栏",
+    };
+    let sidebar = sidebar.downgrade();
+    div().occlude().child(
+        Button::new(format!("sidebar-toggle-{}", side.id()))
+            .ghost()
+            .xsmall()
+            .icon(icon)
+            .tooltip(tooltip)
+            .on_click(cx.listener(move |_, _, _, cx| {
+                let _ = sidebar.update(cx, |sidebar, cx| sidebar.toggle(cx));
+            })),
+    )
+    .into_any_element()
+}
+
+/// `SidebarWidget::child` 只接受单一类型，而侧边栏内容有两类（会话树实体 / 内置菜单）
 /// ⇒ 用一个枚举把它们的类型统一起来。
 #[derive(Clone)]
 enum SidebarContent {
-    /// 文件夹形式的会话树。
-    Tree(SessionTree),
+    /// 「会话」视图的实体（它自己实现 `Render`，见 [`SessionsState`]）。
+    Sessions(Entity<SessionsState>),
     /// 内置菜单（会话信息 / 空标签条提示）。
     Menu(SidebarMenu),
 }
@@ -373,7 +528,9 @@ impl SidebarItem for SidebarContent {
         cx: &mut App,
     ) -> impl IntoElement {
         match self {
-            Self::Tree(tree) => tree.render(id, window, cx).into_any_element(),
+            // 实体自己渲染自己：这里只把它摆进侧边栏的内容位（`div` 负责给出宽度与
+            // 由内容决定的高度，`SidebarItem::render` 的返回类型也才统一）。
+            Self::Sessions(sessions) => div().w_full().child(sessions).into_any_element(),
             Self::Menu(menu) => menu.render(id, window, cx).into_any_element(),
         }
     }

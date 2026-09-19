@@ -50,12 +50,12 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let form = FolderForm::new(window, cx);
-        // 对话框回调只有 &mut App，拿不到 AppRoot；用弱引用回到根视图加文件夹。
-        let root = cx.entity().downgrade();
+        // 加文件夹写的是**会话列表实体**（`SessionsState`）的状态，直接把它的句柄带进对话框。
+        let sessions = self.sessions.clone();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let form_for_ok = form.clone();
-            let root_for_ok = root.clone();
+            let sessions_for_ok = sessions.clone();
             let parent_for_ok = parent.clone();
             // 空名字不允许创建：驱动「创建」的禁用态（`on_ok` 里再兜一次）。
             let valid = !form.trimmed_name(cx).is_empty();
@@ -79,10 +79,9 @@ impl AppRoot {
                         return false;
                     }
                     let parent = parent_for_ok.clone();
-                    // 动作回调执行期间窗口仍在更新栈上，直接 update_in 会失败
-                    // （"entity has no current window"），交给 `defer_after_update` 让出一拍。
-                    AppRoot::defer_after_update(root_for_ok.clone(), cx, move |this, _, cx| {
-                        this.add_session_folder(name.into(), parent, cx);
+                    // 列表状态在 `SessionsState` 里 ⇒ 直接写它（不需要窗口，无需 defer）。
+                    sessions_for_ok.update(cx, |state, cx| {
+                        state.add_folder(name.into(), parent, cx)
                     });
                     true
                 })

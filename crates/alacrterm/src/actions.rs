@@ -85,7 +85,16 @@ impl AppRoot {
     ///
     /// 放在这里而不是 `AppRoot::new` 里：那里拿不到已构造好的实体句柄，
     /// 而 `main` 的建窗闭包里正好有 `Entity<AppRoot>`。
+    ///
+    /// 分发原则：**只改会话列表状态的直接找 [`SessionsState`](crate::sidebar_panel::sessions::SessionsState)
+    /// （不需要窗口，连让出一拍都免了）；要开窗口 / 建终端的才落在 `AppRoot` 上**——
+    /// 全局监听器只有 `&mut App`，所以那些必须经 [`AppRoot::defer_after_update`]。
     pub(crate) fn register_actions(root: WeakEntity<Self>, cx: &mut App) {
+        // 会话列表实体的句柄：只改列表状态的 action（拖放 / 删除）直接找它。
+        let Ok(sessions) = root.read_with(cx, |root, _| root.sessions.clone()) else {
+            return;
+        };
+
         // —— 新建会话记录：要开对话框（需要窗口），让出一拍再执行 ——
         let dialog_root = root.clone();
         cx.on_action(move |action: &NewSession, cx: &mut App| {
@@ -114,18 +123,18 @@ impl AppRoot {
         });
 
         // —— 拖放：把条目挪到别的目录（只改列表状态，不需要窗口）——
-        let move_root = root.clone();
+        let move_sessions = sessions.clone();
         cx.on_action(move |action: &MoveEntry, cx: &mut App| {
             let from = action.from.clone();
             let into = action.into.clone().unwrap_or_default();
-            let _ = move_root.update(cx, |this, cx| this.move_session_entry(&from, &into, cx));
+            let _ = move_sessions.update(cx, |state, cx| state.move_entry(&from, &into, cx));
         });
 
         // —— 删除条目：只改列表状态，不需要窗口 ——
-        let remove_root = root.clone();
+        let remove_sessions = sessions;
         cx.on_action(move |action: &RemoveEntry, cx: &mut App| {
             let path = action.path.clone();
-            let _ = remove_root.update(cx, |this, cx| this.remove_session_entry(&path, cx));
+            let _ = remove_sessions.update(cx, |state, cx| state.remove_entry(&path, cx));
         });
 
         // —— 新建本地终端：不需要对话框，直接开一个本地会话（同样需要窗口）——
