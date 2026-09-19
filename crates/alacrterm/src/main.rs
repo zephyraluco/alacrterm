@@ -79,45 +79,35 @@ use tab_bar::TerminalDockSkin;
 use terminal_panel::Session;
 
 fn main() {
-    // 必须在建第一个 PTY **之前**执行：决定 conpty.dll 命中与否（看该模块文档）。
+    // 必须在建第一个 PTY 之前执行（决定 conpty.dll 能否命中）。
     #[cfg(windows)]
     conpty_backend::ensure();
 
     gpui_kit::application()
-        // 注册自有资产源（alacrterm assets.rs 方式）：本 crate 的 assets/icons 目录
-        // 经 rust-embed 嵌入，`crate::assets::IconName` 由 icon_named! 宏扫描生成，
-        // 可自由增删图标文件。
+        // 注册自有资产源（assets/icons 经 rust-embed 嵌入，IconName 由宏扫描生成）。
         .with_assets(assets::Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
-            // 配置分三步（顺序不能换）：
-            //   ① `install` 解析 `config/terminal.json` + `config/app.json` 装进全局；
-            //   ② `load_themes` 把 `themes/` 登记成主题库（含热重载）；
-            //   ③ `apply_saved_themes` 按配置把主题挂到两个槽位上（不写回、不投影）。
-            // 没有配置文件时全用默认：gpui-kit 内置主题 + `RenderSettings::default()`。
+            // 配置三步（顺序不能换）：装全局 → 登记主题库（含热重载）→ 按配置挂主题槽位。
             config::install(cx);
             config::load_themes(cx);
             config::apply_saved_themes(cx);
-            // 终端为深色背景，应用主题跟随使用暗色（压覆盖的细节见 `config::change_theme`）。
+            // 终端是深色背景，界面主题跟随用暗色。
             config::change_theme(ThemeMode::Dark, cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    // TitleBar::window_options()：隐藏系统标题栏（appears_transparent）,
-                    // 由 gpui-kit TitleBar 自行处理拖拽 / 双击最大化 / 窗口控制按钮。
+                    // 隐藏系统标题栏，改由 gpui-kit `TitleBar` 处理拖拽 / 窗口按钮。
                     ..TitleBar::window_options()
                 },
                 |window, cx| {
                     let root = cx.new(|cx| AppRoot::new(window, cx));
-                    // 注册全局 action 监听器（右键菜单项会派发这些 action），
-                    // 用 `Entity<AppRoot>` 的弱引用：这里正好拿得到已构造好的实体。
+                    // 注册全局 action 监听器（用实体弱引用）。
                     AppRoot::register_actions(root.downgrade(), cx);
-                    // 标准快捷键：`Ctrl+,` 打开设置（与 VS Code / Zed 一致）。
-                    // 绑在 `None` context 上 ⇒ 焦点在终端里也能触发（键位派发在
-                    // key listener 之前，见 `TerminalView` 里 tab 的同类说明）。
+                    // `Ctrl+,` 打开设置；绑在 `None` context 上 ⇒ 焦点在终端里也能触发。
                     cx.bind_keys([KeyBinding::new("ctrl-,", actions::OpenSettings, None)]);
                     cx.new(|cx| Root::new(root, window, cx))
                 },
@@ -126,10 +116,7 @@ fn main() {
         });
 }
 
-/// 应用根视图：装配标题栏 + 左侧容器 + 右侧容器 + 弹窗层。
-///
-/// 只保存两个容器共享的状态；容器各自的渲染与逻辑见
-/// [`crate::sidebar_panel`] / [`crate::terminal_panel`]。
+/// 应用根视图：装配标题栏 + 两条侧边栏 + 中间列 + 弹窗层（只存跨组件共享状态）。
 struct AppRoot {
     /// 所有终端会话（保持运行，切换仅切换显示）。
     terminals: Vec<Session>,
@@ -138,46 +125,27 @@ struct AppRoot {
     /// 左 / 右两条侧边栏（各一个实体：自带标签、折叠、宽度与渲染，见 [`sidebar_panel::Sidebar`]）。
     left_sidebar: Entity<Sidebar>,
     right_sidebar: Entity<Sidebar>,
-    /// 侧边栏「会话」视图的状态（记录树 + 展开状态 + `TreeState`），
-    /// 见 [`sidebar_panel::sessions::SessionsState`]。两条侧边栏共用这一个实体。
-    ///
-    /// 记录与 [`AppRoot::terminals`] **没有对应关系**（双击记录才按它开一个终端）。
+    /// 侧边栏「会话」视图的状态（两条侧边栏共用；记录与 [`AppRoot::terminals`] 无关）。
     sessions: Entity<SessionsState>,
-    /// 侧边栏「文件管理器」视图的状态（当前终端工作目录下的文件树），
-    /// 见 [`sidebar_panel::files::FilesState`]。两条侧边栏共用这一个实体。
-    ///
-    /// 根目录由本视图每帧从当前会话的 cwd 同步进去（见 [`AppRoot::render`]）。
+    /// 侧边栏「文件管理器」视图的状态（两条侧边栏共用；根目录每帧从当前会话同步）。
     files: Entity<FilesState>,
-    /// 终端会话的 dock（[`crate::terminal_panel`]）：一个会话 = center 里的一块面板。
-    ///
-    /// 左右侧边栏**不在 dock 里**（仍是下面的分栏组）；没有会话时整块 dock 换成欢迎页。
+    /// 终端会话的 dock（一个会话 = center 里的一块面板；没有会话时整块换成欢迎页）。
     dock: Entity<DockArea>,
-    /// dock 布局变化的订阅：会话表顺序 / 成员都要跟着 dock 走。
-    ///
-    /// 事件在 effect 阶段回调，那时 dock 的更新已结束，可以直接 `read` 它。
+    /// dock 布局变化的订阅：会话表顺序 / 成员跟着 dock 走。
     dock_layout_sub: Option<Subscription>,
-    /// 「下一个新建的会话放进哪个标签组」（标签栏 `+` 按钮设置，用一次即清空）：
-    /// `add_panel_view` 只会塞进第一个标签组，靠它才能落回用户点的那一组。
+    /// 下一个新建会话放进哪个标签组（标签栏 `+` 设置，用一次即清空）。
     pending_session_group: Option<WeakEntity<TabGroup>>,
-    /// 设置窗口的句柄（见 [`AppRoot::open_settings_window`]）。
-    ///
-    /// 用于「重复点击设置图标只激活已有窗口」；窗口被关闭后该句柄会失效，
-    /// 下一次点击会重新开窗并覆盖它。
+    /// 设置窗口的句柄（重复点击只激活已有窗口；窗口关掉后句柄失效、下次重新开）。
     settings_window: Option<WindowHandle<Root>>,
     /// 状态栏指标采样器（CPU / 内存 / 网络），由后台定时任务驱动。
     pub(crate) monitor: SystemMonitor,
-    /// 「背景」焦点：点击终端之外时接管焦点。
-    ///
-    /// 用真实句柄而非 `Window::blur`：完全失焦后 gpui 的 `focus_next` 没有起点，Tab 会失效。
+    /// 「背景」焦点：点击终端之外时接管焦点（用真实句柄而非 `Window::blur`，否则 Tab 会失效）。
     background_focus: FocusHandle,
 }
 
 impl AppRoot {
-    /// 点击终端**之外**时，把焦点从终端拿走（gpui 不会因点击非可获焦区域而移焦）。
-    ///
-    /// 只在「当前焦点是某个终端」时动手：点击落在终端里时 `TerminalView` 已
-    /// `stop_propagation`；点击处控件自己获焦（对话框输入框等）时这里也不抢。
-    /// 细节与实测见 `docs/terminal-architecture.md` §4.3「焦点归属」。
+    /// 点击终端**之外**时把焦点从终端拿走（gpui 不会因点击非可获焦区域而移焦）；
+    /// 只在当前焦点确实是某个终端时动手。
     fn on_background_mouse_down(
         &mut self,
         _: &MouseDownEvent,
@@ -325,9 +293,7 @@ impl Render for AppRoot {
         // 会话表变了就同步进会话树（`TreeState` 是快照，必须在渲染前对齐，见该方法文档）。
         self.sessions.update(cx, |sessions, cx| sessions.sync_tree(cx));
 
-        // 文件管理器的根目录 = 当前会话的工作目录：本地会话取 PTY 进程的 cwd（读的是采样
-        // 缓存，很便宜），目录真变了才重建树。⚠️ PowerShell 的 `cd` 不改变进程工作目录，
-        // 所以「跟随 cd」只对真正切换工作目录的壳（cmd / bash / wsl 等）成立。
+        // 文件管理器的根目录 = 当前会话的工作目录（目录真变了才重建树）。
         let cwd = self
             .terminals
             .get(self.active)

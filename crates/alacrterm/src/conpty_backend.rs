@@ -1,9 +1,5 @@
-//! Windows ConPTY 后端选择：优先用 Windows Terminal 的 OpenConsole。
-//!
-//! `alacritty_terminal` 建伪控制台时先 `LoadLibraryW("conpty.dll")`：命中就用 WT 的
-//! ConPTY（`OpenConsole.exe`），否则退回 Windows 自带的那套 —— 后者在窗口纵向缩到极小
-//! 再放大时会让壳侧整片重绘、**丢失上方内容**（实测可见区差 12795 像素；换成 OpenConsole
-//! 后同操作 0 像素差异）
+//! Windows ConPTY 后端选择:优先加载随包的 Windows Terminal ConPTY
+//! (`conpty.dll` + `OpenConsole.exe`),找不到则退回系统自带的那套。
 
 use std::path::{Path, PathBuf};
 
@@ -19,8 +15,8 @@ fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// 按全路径预加载 `dir/conpty.dll`：加载器按模块基名去重，所以之后
-/// `alacritty_terminal` 那句 `LoadLibraryW("conpty.dll")` 会拿到同一份。
+/// 按全路径预加载 `dir/conpty.dll`（加载器按模块基名去重，之后
+/// `alacritty_terminal` 那句 `LoadLibraryW("conpty.dll")` 会命中同一份）。
 fn preload(dir: &Path) -> bool {
     let dll = dir.join("conpty.dll");
     if !dll.is_file() {
@@ -30,7 +26,6 @@ fn preload(dir: &Path) -> bool {
     if handle.is_null() {
         return false;
     }
-    // 只是占位：模块已留在进程里，后续 LoadLibraryW 仍会命中它
     unsafe { FreeLibrary(handle) };
     true
 }
@@ -73,7 +68,7 @@ pub fn ensure() {
         if !dir.join("conpty.dll").is_file() || !dir.join("OpenConsole.exe").is_file() {
             continue;
         }
-        // 只影响之后的 LoadLibrary 搜索路径；PTY 是建终端时才创建的，故此处安全
+        // 只影响之后的 LoadLibrary 搜索路径
         unsafe { SetDllDirectoryW(wide(&dir).as_ptr()) };
         if preload(&dir) {
             log::info!("conpty: 使用 {}（Windows Terminal ConPTY）", dir.display());

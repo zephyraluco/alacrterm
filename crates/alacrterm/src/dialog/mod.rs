@@ -1,22 +1,12 @@
-//! 应用里的**对话框**（`Window::open_dialog` 的浮层，不是独立窗口）。
-//!
-//! 一个对话框一个文件，都只做一件事，且**都不碰终端实例**：
-//! - [`connection`]：「新建会话」——收集 SSH 参数，往会话列表里加一条**记录**；
-//! - [`folder`]：「新建文件夹」——给会话列表建一个分组文件夹。
-//!
-//! 两个入口的触发点都在侧边栏（状态栏两端的两枚按钮 / 文件夹行的右键菜单），
-//! 统一走 [`crate::actions`] 的 action；真正的列表改动落在
+//! 应用里的对话框（`Window::open_dialog` 的浮层，不是独立窗口）：一个对话框一个文件，
+//! 都只改会话列表、不碰终端实例；触发点走 [`crate::actions`] 的 action，列表改动落在
 //! [`crate::sidebar_panel::sessions::SessionsState`] 实体上（实体句柄随对话框一起传入）。
 //!
 //! 共同约定：
-//! - **表单实体必须在打开对话框之前创建**（构建闭包是 `Fn`，每帧都会被调用，
-//!   在闭包内建 `InputState` 会把输入每帧重置）；
-//! - 页脚自己用 `DialogFooter` + `DialogClose` / `DialogAction` 拼（`Dialog`
-//!   不会自动生成确定 / 取消按钮）；
-//! - `on_ok` 里既做**兜底校验**（必填项缺失就 `return false`，不关对话框），
-//!   也负责把结果交给会话列表实体；⚠️ 只有**需要窗口**的动作（开终端 / 开窗）才要配
-//!   [`crate::AppRoot::defer_after_update`]：回调期间窗口仍在更新栈上，直接 `update_in`
-//!   会失败。本模块两个对话框只改列表状态（`sessions.update(..)`），不用让拍。
+//! - 表单实体必须在打开对话框**之前**建（构建闭包是 `Fn`，每帧都会被调用）；
+//! - 页脚用 `DialogFooter` + `DialogClose` / `DialogAction` 自拼；
+//! - `on_ok` 做兜底校验并写列表实体；只有需要窗口的动作才配
+//!   [`crate::AppRoot::defer_after_update`]。
 
 mod connection;
 mod folder;

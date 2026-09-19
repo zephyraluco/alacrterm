@@ -1,30 +1,24 @@
 //! 侧边栏(左侧 / 右侧):顶部可拖动的视图标签 + 视图内容 + 底部状态栏。
 //!
-//! **一条侧边栏 = 一个实体**([`Sidebar`],左右各一个):自己的标签、折叠状态、期望宽度、
-//! 那一组分栏面板状态,以及**自己的渲染**([`Render`] 实现里装配
-//! 视图标签条 + 当前视图内容 + 底部状态栏)。根视图只把它 `.child(..)` 摆进分栏面板,
-//! 不再代它渲染。
+//! **一条侧边栏 = 一个实体**([`Sidebar`],左右各一个):自带标签、折叠状态、期望宽度、
+//! 那一组分栏面板状态与自己的渲染;根视图只把它 `.child(..)` 摆进分栏面板。
 //!
-//! 跨组件的数据全部是**共享实体**:
-//! - [`sessions::SessionsState`] / [`files::FilesState`]:「会话」与「文件管理器」两个视图的
-//!   内容,两条侧边栏共用同一份实体(标签落在哪一侧,就由哪一侧把它摆出来)。
+//! 视图内容是两个共享实体:[`sessions::SessionsState`](「会话」)与
+//! [`files::FilesState`](「文件管理器」)——标签落在哪一侧,就由哪一侧把它摆出来。
 //!
 //! 其余分工:
-//! - **视图标签条**([`tabs`]):挂在 `Sidebar::header` 上 ⇒ 固定在顶部、不随内容滚动、
-//!   随侧边栏折叠一起隐藏。标签可以在两条侧边栏之间自由拖动(换位 / 换面板):同一栏内换位
-//!   是本实体自己的事,跨栏则经 `sibling` 弱引用把视图从另一条实体取过来
-//!   (Zed 里由 `Workspace` 协调,这里让两条侧边栏互指)。
-//! - **折叠开关**([`toggle_button`]):渲染在**标题栏右端**(由根视图摆放),图标随各自的
-//!   折叠状态变化。标题栏常驻窗口顶部,所以开关不受折叠影响、折叠后仍点得到(唯一的恢复入口)。
+//! - **视图标签条**([`tabs`]):挂在 `Sidebar::header` 上(固定顶部、不随内容滚动);
+//!   标签可在两条侧边栏之间拖动:同栏内换位是本实体自己的事,跨栏经 `sibling` 弱引用
+//!   从另一条实体取视图。
+//! - **折叠开关**([`toggle_button`]):渲染在**标题栏右端**(由根视图摆放),折叠后仍点得到。
 //! - **两枚状态栏按钮**(显示「会话」视图的那条才有):左下 = 新建文件夹([`NewFolder`])、
-//!   右下 = 新建会话([`NewSession`]),两者都**只加列表条目、不开终端**(见 [`crate::dialog`])。
+//!   右下 = 新建会话([`NewSession`]),都只加列表条目、不开终端(见 [`crate::dialog`])。
 //!
-//! 两侧边栏用**两组嵌套的分栏面板**装配(内层 `main-split`、外层 `right-split`),
-//! 因为面板宽度按下标存在 `ResizableState` 里:三个面板挤在同一组时,
-//! 任一侧折叠都会让另一侧的下标漂移、拖出来的宽度丢失。每组状态归对应的那条侧边栏
-//! ([`Sidebar::pin_width`] 每帧把宽度钉回期望值)。
+//! 两侧边栏用**两组嵌套的分栏面板**装配(内层 `main-split`、外层 `right-split`):面板宽度
+//! 按下标存在 `ResizableState` 里,三块面板挤在同一组会互相影响下标。[`Sidebar::pin_width`]
+//! 每帧把宽度钉回期望值。
 //!
-//! 「设置」入口不在本模块,而在标题栏左侧的文字按钮上(见 [`crate::AppRoot::render`])。
+//! 「设置」入口在标题栏左侧的文字按钮上(见 [`crate::AppRoot::render`]),不在本模块。
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
@@ -453,16 +447,12 @@ impl Render for Sidebar {
 
 /// 某一侧边栏的折叠 / 展开开关（根视图把它摆进**标题栏右端**）。
 ///
-/// 图标与提示随折叠状态变化。放在标题栏而不是状态栏，是因为标题栏常驻窗口顶部：
-/// 侧边栏折叠后那一整块（连同它自己的状态栏）不再渲染，开关留在那里就会一起消失。
+/// 图标与提示随折叠状态变化；放在标题栏（常驻顶部，折叠后仍点得到）。
 ///
-/// ⚠️ 标题栏内容区整体是窗口拖拽区（`WindowControlArea::Drag`），按钮必须包一层
-/// `div().occlude()`，否则系统把点击当成「拖标题栏」、按钮收不到（原因见
-/// [`crate::AppRoot::render`] 里的说明）。
+/// ⚠️ 按钮必须包一层 `div().occlude()`：标题栏内容区是窗口拖拽区，不包就收不到点击。
 ///
-/// 传 [`Entity<Sidebar>`] 而不是 `&Sidebar`：根视图的渲染上下文是 `Context<AppRoot>`，
-/// 拿不到 `&mut Context<Sidebar>`，而 `cx.listener` 又必须挂在后者的上下文里 ——
-/// 所以这里收实体句柄、按钮回调里再 `update` 回它。
+/// 收 [`Entity<Sidebar>`] 而不是 `&Sidebar`：根视图的上下文是 `Context<AppRoot>`，
+/// 而 `cx.listener` 需要 `Context<Sidebar>`。
 pub(crate) fn toggle_button(sidebar: &Entity<Sidebar>, cx: &mut Context<AppRoot>) -> AnyElement {
     let side = sidebar.read(cx).side;
     let expanded = sidebar.read(cx).visible;

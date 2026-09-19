@@ -1,32 +1,20 @@
 //! 「文件管理器」视图:当前终端工作目录下的文件树。
 //!
-//! 根目录 = **当前会话**的工作目录([`TerminalView::working_directory`],由根视图每帧
-//! 同步进来)。⚠️ 拿得到的是**进程真实的工作目录**,所以只有真正切换工作目录的壳
-//! (cmd / bash / wsl / 自己 `chdir` 的程序)才会跟随;PowerShell 的 `cd` 只改它自己的
-//! 位置(`$PWD`)、不动进程的当前目录,因此 PowerShell 下树会停在会话启动目录
-//! (Zed / Windows Terminal 在 Windows 上也是这个行为)。远端(SSH)会话拿不到**远端**
-//! shell 的 cwd,此时显示一句提示。
+//! 根目录 = **当前会话**的工作目录([`TerminalView::working_directory`]),由根视图每帧同步
+//! 进来(Windows 上 PowerShell 的位置由 shell 集成上报,见 `terminal::platform`);
+//! 远端(SSH)会话拿不到远端 cwd,此时显示一句提示。
 //!
-//! 顶部那行显示当前根目录,并有两枚按钮:**上一级**(手动往上浏览整块磁盘,终端工作目录
-//! 再变时自动拉回)与**重新加载**(目录内容变了,而树不监听文件系统)。
+//! 顶部那行显示当前根目录,右端两枚按钮:**上一级**(手动往上浏览,终端工作目录再变时
+//! 自动拉回)与**重新加载**(树不监听文件系统)。
 //!
-//! **目录按需加载**:展开一个还没读过的目录时,后台线程读一层目录项再回填
-//! (见 [`FilesState::spawn_load`]),网络盘 / 超大目录不会卡住界面。读取结果按
-//! 「目录在前、名字不区分大小写」排序。视图是**只读**的:行点击只会展开 / 收起,
-//! 没有打开文件、重命名之类的操作;顶部那行显示当前路径并提供「重新加载」按钮。
+//! **目录按需加载**:展开一个还没读过的目录时,后台线程读一层目录项再回填,结果按
+//! 「目录在前、名字不区分大小写」排序。视图是**只读**的(行点击只展开 / 收起)。
 //!
-//! ⚠️ gpui-kit `tree` 的坑(与 [`sessions`](super::sessions) 同一批,踩过):
-//! - **行类型编码在行 id 前缀里**(`dir-0-2` / `file-1` / `loading-0-2`),
-//!   不能用 `TreeEntry::is_folder()` —— 它是「有没有子项」;
-//! - `Tree` 是**等高虚拟列表 + `size_full()`**,塞进 `Sidebar` 的自动高度 item 里会塌成 0
-//!   ⇒ 必须 `.h(可见行数 × TREE_ROW_HEIGHT)`,行数由 [`FilesState::visible_rows`] 手算;
-//! - **未加载的目录必须挂一个占位子项**(label 为「加载中…」):`TreeItem::is_folder()` 就是
-//!   「有没有子项」,没有子项的行既没有 caret、点击也不会展开([`TreeState::toggle_expand`]
-//!   对非 folder 直接 return)⇒ 子目录就永远打不开;
-//! - 展开状态自己存([`FilesState::expanded`]):每次同步都会**重建** `TreeItem`,
-//!   状态存在它里面会每刷一次就全部收起;
-//! - `set_items` 会 notify ⇒ **不能每帧无条件调用**(靠内容签名挡,否则自激成死循环),
-//!   签名必须用 `Option` 表达「还没同步过」(用空 `Vec` 会让首次同步被当成「没变」跳掉)。
+//! ⚠️ gpui-kit `tree` 的约定(与 [`sessions`](super::sessions) 同一批):
+//! - 行类型编码在行 id 前缀里(`dir-0-2` / `file-1` / `loading-0-2`),不用 `TreeEntry::is_folder()`;
+//! - `Tree` 是等高虚拟列表 + `size_full()` ⇒ 必须自己 `.h(可见行数 × TREE_ROW_HEIGHT)`;
+//! - **未加载的目录要挂一个占位子项**(label「加载中…」),否则它没有 caret、点击也不展开;
+//! - 展开状态自己存(`FilesState::expanded`);`set_items` 会 notify ⇒ 靠签名挡。
 
 use std::path::{Path, PathBuf};
 
@@ -113,23 +101,17 @@ pub(crate) struct FilesState {
     root: Option<PathBuf>,
     /// 根目录下的条目(`None` = 还没读到)。
     entries: Option<Vec<FileNode>>,
-    /// 展开着的目录路径(下标链)。
-    ///
-    /// 与 `sessions` 同一个理由:**不能**把展开状态留在 `TreeItem` 里 ——
-    /// 每次同步都会重建 `TreeItem`,状态会每刷一次就丢。这里自己留一份:同步时按它给
-    /// `TreeItem::expanded(..)` 赋值,同时它也是[【算行数】](FilesState::visible_rows)的依据。
+    /// 展开着的目录路径(下标链;同步时按它给 `TreeItem::expanded(..)` 赋值,也是算行数的依据)。
     expanded: Vec<FilePath>,
     /// 正在后台读取的目录(同一个目录不重复发起)。
     loading: Vec<PathBuf>,
-    /// 根目录代次:换目录时 +1,在途的读取回来发现对不上就丢掉(否则旧目录的结果会覆盖新目录)。
+    /// 根目录代次:换目录时 +1,在途的读取对不上就丢掉。
     generation: u64,
     /// 文件树的交互状态(选中 / 滚动)。
     tree: Entity<TreeState>,
-    /// 上一次同步用的签名(`根目录 + (名字, 是否目录, 层级)` 全量序列):
-    /// 变了才重建 items(`set_items` 会 notify,每帧无条件调用会自激)。
+    /// 上一次同步用的签名(`根目录 + (名字, 是否目录, 层级)` 全量序列):变了才重建 items。
     ///
-    /// ⚠️ `None` = 还没同步过:不能用一个空 `Vec` 同时表达「没同步过」与「根目录是空的」,
-    /// 后者会让首次同步被当成「签名没变」跳掉,树就永远拿不到 items。
+    /// ⚠️ `None` = 还没同步过(不能用空 `Vec` 表示,否则首次同步会被当成「没变」跳掉)。
     sig: Option<(Option<PathBuf>, Vec<(SharedString, bool, usize)>)>,
     /// 树的展收事件订阅(RAII:不存着就会在 `new` 返回时解除)。
     _tree_sub: Subscription,
@@ -138,8 +120,7 @@ pub(crate) struct FilesState {
 impl FilesState {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         let tree = cx.new(|cx| TreeState::new(cx));
-        // 展开 / 收起会改变「树一共多少行」(高度按行数算),所以树的事件要立刻回传到本实体;
-        // 展开一个还没读过的目录时还要顺手发起后台读取。
+        // 展收会改行数（高度按行数算），且展开未读过的目录要发起后台读取 ⇒ 事件回传本实体。
         let sub = cx.subscribe(&tree, |state: &mut Self, _, event, cx| {
             state.on_tree_event(event, cx);
         });
@@ -201,10 +182,7 @@ impl FilesState {
         cx.notify();
     }
 
-    /// 后台读一个目录,读完回填(根目录 / 某个刚展开的目录)。
-    ///
-    /// 用 `background_spawn`(后台线程池)读 **一层** 目录项:目录可能很大、也可能在慢盘上,
-    /// 放主线程会把界面卡住;回填时先核对代次,换过目录的结果直接丢。
+    /// 后台读一个目录(一层),读完回填(根目录 / 某个刚展开的目录);回填前核对代次。
     fn spawn_load(&mut self, dir: PathBuf, target: LoadTarget, cx: &mut Context<Self>) {
         if self.loading.contains(&dir) {
             return;
@@ -218,7 +196,7 @@ impl FilesState {
         cx.spawn({
             let dir = dir.clone();
             move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                // ⚠️ 必须在闭包内先 clone 再进 async 块,否则借用 `cx` 的 lifetime 过不了。
+                // 必须先 clone 再进 async 块(否则借用 `cx` 的生命周期过不了)。
                 let mut cx = cx.clone();
                 async move {
                     let nodes = task.await;
@@ -248,7 +226,7 @@ impl FilesState {
         .detach();
     }
 
-    /// 把节点树推给 `TreeState`(内容没变就跳过,见 [`FilesState::sig`])。
+    /// 把节点树推给 `TreeState`(内容没变就跳过)。
     fn sync_tree(&mut self, cx: &mut Context<Self>) {
         let nodes = self.entries.as_deref().unwrap_or(&[]);
         let mut sig = Vec::new();

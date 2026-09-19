@@ -1,27 +1,11 @@
-//! 应用自定义 Action：供右键菜单等「官方 action 风格」的菜单项使用。
+//! 应用自定义 Action：菜单项写作 `menu.menu("标签", Box::new(SomeAction))`，点击后由菜单内部
+//! `window.dispatch_action(...)` 派发；本模块的 action 一律由 [`App::on_action`] 全局监听器接收。
 //!
-//! 按 gpui-kit 官方示例，菜单项写作
-//! `menu.menu("标签", Box::new(SomeAction))`，点击后由菜单内部
-//! `window.dispatch_action(...)` 派发。接收方有两种写法：
+//! - **会话记录**：[`NewSession`] / [`NewFolder`] / [`OpenSession`] / [`MoveEntry`] / [`RemoveEntry`]；
+//! - **终端会话**：[`NewLocalTerminal`]（标签栏 `+` / 欢迎页）；[`OpenSettings`] 开设置窗口。
 //!
-//! - **元素级** `element.on_action(cx.listener(|this, action: &A, window, cx| ...))`：
-//!   沿「焦点路径」派发，依赖当前焦点位置；
-//! - **全局级** [`App::on_action`]（本模块采用）：在 action 冒泡阶段**一定**会被调用，
-//!   与焦点无关。
-//!
-//! 菜单是**同一窗口内的浮层**（`ContextMenuExt` 用 `deferred` 渲染），但它派发 action 时
-//! 若没有设置 `action_context`，焦点可能仍在终端上；用全局监听器可避免这层不确定性。
-//! 代价是全局监听器只有 `&mut App`（没有窗口、也没有根视图），因此回调里要配合
-//! [`AppRoot::defer_after_update`] 才能做「需要窗口」的操作。
-//!
-//! 本模块的 action 与两条线的对应关系（见 [`crate::main`] 模块文档）：
-//! - **会话记录**：[`NewSession`]（弹建连对话框，加一条记录）、[`NewFolder`]
-//!   （弹输入框，加一个文件夹）、[`OpenSession`]（双击记录，按它开一个终端）、
-//!   [`MoveEntry`]（把条目拖到别的文件夹 / 拖回顶层）、[`RemoveEntry`]（删掉记录或文件夹本身）；
-//! - **终端会话**：[`NewLocalTerminal`]（标签栏 `+` / 欢迎页：直接开一个本地终端）。
-//!
-//! ⚠️ 带数据的 action **不能**写进 [`actions!`] 宏：宏会生成同名的 unit 结构体，
-//! 与下面手写的定义撞名（E0428）。
+//! 全局监听器只有 `&mut App`（没有窗口），需要窗口的操作要经
+//! [`AppRoot::defer_after_update`]；带数据的 action 只能手写（不进 [`actions!`] 宏）。
 
 use gpui::{Action, App, WeakEntity, actions};
 use serde::Deserialize;
@@ -31,39 +15,28 @@ use crate::sidebar_panel::sessions::SessionPath;
 
 actions!(alacrterm, [NewLocalTerminal, OpenSettings]);
 
-/// 新建一条会话记录（弹建连对话框）。
-///
-/// `folder` 是「放在哪个文件夹里」：`None` = **顶层**（状态栏右下角的 `+` 就是这个），
-/// `Some(path)` = 文件夹行的右键菜单「在这里新建会话」。
+/// 新建一条会话记录（弹建连对话框）。`folder` = 放在哪个文件夹里（`None` = 顶层）。
 #[derive(Clone, Action, PartialEq, Eq, Deserialize)]
 #[action(namespace = alacrterm, no_json)]
 pub(crate) struct NewSession {
     pub(crate) folder: Option<SessionPath>,
 }
 
-/// 新建一个文件夹。
-///
-/// `parent` 是「建在哪个文件夹下」：`None` = 顶层（状态栏左侧的文件夹图标），
-/// `Some(path)` = 文件夹行的右键菜单「新建子文件夹」。
+/// 新建一个文件夹。`parent` = 建在哪个文件夹下（`None` = 顶层）。
 #[derive(Clone, Action, PartialEq, Eq, Deserialize)]
 #[action(namespace = alacrterm, no_json)]
 pub(crate) struct NewFolder {
     pub(crate) parent: Option<SessionPath>,
 }
 
-/// 按某条**记录**新建一个终端（双击该行 / 右键「打开会话」）。
-///
-/// 记录本身不受影响：同一条记录可以开任意多个终端，关掉终端也不会删掉记录。
+/// 按某条记录新建一个终端（双击该行 / 右键「打开会话」）。
 #[derive(Clone, Action, PartialEq, Eq, Deserialize)]
 #[action(namespace = alacrterm, no_json)]
 pub(crate) struct OpenSession {
     pub(crate) path: SessionPath,
 }
 
-/// 把列表里的一个条目（记录 / 文件夹）挪到另一个目录下（拖动放下）。
-///
-/// `into` = 目标**文件夹**路径：`None` = 顶层（拖到列表下方空白处）。
-/// 目标若在被拖动项自己的子树里（含它本身）会被忽略——否则会把子树拖成一个环。
+/// 把列表里的一个条目挪到另一个目录下（拖动放下）；`into` = 目标文件夹（`None` = 顶层）。
 #[derive(Clone, Action, PartialEq, Eq, Deserialize)]
 #[action(namespace = alacrterm, no_json)]
 pub(crate) struct MoveEntry {
@@ -71,9 +44,7 @@ pub(crate) struct MoveEntry {
     pub(crate) into: Option<SessionPath>,
 }
 
-/// 删除列表里的一个条目（记录 / 文件夹）。
-///
-/// 文件夹**连带**里面的内容一起删；已用记录开出来的终端**不受影响**（两者互不影响）。
+/// 删除列表里的一个条目（记录 / 文件夹；文件夹连带里面的内容）。
 #[derive(Clone, Action, PartialEq, Eq, Deserialize)]
 #[action(namespace = alacrterm, no_json)]
 pub(crate) struct RemoveEntry {
@@ -81,16 +52,12 @@ pub(crate) struct RemoveEntry {
 }
 
 impl AppRoot {
-    /// 注册全局 action 监听器（应在窗口创建后调用一次）。
+    /// 注册全局 action 监听器（窗口创建后调用一次）。
     ///
-    /// 放在这里而不是 `AppRoot::new` 里：那里拿不到已构造好的实体句柄，
-    /// 而 `main` 的建窗闭包里正好有 `Entity<AppRoot>`。
-    ///
-    /// 分发原则：**只改会话列表状态的直接找 [`SessionsState`](crate::sidebar_panel::sessions::SessionsState)
-    /// （不需要窗口，连让出一拍都免了）；要开窗口 / 建终端的才落在 `AppRoot` 上**——
-    /// 全局监听器只有 `&mut App`，所以那些必须经 [`AppRoot::defer_after_update`]。
+    /// 只改会话列表状态的直接找 `SessionsState`（不需要窗口）；要开窗口 / 建终端的落在
+    /// `AppRoot` 上，经 [`AppRoot::defer_after_update`]。
     pub(crate) fn register_actions(root: WeakEntity<Self>, cx: &mut App) {
-        // 会话列表实体的句柄：只改列表状态的 action（拖放 / 删除）直接找它。
+        // 列表实体句柄：只改列表状态的 action 直接找它。
         let Ok(sessions) = root.read_with(cx, |root, _| root.sessions.clone()) else {
             return;
         };

@@ -1,22 +1,8 @@
-//! 「新建会话」对话框：收集 SSH 连接参数（IP / 端口 / 名称 / 用户名 / 密码）后，
-//! **只往侧边栏的会话列表里加一条记录**（见 [`crate::sidebar_panel::sessions::SessionRecord`]）。
+//! 「新建会话」对话框：收集 SSH 连接参数（IP / 端口 / 名称 / 用户名 / 密码），
+//! **只往会话列表里加一条记录、不开终端**（见 [`crate::sidebar_panel::sessions::SessionRecord`]）。
 //!
-//! 由侧边栏「会话」栏底部状态栏**右下角的 `+`** 触发（`NewSession` action →
-//! [`AppRoot::open_new_session_dialog`]），新记录落在**顶层**；文件夹行的右键菜单
-//! 「在这里新建会话」走同一个入口，只是带上 `folder` 参数（落进那个文件夹）。
-//!
-//! 行为约定：
-//! - **只支持 SSH**：IP、名称、用户名三项必填（任一为空时「添加」按钮禁用，
-//!   `on_ok` 里再兜一次校验），端口留空用 22；
-//! - **不打开终端**：本对话框只落一条记录，双击侧边栏里那条记录才真正开终端
-//!   （[`AppRoot::open_session_record`]）。这两件事刻意分开——记录是配置，
-//!   终端是运行实例，同一条记录可以开多个终端；
-//! - 因此也不需要「IP 留空 = 本地终端」那种兜底：本地终端请用标签栏的 `+`
-//!   （[`NewLocalTerminal`](crate::actions::NewLocalTerminal)）。
-//!
-//! 关于密码字段：本机 `ssh` 客户端不接受命令行传入的密码（这是 ssh 的刻意设计），
-//! 因此这里只做输入与掩码，**不随记录保存**；实际认证仍需在终端里按提示交互输入。
-//! 后续若要真正免交互登录，需要改用 SSH 库或 `sshpass` 之类的辅助程序。
+//! `folder` = 记录落在哪个文件夹下（`None` = 顶层）。IP、名称、用户名必填，端口留空用 22；
+//! 密码只做输入与掩码，**不随记录保存**（认证在终端里交互完成）。
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _,
@@ -37,7 +23,7 @@ use crate::AppRoot;
 /// 端口留空时使用的默认 SSH 端口。
 const DEFAULT_SSH_PORT: &str = "22";
 
-/// 建连表单的状态：五个输入框（实体长期存活，保证对话框重绘时输入不丢失）。
+/// 建连表单：五个输入框。
 #[derive(Clone)]
 pub(crate) struct ConnectionForm {
     host: Entity<InputState>,
@@ -48,8 +34,7 @@ pub(crate) struct ConnectionForm {
 }
 
 impl ConnectionForm {
-    /// 创建表单状态。输入框实体在此一次性创建——对话框的构建闭包是 `Fn`
-    /// （每帧都会被调用），若在闭包内创建就会每帧重置输入。
+    /// 创建表单状态（输入框实体只在此创建一次：对话框的构建闭包每帧都会被调用）。
     pub(crate) fn new(window: &mut Window, cx: &mut Context<AppRoot>) -> Self {
         let host = cx.new(|cx| InputState::new(window, cx).placeholder("例如：192.168.1.10"));
         let port = cx.new(|cx| InputState::new(window, cx).default_value(DEFAULT_SSH_PORT));
@@ -72,9 +57,7 @@ impl ConnectionForm {
         input.read(cx).value().trim().to_string()
     }
 
-    /// 表单是否可提交：IP、名称、用户名三项必填（端口可空 → 用默认端口）。
-    ///
-    /// 按钮的禁用态与 `on_ok` 里的兜底校验都读它，两处永远一致。
+    /// 表单是否可提交：IP、名称、用户名三项必填（端口可空 ⇒ 用默认端口）。
     pub(crate) fn is_valid(&self, cx: &App) -> bool {
         !self.trimmed(&self.host, cx).is_empty()
             && !self.trimmed(&self.name, cx).is_empty()
@@ -101,7 +84,6 @@ impl ConnectionForm {
 
     /// 渲染表单字段。
     fn render_fields(&self, cx: &mut App) -> AnyElement {
-        // 顺序按需求给出：IP、端口、名称、用户名、密码。
         // IP 与端口同排一行，端口用固定窄宽度。
         let host_port_row = h_flex()
             .gap_3()
@@ -134,9 +116,7 @@ impl ConnectionForm {
     }
 }
 
-/// 表单下方的说明行：必填项缺失时给一句红字提示，齐全时留一句中性说明。
-///
-/// 「添加」按钮的禁用态已经说明了问题，但用户未必知道缺哪一项，所以这里补一句。
+/// 表单下方的说明行：必填项缺失时红字提示，齐全时一句中性说明。
 fn field_hint(valid: bool, cx: &App) -> AnyElement {
     let (text, color) = if valid {
         (
@@ -172,10 +152,8 @@ fn field_label(text: &'static str, cx: &App) -> AnyElement {
 }
 
 impl AppRoot {
-    /// 侧边栏状态栏 `+` / 文件夹右键菜单的入口：弹出「新建会话」对话框。
-    ///
-    /// `folder` = 新记录落在哪个文件夹里（`None` = 顶层，见 [`SessionPath`]）；
-    /// 无论哪种情况都**只加记录、不开终端**。
+    /// 弹出「新建会话」对话框；`folder` = 新记录落在哪个文件夹里（`None` = 顶层），
+    /// 只加记录、不开终端。
     pub(crate) fn open_new_session_dialog(
         &mut self,
         folder: Option<SessionPath>,
@@ -183,20 +161,17 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let form = ConnectionForm::new(window, cx);
-        // 加记录写的是**会话列表实体**（`SessionsState`）的状态，直接把它的句柄带进对话框。
         let sessions = self.sessions.clone();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let form_for_ok = form.clone();
             let sessions_for_ok = sessions.clone();
             let folder_for_ok = folder.clone();
-            // 必填项是否齐全：驱动「添加」的禁用态与下方的提示行。
+            // 驱动「添加」的禁用态与下方的提示行。
             let valid = form.is_valid(cx);
 
-            // 底部按钮：`Dialog::render` **不会**自动生成确定/取消按钮（`button_props`
-            // 只被 AlertDialog 使用），必须用 `.footer(...)` 自己给出。
-            // `DialogClose` / `DialogAction` 会分别派发 Cancel / Confirm action，
-            // 从而触发下面注册的 `on_ok` / `on_cancel` 回调。
+            // 页脚自拼：`Dialog::render` 不自动生成确定/取消按钮；`DialogClose` / `DialogAction`
+            // 分别派发 Cancel / Confirm，触发 `on_ok` / `on_cancel`。
             let footer = DialogFooter::new()
                 .child(DialogClose::new().child(Button::new("cancel").label("取消")))
                 .child(DialogAction::new().child(
@@ -211,17 +186,14 @@ impl AppRoot {
                 .w(px(420.))
                 .footer(footer)
                 .on_ok(move |_, _, cx| {
-                    // `on_ok` 是 `Fn`（可多次调用），因此每次调用都克隆一份表单。
                     let form = form_for_ok.clone();
-                    // 兜底校验（禁用态拦不住回车等提交路径）：缺必填项就不关对话框。
+                    // 兜底校验：缺必填项就不关对话框。
                     let Some(record) = form.build(cx) else {
                         return false;
                     };
                     let folder = folder_for_ok.clone();
-                    // 只加记录、不开终端；列表状态在 `SessionsState` 里 ⇒ 直接写它
-                    // （不需要窗口，所以不必像「建终端」那样用 `defer_after_update`）。
+                    // 只加记录，不建终端（不需要窗口，无需 defer）。
                     sessions_for_ok.update(cx, |state, cx| state.add_record(record, folder, cx));
-                    // 返回 true 让对话框关闭。
                     true
                 })
                 .child(form.render_fields(cx))

@@ -1,14 +1,12 @@
 //! 自绘的标签栏（dock 的 `TabGroupRenderer`）：定宽标签 + 图标 + 悬停/选中才出现的 `×`。
 //!
-//! 两层换法：`TerminalDockSkin` 把区级外观全委托给内层 `DockSkin`，只把
-//! `tab_group_renderer()` 换成 `TerminalTabBar`；后者只覆写 `render_tab_bar` /
-//! `render_active_panel` / `render_drop_indicator`，其余走 trait 默认值。
+//! `TerminalDockSkin` 把区级外观全委托给内层 `DockSkin`，只把 `tab_group_renderer()` 换成
+//! `TerminalTabBar`；后者只覆写 `render_tab_bar` / `render_active_panel` /
+//! `render_drop_indicator`，其余走 trait 默认值。
 //!
-//! 三条要点（为什么这么做、坑在哪，见 `docs/terminal-architecture.md` §3.2）：
-//! 1. 渲染器不是实体（方法是 `&self`）⇒ 悬停状态放 `Cell`，改完要
-//!    [`TabBarState::repaint`]，而且**只能通知根视图**；
-//! 2. `TabGroupContext` 是只读快照，选中 / 拖放 / 关闭全得回调它；
-//! 3. 关会话走 [`AppRoot::close_panel_id`]（dock 的 `close_panel` 拒绝关最后一块面板）。
+//! 三条约定：渲染器不是实体（跨帧状态放 `Cell`，改完要走 [`TabBarState::repaint`]，
+//! 且只能通知根视图）；`TabGroupContext` 是只读快照，选中 / 拖放 / 关闭都要回调它；
+//! 关会话走 [`AppRoot::close_panel_id`]。
 
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
@@ -50,7 +48,7 @@ pub(crate) struct TerminalDockSkin {
 }
 
 impl TerminalDockSkin {
-    /// `root`：悬停重绘与关会话都要经过根视图（见模块文档）。
+    /// `root`：悬停重绘与关会话都要经过根视图。
     pub(crate) fn new(cx: &mut Context<DockArea>, root: WeakEntity<AppRoot>) -> Rc<Self> {
         let inner = DockSkin::new(cx);
         Rc::new(Self {
@@ -122,11 +120,9 @@ impl TabBarState {
         }
     }
 
-    /// 改完状态后要重绘一次——渲染器自己不是实体，没人会替我们重绘。
+    /// 改完状态后重绘一次（渲染器不是实体，没人会替我们重绘）。
     ///
-    /// ⚠️ 通知的是**根视图**而不是 dock 区：实测 `area.notify()` 不会让标签组重绘
-    /// （标签组是区的子实体，区重绘不等于子实体重绘），而根视图那条路是验证过的
-    /// ——终端 OSC 标题一变，标签文字就跟着变（见 `spawn_session` 里的 `observe`）。
+    /// ⚠️ 必须通知**根视图**：`area.notify()` 不会让标签组重绘。
     fn repaint(&self, cx: &mut App) {
         _ = self.root.update(cx, |_, cx| cx.notify());
     }
@@ -160,7 +156,7 @@ impl TabGroupRenderer for TerminalTabBar {
             .map(|(ix, _)| ix)
             .collect();
 
-        // 活动标签变化时把它滚进可视区（仅做最小滚动，和皮肤的做法一致）。
+        // 活动标签变化时把它滚进可视区。
         if self.state.last_active.replace(Some(active_ix)) != Some(active_ix)
             && let Some(visible_ix) = visible.iter().position(|ix| *ix == active_ix)
         {
@@ -172,7 +168,7 @@ impl TabGroupRenderer for TerminalTabBar {
             .map(|ix| self.render_tab(group, *ix, active_ix, window, cx))
             .collect();
 
-        // 右端固定区：当前面板的工具栏按钮（我们只提供 `+` 新建终端）。
+        // 右端固定区：当前面板的工具栏按钮（只有 `+`）。
         let toolbar = group
             .active_panel()
             .and_then(|panel| PanelHandle::of(panel))
@@ -191,8 +187,7 @@ impl TabGroupRenderer for TerminalTabBar {
                     .min_w_0()
                     .h_full()
                     .overflow_hidden()
-                    // 栏底那条线画在标签**下面**：选中标签的不透明底色会盖掉它，
-                    // 于是「选中标签与终端连成一体」。
+                    // 栏底线画在标签**下面**：选中标签的不透明底色会盖掉它。
                     .child(
                         div()
                             .absolute()
@@ -227,7 +222,7 @@ impl TabGroupRenderer for TerminalTabBar {
             .into_any_element()
     }
 
-    /// 内容区：照抄皮肤的写法（缓存 + 绝对定位铺满，终端流畅靠它）。
+    /// 内容区：缓存 + 绝对定位铺满（同皮肤）。
     fn render_active_panel(
         &self,
         panel: AnyView,
@@ -274,7 +269,7 @@ impl TerminalTabBar {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        // 颜色先取成局部值：下面要在闭包里可变借用 `cx`。
+        // 先取出颜色（下面要在闭包里借用 `cx`）。
         let tab_active = cx.theme().tab_active;
         let tab_active_fg = cx.theme().tab_active_foreground;
         let tab_fg = cx.theme().tab_foreground;
@@ -293,9 +288,9 @@ impl TerminalTabBar {
             .and_then(|handle| handle.tab_name(cx))
             .unwrap_or_else(|| panel.panel_name(cx).into());
 
-        // element id 里带组节点，避免分屏后两块面板的同一下标撞车。
+        // id 带组节点：分屏后两块面板的同一下标不会撞车。
         let tab_id = (group.node().as_u64() as usize) << 8 | ix;
-        // 相邻标签的竖线（每条边界一条线，且选中标签两侧都有线）。
+        // 相邻标签的竖线（每条边界一条线）。
         let draw_left = ix > 0 && ix <= active_ix;
         let draw_right = ix >= active_ix;
 
@@ -349,7 +344,7 @@ impl TerminalTabBar {
                 this.text_color(tab_fg).hover(|style| style.bg(muted))
             })
             .cursor(CursorStyle::PointingHand)
-            // 悬停要自己记账（gpui-pre 没有 `visible_on_hover`）。
+            // 悬停自己记账（gpui-pre 没有 `visible_on_hover`）。
             .on_hover({
                 let state = self.state.clone();
                 move |hovered: &bool, _, cx| state.set_hovered(hovered.then_some(ix), cx)

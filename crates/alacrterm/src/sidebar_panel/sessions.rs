@@ -1,32 +1,25 @@
 //! 「会话」视图:文件夹形式的**记录树**(MobaXterm 那种形态),状态收在 [`SessionsState`]。
 //!
-//! 列表内容是**会话记录**(连接配置),与终端实例**完全无关**:一条记录有没有在跑终端,
-//! 取决于用户是否双击过它;关掉终端也不影响列表。**没有自动生成的根文件夹**,顶层
-//! 直接就是用户自己建的文件夹(可嵌套,行上不显示「里面有几条」)与记录。
+//! 列表内容是**会话记录**(连接配置),与终端实例完全无关:有没有在跑终端取决于用户是否
+//! 双击过它,关掉终端也不影响列表;没有自动生成的根文件夹(顶层就是用户建的文件夹与记录)。
 //!
-//! 本模块 = 记录模型 + 「会话」视图的状态与全部增删改,都在 [`SessionsState`] 这个实体里
-//! (由 [`crate::AppRoot`] 持有,见 [`crate::main`] 的模块文档):
-//! - **加**:状态栏左下角建文件夹([`NewFolder`])、右下角新建会话([`NewSession`]),
-//!   都落顶层;文件夹行右键可以「在这里新建会话 / 新建子文件夹」(落进那个文件夹)。
-//! - **删**:记录行 / 文件夹行的右键菜单;文件夹连带里面的内容一起删。
-//! - **开终端**:双击记录行(单击只选中)或右键「打开会话」→ 派发 [`OpenSession`],
-//!   由 [`crate::AppRoot::open_session_record`] 取记录再建终端(跨组件那一步留在根视图)。
-//! - **拖放**:记录行与文件夹行都能拖(载荷 [`DragSessionEntry`]);落在文件夹行 = 进它、
-//!   落在会话行 = 进它所在目录、落在树下方那条空白落点 = 提到顶层;落点合法性由
-//!   [`SessionsState::move_entry`] 把关(不能拖进自己 / 自己的子孙)。
+//! - **加**:状态栏左下角建文件夹([`NewFolder`])、右下角新建会话([`NewSession`]);
+//!   文件夹行右键可以「在这里新建会话 / 新建子文件夹」。
+//! - **删**:记录行 / 文件夹行的右键菜单(文件夹连带里面内容)。
+//! - **开终端**:双击记录行或右键「打开会话」→ [`OpenSession`] →
+//!   [`crate::AppRoot::open_session_record`]。
+//! - **拖放**:记录行与文件夹行都能拖(载荷 [`DragSessionEntry`]),落点合法性由
+//!   [`SessionsState::move_entry`] 把关。
 //!
-//! ⚠️ 几个 gpui-kit `tree` 的坑(踩过):
-//! - **行类型由行 id 前缀判断**([`row_id`] / [`session_row`]),**不能**用
-//!   `TreeEntry::is_folder()` —— 它其实是「有没有子项」,空文件夹会被当成叶子;
-//! - `Tree` 是**等高虚拟列表 + `size_full()`**,塞进 `Sidebar` 的自动高度 item 里会塌成 0
-//!   ⇒ 必须 `.h(可见行数 × TREE_ROW_HEIGHT)`,行数由 [`SessionsState::visible_rows`] 算;
-//! - **展开状态不能存在 `TreeItem` 里**(每次同步都会重建 `TreeItem`)⇒ 存在
-//!   [`SessionsState::expanded`](按路径),用户展收靠订阅 [`TreeEvent`] 回写;
-//! - `set_items` 会 notify ⇒ **不能每帧无条件调用**(靠内容签名挡,否则自激成死循环),
-//!   且签名要用 `Option`(空 `Vec` 会让首次同步被当成「签名没变」跳掉、列表一片空白)。
+//! ⚠️ gpui-kit `tree` 的三条约定:
+//! - 行类型由行 id 前缀判断([`row_id`] / [`session_row`]),**不能**用
+//!   `TreeEntry::is_folder()`(它是「有没有子项」,空文件夹会被当成叶子);
+//! - `Tree` 是等高虚拟列表 + `size_full()` ⇒ 必须自己 `.h(可见行数 × TREE_ROW_HEIGHT)`;
+//! - 展开状态存在 [`SessionsState::expanded`](每次同步都会重建 `TreeItem`);
+//!   `set_items` 会 notify ⇒ 靠内容签名挡,签名用 `Option`。
 //!
-//! 行交互一律**派发 action**([`OpenSession`] / [`RemoveEntry`] / …):`SidebarItem::render`
-//! 只拿得到 `&mut App`,而 action 走的是与应用其它入口完全相同的路径(见 [`crate::actions`])。
+//! 行交互一律派发 action([`OpenSession`] / [`RemoveEntry`] / …):`SidebarItem::render`
+//! 只拿得到 `&mut App`。
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, CursorStyle, Entity, InteractiveElement as _,
@@ -97,10 +90,7 @@ impl SessionFolder {
     }
 }
 
-/// 会话列表里的一条**会话记录**：只保存连接参数，不保存任何运行状态。
-///
-/// 同一条记录可以开任意多个终端（双击记录），关掉终端也不会影响记录本身。
-/// 只在内存里，重启不保留。
+/// 会话列表里的一条**会话记录**：只保存连接参数（只在内存里，重启不保留）。
 pub(crate) struct SessionRecord {
     /// 显示名（列表里的行标题，也是打开后标签页的名字）。
     pub(crate) name: SharedString,
@@ -138,35 +128,22 @@ impl SessionRecord {
 
 // ---------------------------------------------------------------- 视图状态
 
-/// 会话树的每行高度:`Tree` 内部的虚拟列表是**等高**的,所以这个值也得用来算整棵树的高度。
+/// 会话树每行高度（算整棵树高度时也用它）。
 const TREE_ROW_HEIGHT: Pixels = px(28.);
 
-/// 「会话」视图（记录树）的状态：记录模型 + 展开状态 + gpui-kit [`TreeState`]。
-///
-/// 由 [`crate::AppRoot`] 持有一个 `Entity<SessionsState>`：**列表的数据、树的交互状态、
-/// 以及对它们的全部操作、连同渲染都在这里**，根视图完全不插手（侧边栏只把这个实体
-/// 摆进内容位，见 `sidebar_panel::SidebarContent`）。
+/// 「会话」视图（记录树）的状态：记录模型 + 展开状态 + gpui-kit [`TreeState`]，
+/// 连同渲染都在这里（侧边栏只把这个实体摆进内容位）。
 pub(crate) struct SessionsState {
-    /// 侧边栏「会话」列表的条目树（顺序 = 列表里的显示顺序）。
-    ///
-    /// 只有「新建会话 / 新建文件夹」对话框与 action 监听器会往这里加条目；
-    /// 条目与 [`crate::AppRoot::terminals`] **没有对应关系**（双击记录才按它开一个终端）。
+    /// 「会话」列表的条目树（顺序 = 显示顺序）。
     entries: Vec<SessionEntry>,
-    /// 展开着的文件夹路径。
-    ///
-    /// 会话树的展开状态**本可以**存在 `TreeItem` 内部（共享的 `Rc<RefCell<..>>`），
-    /// 但条目树每次同步都会重建 `TreeItem` ⇒ 那样会每刷一次就全部收起。
-    /// 所以这里自己留一份：同步时按它给 `TreeItem::expanded(..)` 赋值，
-    /// 同时它也是[【算行数】](SessionsState::visible_rows)的依据
-    /// （树的高度必须手算，见本实体自己的 [`Render`] 实现）。
+    /// 展开着的文件夹路径（同步时按它给 `TreeItem::expanded(..)` 赋值，
+    /// 也是[【算行数】](SessionsState::visible_rows)的依据）。
     expanded: Vec<SessionPath>,
     /// 「会话」树的交互状态（选中 / 滚动 / 键盘导航）。
     tree: Entity<TreeState>,
-    /// 上一次同步树用的内容签名（条目类型 + 名字 + 层级，含被收起的分支）：
-    /// 变了才重建 items（`set_items` 会 notify，每帧无条件调用会自激）。
+    /// 上一次同步树用的内容签名：变了才重建 items（`set_items` 会 notify）。
     ///
-    /// ⚠️ `None` = 还没同步过：不能用「空 `Vec`」同时表达「没同步过」与「一条都没有」——
-    /// 后者会让首次同步被当成「签名没变」跳掉，树就永远拿不到 items。
+    /// ⚠️ `None` = 还没同步过（不能用空 `Vec` 表示，否则首次同步会被当成「没变」跳掉）。
     tree_sig: Option<Vec<(SharedString, bool, usize)>>,
     /// 树的展收事件订阅（RAII：不存着就会在 `new` 返回时解除）。
     _tree_sub: Subscription,
@@ -175,8 +152,7 @@ pub(crate) struct SessionsState {
 impl SessionsState {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         let tree = cx.new(|cx| TreeState::new(cx));
-        // 文件夹展开 / 收起会改变「树一共多少行」（高度按行数算），
-        // 所以树的事件要立刻回传到本实体。
+        // 展收会改变行数（高度按行数算），所以事件要回传到本实体。
         let sub = cx.subscribe(&tree, |state: &mut Self, _, event, cx| {
             state.on_tree_event(event, cx);
         });
@@ -191,9 +167,7 @@ impl SessionsState {
 
     /// 会话树当前显示多少行（展开的文件夹才计入子项）。
     ///
-    /// ⚠️ `Tree` 内部是**虚拟列表 + `size_full()`**，而它是塞在 `Sidebar` 自己的虚拟列表里的
-    /// 一个自动高度 item ⇒ 拿不到确定高度、高度会塌成 0。所以必须自己把行数算出来
-    /// （见本实体自己的 [`Render`] 实现）。
+    /// ⚠️ `Tree` 是虚拟列表 + `size_full()`，必须自己算出行数（见 [`Render`] 实现）。
     fn visible_rows(&self) -> usize {
         let mut path = SessionPath::new();
         Self::count_rows(&self.entries, &self.expanded, &mut path)

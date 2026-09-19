@@ -3,24 +3,20 @@
 //!
 //! 两类配置都集中在这里**解析成结构化数据**再交给使用方，使用方不读文件：
 //! 渲染参数 → [`RenderSettings`]（传给 `TerminalView::new`）；
-//! 主题文件 → `gpui_component::ThemeRegistry`（只登记成主题库，默认不启用，见下）。
+//! 主题文件 → `gpui_component::ThemeRegistry`（只登记成主题库，默认不启用）。
 //!
-//! 运行期状态放在 [`Settings`] 全局里：**设置窗口读它、改它，并回写文件**
-//! （`write_*` 系列）；主窗口按它创建新会话（见 `AppRoot::spawn_session`）。
+//! 运行期状态放在 [`Settings`] 全局里：设置窗口读它、改它，并回写文件（`write_*` 系列）；
+//! 主窗口按它创建新会话（见 `AppRoot::spawn_session`）。
 //!
 //! 查找顺序统一为「可执行文件同级」（发行形态）→「仓库根」（开发形态，经
 //! `CARGO_MANIFEST_DIR/../..`）；文件缺失 / 字段缺失 / 取值非法 ⇒ **逐项回退**到默认值
-//! 并打一条提示，任何情况下都能启动。写回时选**已存在的那一份**，
-//! 都没有则选有 `config/` 目录的一侧（开发=仓库根、发行=exe 同级）。
+//! 并打一条提示，任何情况下都能启动。写回时选**已存在的那一份**，都没有则选有
+//! `config/` 目录的一侧（开发 = 仓库根、发行 = exe 同级）。
 //!
-//! ⚠️ 提示走 `eprintln!`（带 `[config]` 前缀）而不是 `log::warn!`：本仓库没有安装 logger
-//! （`log` 宏是空操作），而配置读不到 / 写错时用户需要看得到原因（开发时 `cargo run`
-//! 的 stderr、发行版重定向）。
+//! ⚠️ 提示走 `eprintln!`（带 `[config]` 前缀）：本仓库没有安装 logger（`log` 宏是空操作）。
 //!
-//! ⚠️ **界面主题默认不启用任何导入的主题**：与 gpui-kit 开箱行为一致，用它的内置
-//! `Default Dark` / `Default Light`（`config/app.json` 里没写主题名就是这样）。
-//! 换主题必须走 [`set_theme`]，它内部再调 [`change_theme`]——只 `Theme::change`
-//! 会把 `sidebar_border` 的透明覆盖冲掉。
+//! ⚠️ 界面主题默认不启用任何导入的主题（与 gpui-kit 开箱行为一致，用内置的
+//! `Default Dark` / `Default Light`）；换主题必须走 [`set_theme`]。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -385,11 +381,8 @@ pub(crate) fn load_themes(cx: &mut App) {
     let total = ThemeRegistry::global(cx).themes().len();
     eprintln!("[config] 已加载 {loaded} 个主题文件，注册表共 {total} 个主题（{shown}）");
 
-    // 主题文件热重载后，gpui-component 会按注册表重新投影整套配色——包括被我们改成
-    // 透明的 `sidebar_border`（见 `change_theme`），把覆盖冲掉。全局观察者按**注册
-    // 顺序**回调（`subscription.rs` 里按自增 subscriber_id 排序），所以注册在
-    // `gpui_component::init` 之后就能在它投影完再压一遍（实测：不这么做时，
-    // 主题文件里写 `sidebar.border` 会在热重载后画出来）。
+    // 主题热重载会重新投影整套配色（冲掉我们在 `change_theme` 里压的覆盖），
+    // 所以这里再压一遍（观察者按注册顺序回调，排在 gpui-kit 的投影之后）。
     cx.observe_global::<ThemeRegistry>(|cx| {
         let mode = Theme::global(cx).mode;
         change_theme(mode, cx);
@@ -404,9 +397,8 @@ pub(crate) fn load_themes(cx: &mut App) {
 
 /// 同步预装目录下的主题文件，返回成功的文件数。
 ///
-/// `watch_dir` 的首次装载跑在 `cx.spawn` 里（registry.rs:105），比首个渲染帧晚：
-/// 注册表在那之前是空的，谁想按名字选主题都会失败。这里先同步读一遍，
-/// 之后 `watch_dir` 的异步重载只是把同样内容再放一次（注册表按名字去重）。
+/// `watch_dir` 的首次装载是异步的（比首个渲染帧晚），这里先同步读一遍，
+/// 免得首帧时注册表还是空的。
 fn preload_themes(dir: &Path, cx: &mut App) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -443,10 +435,8 @@ fn themes_dir() -> Option<PathBuf> {
 /// 「跟随 gpui-kit」在下拉框里的显示名（也是空串值的标签）。
 pub(crate) const FOLLOW_GPUI_KIT: &str = "跟随 gpui-kit（默认）";
 
-/// 主题下拉框的候选项 `(值, 显示名)`：**空串 = 跟随 gpui-kit 内置主题**。
-///
-/// 注册表里 `is_default` 的那两套（`Default Dark` / `Default Light`）不再重复列出——
-/// 选「跟随 gpui-kit」拿到的就是它们。
+/// 主题下拉框的候选项 `(值, 显示名)`：**空串 = 跟随 gpui-kit 内置主题**
+/// （注册表里 `is_default` 的那两套不再重复列出）。
 pub(crate) fn theme_options(cx: &App, mode: ThemeMode) -> Vec<(SharedString, SharedString)> {
     let mut options = vec![(SharedString::default(), FOLLOW_GPUI_KIT.into())];
     for theme in ThemeRegistry::global(cx).sorted_themes() {
@@ -458,34 +448,16 @@ pub(crate) fn theme_options(cx: &App, mode: ThemeMode) -> Vec<(SharedString, Sha
     options
 }
 
-/// 应用（或切换）界面主题，并重新压上我们的主题覆盖。
+/// 应用（或切换）界面主题，并压上两处覆盖：
+/// - `sidebar_border` 置透明 —— 分栏边界那条竖线统一交给拖拽条画，免得两条线错位；
+///   代价是侧边栏菜单的「嵌套项缩进导线」（同一个 token）也一起消失。
+/// - 关掉 `list.active_highlight` —— `ListItem` 默认的 `list_active` 选中底色太淡，
+///   关掉后改用主题的 `accent`。
 ///
-/// 配色默认与 gpui-kit 开箱一致（内置 `Default Dark` / `Default Light`）；用哪套由
-/// `config/app.json` 决定（设置窗口的「主题」页可改）——**换主题走 [`set_theme`]**，
-/// 它选好主题后调本函数投影。
+/// ⚠️ 每次换主题、以及主题热重载后都要重新压（`Theme::change` 会重新投影整套配色），
+/// 所以换主题必须走 [`set_theme`] 或本函数。
 ///
-/// **分栏边界的那条竖线统一由拖拽条（`ResizeHandle`）来画**：它静止时会在边界处
-/// 画一条 1px 线，`h_full` 贯穿整列（含两侧状态栏行）。所以我们要做的是**反方向**的
-/// 覆盖——把侧边栏组件自己那条边框关掉：`Sidebar` 内部固定 `Side::Left → border_r_1()`
-/// / `Side::Right → border_l_1()`，颜色取 `cx.theme().sidebar_border`（默认 = `border`，
-/// 与拖拽条同色）。把它置为透明后，左右边界就只剩拖拽条那一条线，宽度天然一致。
-///
-/// ⚠️ 只做一次不够：`Theme::change()` 会把整套配色**投影**回主题 global（包含
-/// `sidebar_border`，也会盖掉主题文件里的 `sidebar.border`），所以**每次**换主题、
-/// 以及主题文件热重载后都要重新压（见 [`load_themes`] 里的全局观察者）。
-/// 设置窗口的深浅色开关已经改走本函数，以后新增换主题的地方也必须走它。
-///
-/// ⚠️ 副作用：`sidebar_border` 还兼作侧边栏菜单「嵌套项缩进导线」的颜色
-/// （gpui-component `sidebar/menu.rs`），它也会一起变成透明。
-///
-/// **列表选中色改用 `accent`**：gpui-kit 的 `ListItem`（会话树的行）默认用
-/// `list_active` 画选中底色，而本仓库的 Hybrid Dark 把它压到了 6% 不透明度
-/// （`list.active.background = #15678a10`，见 `themes/hybrid.json`）——淡到和悬停底色
-/// 分不出来。关掉 `list.active_highlight` 后它改用 `accent`（= `#31393a`，与侧边栏
-/// 顶部选中的视图标签同色），「当前会话」才一眼可辨。副作用：表格 / 其他列表的选中
-/// 底色也会跟着变（本应用目前只有会话树用 `ListItem`）。
-///
-/// 传 `None` 作为窗口参数（与原先一致）：调用方需要自行 `cx.refresh_windows()`。
+/// 窗口参数传 `None`：调用方自行 `cx.refresh_windows()`。
 pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
     let theme = Theme::global_mut(cx);
@@ -495,9 +467,8 @@ pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
 
 /// 选定某个模式（深 / 浅）用哪套主题，`None` = 跟随 gpui-kit 内置主题。
 ///
-/// 一次做完三件事：挂到 `Theme` 的槽位、记进全局 [`Settings`]、写回 `config/app.json`；
-/// 最后走 [`change_theme`] 重新投影——**换主题必须走它**，否则
-/// `sidebar_border` 的透明覆盖会被配色投影冲掉（见 `change_theme` 的说明）。
+/// 一次做完三件事：挂到 `Theme` 槽位、记进全局 [`Settings`]、写回 `config/app.json`；
+/// 最后走 [`change_theme`] 重新投影。
 pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut App) {
     if !apply_theme_slot(name.as_ref(), mode, cx) {
         return;

@@ -1,18 +1,11 @@
 //! 状态栏指标采样：会话连接状态 + 会话进程的 CPU / 内存 + 系统网络速率。
 //!
-//! 采样由 [`AppRoot::start_metrics_sampling`] 在后台定时任务里驱动（每
-//! [`SAMPLE_INTERVAL`] 一次），结果写进普通字段 [`SystemMonitor::metrics`]，
-//! 渲染时直接读取 [`SystemMonitor::metrics`]，无需再动实体。
+//! 后台定时任务（[`AppRoot::start_metrics_sampling`]）每 [`SAMPLE_INTERVAL`] 调一次
+//! [`SystemMonitor::sample`]，渲染时读 [`SystemMonitor::metrics`]。
 //!
-//! ## 数据来源与边界
-//! - **CPU / 内存**：取自「当前会话对应的那个进程」（PTY 里的 shell / ssh），
-//!   PID 由 [`terminal_view::TerminalView::pid`] 提供。
-//!   sysinfo 要求两次刷新间隔不小于 `MINIMUM_CPU_UPDATE_INTERVAL`（200ms），
-//!   1.5s 的采样间隔满足要求；首次采样拿不到有效的 CPU 百分比（需要两次采样的差值），
-//!   表现是启动后 1.5s 内显示 `--`。
-//! - **网络**：是**系统整体**的收发速率。按进程统计网络流量需要平台特定 API
-//!   （如 Windows 的 ETW），sysinfo 不提供，因此这里只能给出系统总量；
-//!   想知道「这个会话占了多少带宽」需要另接平台接口。
+//! - CPU / 内存取自当前会话进程（PID 来自 [`TerminalView::pid`](terminal_view::TerminalView::pid)）；
+//!   首次采样拿不到 CPU 百分比（需要两次采样的差值），启动后 1.5s 内显示 `--`。
+//! - 网络是**系统整体**收发速率（sysinfo 不提供按进程统计流量）。
 
 use std::time::{Duration, Instant};
 
@@ -24,11 +17,7 @@ pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_millis(1500);
 /// 一次采样的结果（渲染只读这里的值）。
 #[derive(Clone, Copy, Default)]
 pub(crate) struct SessionMetrics {
-    /// 会话进程是否仍在运行。
-    ///
-    /// `None` = 还没采样到（启动初期 / PTY 未就绪），`Some(true)` = 运行中，
-    /// `Some(false)` = 进程已从进程表消失（已结束）。三态是必要的：如果只用 bool，
-    /// 刚启动的那 1.5s（首次采样前）会被误显示为「已断开」。
+    /// 会话进程是否仍在运行；`None` = 还没采样到（启动初期 / PTY 未就绪）。
     pub(crate) alive: Option<bool>,
     /// 会话进程的 CPU 占用百分比（多核可超过 100）。
     pub(crate) cpu_percent: Option<f32>,
@@ -94,8 +83,7 @@ impl SystemMonitor {
         let pid = Pid::from_u32(pid);
 
         let refresh_kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
-        // remove_dead_processes = true：进程退出后把它从进程表里移除，
-        // 这样再采样时会返回 0 而不是继续报旧数据。
+        // 顺带清掉已退出的进程，免得继续报旧数据。
         let refreshed = self.system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
@@ -127,7 +115,7 @@ impl SystemMonitor {
         if let (Some((prev_rx, prev_tx)), Some(last)) = (self.last_net_totals, self.last_sample) {
             let seconds = now.duration_since(last).as_secs_f64();
             if seconds > 0.0 {
-                // saturating_sub：网卡重置 / 计数回绕时避免出现负数速率。
+                // 网卡重置 / 计数回绕时避免出现负数速率
                 self.metrics.net_rx_per_sec =
                     totals.0.saturating_sub(prev_rx) as f64 / seconds;
                 self.metrics.net_tx_per_sec =

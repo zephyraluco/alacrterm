@@ -1,23 +1,14 @@
-//! 终端容器关闭后的**欢迎页**（中间列的默认背景板）。
+//! 终端容器关闭后的**欢迎页**（中间列的默认背景板）：内容居中、列宽固定、列内元素左对齐，
+//! 「圆角方块 logo + 标题 + 副标题」下面接一节「开始使用」（分节标题 + 分隔线 + 操作行）；
+//! 背景用主题 `background`（与终端区同色）。
 //!
-//! 版式参考 zed 的欢迎页：内容整体居中、列宽固定、列内元素左对齐；最上面一组是
-//! 「圆角方块 logo + 标题 + 斜体副标题」，下面接一节分节标题（小号灰字 + 一条横向
-//! 贯穿的分隔线）与其下的操作行（左侧图标 + 名称、右端快捷键，整行可点、悬停提亮）。
-//!
-//! 与参考图的两点差异：
-//! - **没有「最近项目」一节**：本应用没有项目 / 历史会话概念，只保留「开始使用」。
-//! - 背景直接用主题的 `background`（与终端区同色）：打开 / 关闭终端时不会有颜色跳变，
-//!   欢迎页与终端页是同一种底色。
-//!
-//! 触发时机见 [`crate::AppRoot::render`]：所有标签页都关掉后终端容器不再渲染，
-//! 中间列改渲染本页；底部那条公共状态栏不受影响，仍然常驻。
+//! 所有标签页都关掉后中间列改渲染本页（见 [`crate::AppRoot::render`]）。
 
 use gpui::{
     AnyElement, Context, CursorStyle, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, StatefulInteractiveElement as _, Styled as _, Window, div, px, svg,
 };
-// `h_flex` 来自 gpui-base（gpui 原语层）：`div().flex().flex_row().items_center()` 的速记。
-// ⚠️ 单独 `.flex_row()` 不设置 `display: flex`，构造 flex 容器必须走它或 `.flex()`。
+// `h_flex` = `div().flex().flex_row().items_center()` 的速记（单写 `.flex_row()` 不会设置 `display: flex`）。
 use gpui_kit::base::h_flex;
 use gpui_kit::component::{ActiveTheme as _, IconNamed as _, v_flex};
 
@@ -51,9 +42,7 @@ impl AppRoot {
 
         v_flex()
             .size_full()
-            // 整块在中间列里居中（参考图：内容既不贴顶也不贴左）；
-            // 内边距加在整页外层：中间列很窄时内容两侧仍有呼吸空间，
-            // 而内容列的宽度上限（含分节分隔线）仍是完整的 420px。
+            // 整块居中；内边距加在整页外层，内容列的宽度上限仍是完整的 420px。
             .items_center()
             .justify_center()
             .px(px(24.))
@@ -79,7 +68,7 @@ impl AppRoot {
                                             .path(IconName::SquareTerminal.path())
                                             .w(LOGO_ICON_SIZE)
                                             .h(LOGO_ICON_SIZE)
-                                            // `svg()` 不继承父元素颜色，必须显式着色。
+                                            // `svg()` 不继承父元素颜色。
                                             .text_color(foreground),
                                     ),
                             )
@@ -141,7 +130,7 @@ impl AppRoot {
 
     /// 欢迎页里的一行操作：左端图标 + 名称，右端快捷键；整行可点、悬停提亮。
     ///
-    /// `id` 必须全局唯一（gpui 的状态化元素要求），因此由调用方显式给出。
+    /// `id` 必须全局唯一（gpui 状态化元素的要求），由调用方给出。
     fn welcome_action(
         &self,
         id: &'static str,
@@ -184,7 +173,7 @@ impl AppRoot {
                     .child(label),
             );
 
-        // 快捷键可有可无（例如「打开设置」在 keymap 里没有绑定，就不显示提示）。
+        // 快捷键可有可无（没有绑定的操作不显示提示）。
         match shortcut {
             Some(shortcut) => row
                 .child(
