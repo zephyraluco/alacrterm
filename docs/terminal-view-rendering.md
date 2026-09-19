@@ -1,9 +1,8 @@
 # terminal_view 渲染原理分析
 
-> 生成日期:2026-08-06(更新于 2026-08-09;2026-09-19 补 §7.4 拖选完整时序)
-> 分析对象:`crates/terminal_view`(从 Zed 的 `terminal_view` crate 移植精简的独立视图 crate)
-> 文件结构:`src/lib.rs`(TerminalView 生命周期/输入)、`src/terminal_element.rs`(三阶段渲染管线核心)、`src/contrast.rs`(APCA 对比度)
-> 关联:`crates/terminal`(Terminal 实体)与 `docs/terminal-architecture.md`
+> 分析对象:`crates/terminal_view`(移植精简自 Zed 的 `terminal_view`)。
+> 文件结构:`src/lib.rs`(TerminalView 生命周期 / 输入)、`src/terminal_element.rs`(三阶段渲染管线)、`src/contrast.rs`(APCA 对比度)。
+> 关联:`crates/terminal`(Terminal 实体)与 [`terminal-architecture.md`](./terminal-architecture.md)。
 
 ---
 
@@ -38,7 +37,7 @@ graph LR
     PAINT --> GPU[gpui 后端<br/>DX11/Metal/GL]
 ```
 
-**模块职责划分**(相对 Zed 原版的精简):
+**模块职责划分**:
 
 | 文件 | 职责 |
 |---|---|
@@ -100,7 +99,7 @@ let layout_id = self.interactivity.request_layout(..., |mut style, window, cx| {
 });
 ```
 
-> **相对 Zed 原版的简化**:Zed 的 `ContentMode::Inline`(Agent 面板等内嵌场景,按 `displayed_lines` 计算高度)已被移除 —— 本项目 `TerminalView` 只有 `Standalone` 独立终端一种模式,`request_layout` 恒返回 `relative(1.)`。
+> 本项目只有 `Standalone` 独立终端一种模式(无 Zed 的 `ContentMode::Inline`),`request_layout` 恒返回 `relative(1.)`。
 
 ### 3.2 `prepaint` —— 布局(核心)
 
@@ -281,7 +280,7 @@ fn paint(&self, origin, dimensions, window, cx) {
 }
 ```
 
-> **性能收益**:一段 `echo hello` 若 11 个 cell 同风格,就从 11 次整形合并为 1 次。终端每帧几千 cell,批处理是渲染性能的关键。
+> 批处理让连续同风格 cell 只整形一次(终端每帧几千 cell,这是渲染性能的关键)。
 
 ### 4.3 `merge_background_regions` —— 矩形合并
 
@@ -304,11 +303,11 @@ for region in merged_regions {
 }
 ```
 
-> **性能收益**:`ls --color` 大量同色背景/前景块合并成少量矩形,大幅减少 GPU quad 提交。
+> 同色区域合并成少量矩形,减少 GPU quad 提交。
 
 ### 4.4 块字符 —— subcell 网格
 
-某些字符用字体渲染会破坏"无缝拼接"(cell 间留缝、颜色混叠),Zed 改为**纯矩形绘制**。
+某些字符用字体渲染会留缝 / 颜色混叠,改为**纯矩形绘制**。
 
 **网格**:每个 cell 划分成 8 列 × 24 行 subcell(LCM of 8-way splits 与 sextant 的 3-way splits):
 
@@ -499,7 +498,7 @@ impl InputHandler for TerminalInputHandler {
 - 鼠标模式(应用开启 SGR/UTF8 鼠标协议):事件编码为转义序列写回 PTY;`register_mouse_listeners` 仅在 `mode.intersects(Modes::MOUSE_MODE)` 时注册中/右键的按下与抬起处理
 - Alt 悬停:节流刷新超链接检测(`FindHyperlink`),命中时 `paint` 阶段设置 `PointingHand` 光标样式
 
-### 7.4 拖选(框选)的完整时序
+### 7.4 拖选(框选)的时序
 
 拖选是**唯一一条「输入改状态」与「重绘」分属两跳的路径**:鼠标事件由 `TerminalElement` 收下并**直接调用模型** `Terminal::mouse_*`,而选区真正生效要等下一帧 `prepaint → Terminal::sync` 消费内部事件队列。因此这里涉及**两座桥**,缺一不可:
 
@@ -508,36 +507,22 @@ impl InputHandler for TerminalInputHandler {
 | 通知桥 `observe` | `TerminalView::new` 里 `cx.observe(&terminal, \|_, _, cx\| cx.notify())` | 把 `mouse_drag` 里打在 **`Terminal` 实体**上的 `cx.notify()` 变成「**本视图重绘**」⇒ 队列才会被 `sync` 消费 |
 | 事件桥 `subscribe` | `lib.rs:147` `cx.subscribe(&terminal, ..)` → `handle_terminal_event`(`lib.rs:222`) | 收 `Event::Wakeup` / `SelectionsChanged` ⇒ `cx.notify()`(`lib.rs:228`) |
 
-⚠️ **只挂 `subscribe`、不挂 `observe`** 是曾经的真实 bug(已修):`subscribe` 收的是 **`Event`**,收不到 **`notify`**,于是「排了队列但没人重绘」⇒ 队列要等光标闪烁 / 输出等别的重绘才被顺带消费。实测(release,125% DPI,1393×884,填屏后真实拖选)选区每秒只更新 **2~4 次**(明显一卡一卡),补上 `observe` 后恢复到 **43~54 次/秒**(≈帧率,跟手)。早期 `TerminalView` 是根视图的**非缓存**子视图,任何一帧都会重新 `render` 从而顺带 `sync`,把这个缺陷掩盖了;换成 dock 的 `.cached(...)` 面板后才暴露出来。
+⚠️ **只挂 `subscribe`、不挂 `observe`** 会让拖选失效:`subscribe` 收的是 **`Event`**,收不到 **`notify`** ⇒「排了队列但没人重绘」,队列要等光标闪烁 / 输出等别的重绘才被顺带消费(表现:选区一卡一卡)。dock 面板的 `.cached(...)` 让视图不再「顺便」重绘,这个缺陷才会显形。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant M as 鼠标输入
-    participant E as TerminalElement<br/>(视图的渲染产物)
-    participant T as Terminal（模型）
-    participant V as TerminalView
-
-    M->>E: MouseMove（按下状态）+ on_mouse_down
-    E->>T: terminal.mouse_drag(e, ..)
-    T->>T: 排 InternalEvent::UpdateSelection（terminal.rs:2015 附近）
-    E->>T: cx.notify()  ← 通知打给 Terminal
-    Note over V,T: 下一帧
-    T-->>V: observe 收到通知 → V 自己 cx.notify()
-    V->>V: TerminalView::render → TerminalElement::prepaint（:1180）
-    V->>T: terminal.sync(window, cx)（terminal_element.rs:1291）← **消费队列**
-    T->>T: process_terminal_event(UpdateSelection) → 真改了选区
-    T-->>V: cx.emit(Event::SelectionsChanged)（terminal.rs:1341）
-    V->>V: subscribe 收到 → handle_terminal_event → cx.notify()（lib.rs:228）→ 把新选画画出来
+```
+鼠标拖拽(TerminalElement::on_mouse_down / on_mouse_drag)
+  → Terminal::mouse_drag:排 InternalEvent::UpdateSelection + cx.notify()(打给 Terminal)
+  → observe 把它变成「视图重绘」→ render → prepaint → terminal.sync(消费队列,真改选区)
+  → cx.emit(Event::SelectionsChanged) → subscribe → handle_terminal_event → cx.notify()(画出来)
 ```
 
 **要点归纳**
 
-1. **输入是「元素 → 模型」**,不是「视图 → 模型」:`TerminalElement`(属于视图侧)直接调 `terminal.mouse_down / mouse_drag`,同时 `cx.notify()` 打在 `Terminal` 上 —— `Terminal` 没有 `impl Render`,它的通知**只对观察者有意义**。
+1. **输入是「元素 → 模型」**:`TerminalElement` 直接调 `terminal.mouse_down / mouse_drag`,同时把 `cx.notify()` 打在 `Terminal` 上 —— `Terminal` 没有 `impl Render`,它的通知只对观察者有意义。
 2. **命令是排队的**:`SetSelection` / `UpdateSelection` / `Copy` / `Scroll` 都进 `Terminal::events`,而**唯一的消费点是 `Terminal::sync`**(`terminal.rs:1826`,`pop_front` 全仓仅此一处),由 `TerminalElement::prepaint`(`:1291`)调用 ⇒ **「鼠标操作生效」⟺「视图重绘一次」**。
-3. **两座桥都是「视图主动订阅模型」**:模型不转发、也不知道视图存在(`observe` 收 `notify`、`subscribe` 收 `Event`)。模型侧改了状态而视图侧没接到信号时,表现就是「操作没反应 / 慢半拍」。
-4. **一次拖拽事件 ≈ 一帧**:`sync` 在 `prepaint` 里发生在 `layout_grid` **之前**,所以本轮就画出新选区;`SelectionsChanged` 又触发一次 `notify`(与下一次鼠标事件的重绘合并),实测拖选期间帧率 ≈ 鼠标事件率(43~54 次/秒)。
-5. **对照:输出 / 打字 / 滚轮为什么不需要第一座桥** —— 输出走 `Event::Wakeup`(跨线程发的事件)、打字靠 PTY 回显、滚轮在 `TerminalElement::on_scroll_wheel` 里以**视图的** `Context` 调 `cx.notify()`;三者都直接落到「视图重绘」,只有拖选依赖 `observe` 这座桥。
+3. **两座桥都是「视图主动订阅模型」**:模型不转发、也不知道视图存在 ⇒ 模型改了状态而视图没接到信号,表现就是「操作没反应 / 慢半拍」。
+4. **一次拖拽事件 ≈ 一帧**:`sync` 在 `layout_grid` **之前**,所以本轮就画出新选区;`SelectionsChanged` 再触发一次 `notify`(与下一次鼠标事件的重绘合并)。
+5. **输出 / 打字 / 滚轮不需要第一座桥**:输出走 `Event::Wakeup`、打字靠 PTY 回显、滚轮在 `TerminalElement::on_scroll_wheel` 里用**视图的** `Context` 调 `cx.notify()`,都直接落到「视图重绘」。
 
 ---
 
@@ -557,51 +542,22 @@ sequenceDiagram
 - `Moved` → 累加 `delta.pixel_delta × multiplier`,`(scroll_px / line_height) as i32` 前后差值即为滚动行数;每次滚动后 `scroll_px %= terminal_bounds.height()`(触到边界即回绕,方向切换响应快)
 - `Ended | Cancelled` → 返回 `None`(不滚动)
 
-> 注:Zed 原版的 `TerminalScrollHandle`(`ui::ScrollableHandle` 实现)已随 UI 层裁剪移除 —— 本项目滚动完全由鼠标滚轮驱动,不提供滚动条 UI。
+> 滚动完全由鼠标滚轮驱动,不提供滚动条 UI(见 §9)。
 
 ---
 
-## 9. 与 Zed 依赖的耦合点(精简时需处理)
+## 9. 与 Zed 依赖的耦合点
 
-| Zed 依赖 | 用途 | 精简替代方案 |
-|---|---|---|
-| `editor::{CursorLayout, HighlightedRange, BlinkManager}` | 光标/高亮/闪烁绘制 | 自实现:`CursorKind` + `CursorLayout`(paint_quad 手绘)、`HighlightedRangeLine`、`cursor_phase` + 500ms 定时器 |
-| `ui::utils::ensure_minimum_contrast` | APCA 对比度 | 移植 `contrast.rs`(纯 gpui `Hsla` 算法) |
-| `theme::Theme` | ANSI 颜色表 | `terminal::TerminalColors`(本地已定义 XTerm 默认) |
-| `theme_settings::ThemeSettings` / `settings` | 字体/行高/对比度设置 | 本地 `TerminalRenderSettings` 结构 + 默认值(JetBrainsMono Nerd Font / 15px / 1.3 / 对比度 45) |
-| `workspace::Workspace` | 路径/URL hover tooltip、上下文菜单 | 删除(独立终端不需要) |
-| `terminal_panel` / `persistence` | 面板管理、会话持久化 | 删除 |
-| `project` / `task` | 任务、远程 | 删除 |
-| `ContentMode::Inline` / `ScrollableHandle` | 内嵌布局 / 滚动条 UI | 删除:仅保留 `Scrollable` 撑满父容器;滚轮直接驱动滚动 |
-| `search`(编辑器搜索 UI) | 搜索高亮 | 保留 `matches` 数据结构与高亮渲染,搜索 UI 删除 |
+- **替换**:`editor::{CursorLayout, HighlightedRange, BlinkManager}` → 自实现(`CursorKind` + `CursorLayout` 手绘、`HighlightedRangeLine`、`cursor_phase` + 500ms 定时器);`ui::utils::ensure_minimum_contrast` → `contrast.rs`;`theme::Theme` → `terminal::TerminalColors`;`theme_settings::ThemeSettings` / `settings` → 本地 `TerminalRenderSettings`(默认 JetBrainsMono Nerd Font / 15px / 1.3 / 对比度 45)。
+- **删除**:`workspace::Workspace`(路径 / URL hover tooltip、上下文菜单)、`terminal_panel` / `persistence`、`project` / `task`、`ContentMode::Inline` 与 `ScrollableHandle`(只保留 `Scrollable` 撑满父容器,滚轮直接驱动滚动)、编辑器搜索 UI(保留 `matches` 与高亮渲染)。
 
 ---
 
-## 10. 渲染流程图(汇总)
+## 10. 一帧的流程(汇总)
 
-```mermaid
-sequenceDiagram
-    participant T as Terminal(实体)
-    participant V as TerminalView
-    participant E as TerminalElement
-    participant W as gpui Window
+`Event::Wakeup` / `SelectionsChanged`(subscribe)或 `cx.notify`(observe)→ `render()` 构建元素 → `request_layout`(`relative(1.)` 撑满)→ `prepaint`:字体 / 行高 / cell 宽测量 → 设备像素对齐 + 底部锚定 → `set_size` + `sync`(处理 `InternalEvent`)→ 视口裁剪 → `layout_grid` → 光标 / IME 矩形 → `paint`:content_mask → 背景 → 背景矩形 → 高亮 → 文本 → 块字符 → IME → 光标,同时在 paint 里注册 `InputHandler` / 鼠标监听 / 光标样式。
 
-    Note over T,W: 每帧
-    T-->>V: ① 事件:Event::Wakeup / SelectionsChanged(subscribe)
-    T-->>V: ② 通知:cx.notify()(observe)—— 鼠标拖选走这条
-    V->>E: render() 构建元素(focus 兜底 + set_window_title)
-    W->>E: request_layout(relative(1.) 撑满)
-    W->>E: prepaint(bounds)
-    E->>E: 字体/行高/cell宽测量 + 设备像素对齐 + 底部锚定
-    E->>T: set_size + sync(处理 InternalEvent,刷新 Content 快照)
-    E->>E: 视口裁剪(content_mask 求交)→ layout_grid
-    E->>E: 布局光标/IME 矩形 → LayoutState
-    W->>E: paint(bounds, LayoutState)
-    E->>W: content_mask → 背景 → 背景矩形 → 高亮 → 文本 → 块字符 → IME → 光标
-    Note over E,W: paint 中注册 InputHandler、鼠标监听、光标样式
-```
-
-> 鼠标拖选(框选)的逐帧细节、两座桥(observe / subscribe)的分工与踩过的坑,见 §7.4。
+> 拖选的两座桥(observe / subscribe)见 §7.4。
 
 ## 附录:渲染关键常量
 

@@ -1,10 +1,9 @@
 # GPUI 架构分析（源码级）
 
-> 面向本仓库（alacrterm）读者的 GPUI 实现剖析：**为什么界面"没变也要重算"、缓存到底覆盖哪一层、一帧里都发生了什么**。
+> GPUI 实现剖析：缓存覆盖哪一层、一帧里发生什么、哪些地方容易写错。
 >
-> - 版本：`gpui-pre` 0.3.5（lib 名就是 `gpui`，crates.io），Windows 后端 `gpui-pre-windows` 0.3.5；组件库 `gpui-kit`（git main `27ab8e76`）→ `gpui-component`。
-> - 源码位置：`D:\Compilers\Rust\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\gpui-pre-0.3.5\src`、`...\gpui-pre-windows-0.3.5\src`、`D:\Compilers\Rust\.cargo\git\checkouts\gpui-kit-ad7eb35d851fbd28\27ab8e76\crates`。
-> - 文中行号均为**上面这份源码**的行号；标 `≈` 的是区间近似值。
+> - 版本：`gpui-pre` 0.3.5（lib 名就是 `gpui`），Windows 后端 `gpui-pre-windows` 0.3.5；组件库 `gpui-kit`（git main `27ab8e76`）→ `gpui-component`。
+> - 源码：`~/.cargo/registry/src/*/gpui-pre-0.3.5/src`、`gpui-pre-windows-0.3.5/src`、`~/.cargo/git/checkouts/gpui-kit-*/27ab8e76/crates`；文中行号以这份源码为准，标 `≈` 为区间近似。
 > - 与本仓库的落地对应见 [`terminal-architecture.md`](./terminal-architecture.md)、渲染细节见 [`terminal-view-rendering.md`](./terminal-view-rendering.md)。
 
 ## 1. 一句话总结
@@ -114,7 +113,7 @@ classDiagram
 - `Window` 是"一帧"的舞台：它持有根视图、脏集合、缓存开关（`refreshing`）、以及平台窗口句柄。
 - `Element` 是所有可视原语的 trait（`Div`、`Text`、`Svg`、以及自己实现的 `TerminalElement`）。
 
-## 4. 帧循环（Windows 实测路径）
+## 4. 帧循环（Windows）
 
 ```mermaid
 sequenceDiagram
@@ -233,26 +232,19 @@ flowchart TD
 - **帧同步**：`vsync.rs` 的 `VSyncProvider`（阈值 1ms，默认 16.6ms 兜底）+ `platform.rs::begin_vsync_thread` 每 vsync 失效所有窗口；`present()` 提交。
 - **profiler**（feature `profiler`）：`window.frame_duration_snapshot()` / `input_latency_snapshot()` / `debug_frame_overlay`（可在窗口里叠 FPS/帧耗时）。
 
-## 10. 性能模型（结合本仓库实测）
+## 10. 性能模型
 
-### 一次完整重绘的成本（125% DPI，窗口 1393×884，终端填满 200 行）
-
-| 构建 | 每帧 CPU | UI 元素阶段（layout + prepaint + paint） | 其中终端元素 |
-|---|---|---|---|
-| debug（`opt-level=0`） | ~12ms | ~7.5ms | prepaint 0.5ms + paint 0.8ms |
-| release | ~4ms | ~0.85ms | ~0.26ms |
-
-结论：**贵的是"每帧把整棵树重建一遍"**（taffy 全量布局 + prepaint 构造 hitbox/样式/文本 + paint 录制 scene），终端自己的绘制只占小头。
+**贵的是"每帧把整棵树重建一遍"**（taffy 全量布局 + prepaint 构造 hitbox/样式/文本 + paint 录制 scene），终端自己的绘制只占小头。
 
 ### 优化清单（按收益排序）
 
-1. **把每帧不变的子树做成 entity + `.cached(...)`**（侧边栏、状态栏、标题栏、大块面板）。命中缓存时连 `render()` 都不调用，prepaint/paint 直接复用 —— 这是 gpui 里唯一能让"没变就别干"成立的手段。
+1. **把每帧不变的子树做成 entity + `.cached(...)`**（侧边栏、状态栏、标题栏、大块面板）：命中缓存时连 `render()` 都不调用，prepaint/paint 直接复用。
 2. **减少标脏源**：不是每个消息都需要 `notify()`（例如"标题没变就别 notify 根视图"）；注意 `Window::refresh()` 会绕过所有缓存，别滥用。
 3. **别在 `render()` 里做重活**（文件 IO、正则、大量分配）；`render()` 每帧都会被调用。
 4. **避免每帧的 syscall**：如 `window.set_window_title()`（`SetWindowTextW`）应只在标题变化时调用。
 5. **动画用 gpui 的 spring/`request_animation_frame` 机制**，它会在动画期间维持帧；别自己写忙轮询。
 
-### 常见误解（本仓库都实际踩过）
+### 常见误解
 
 | 误解 | 事实 |
 |---|---|
@@ -290,9 +282,3 @@ flowchart TD
 | 帧门控 / 节流 | `gpui-pre/src/window.rs` `on_request_frame`（≈1700–1830） |
 | Windows 后端 | `gpui-pre-windows/src/platform.rs:366`（vsync 线程）、`events.rs:1329`（`draw_window`）、`:959`（`handle_hit_test_msg`）、`direct_write.rs`、`directx_renderer.rs` |
 | gpui-kit 组件层 | `gpui-kit/crates/component/src/{theme,title_bar,sidebar,dock}/*.rs` |
-
-## 附：为什么"每帧重建"在 gpui 里是设计选择
-
-- **立即式渲染让"视图 = 状态的纯函数"**：不必手工维护增量更新逻辑（哪块要重画、树怎么打补丁），犯错面小；代价是所有优化都显式交给 `.cached(..)`。
-- **缓存的失效契约靠 `notify`，而不是 diff**：框架不做结构 diff，完全信任"你 notify 了就是变了"。这解释了两件事：为什么"没 notify 但改了数据"会看到陈旧画面；为什么"notify 了但数据没变"会白干一帧（拖选 bug 的前半段就是这样：模型 notify 了，视图没跟进）。
-- **平台层按窗口整帧提交**，所以"局部更新"只能在**元素/视图**这层做（cached 复用），不能指望后端省掉那部分像素。
