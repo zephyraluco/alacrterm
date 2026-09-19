@@ -170,7 +170,7 @@ fn main() {
 
 `AppRoot::render` 只负责装配:`h_resizable("right-split")[h_resizable("main-split")[左栏, 中间列], 右栏]`;容器渲染方法统一返回 `AnyElement`(edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,同一渲染树里连续 `&mut cx` 会借用冲突)。
 
-- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成,不给状态栏算面板宽度。左栏状态栏 = 视图图标(终端会话 / 关于,只切视图);右栏状态栏 = 标识(图标 + 「会话信息」);两栏都不放折叠开关(已移到标题栏)。宽度记忆在 `AppRoot` 的 `ResizableState` 上。
+- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成,不给状态栏算面板宽度。**两条侧边栏顶部都有视图切换栏**(`Sidebar::header` 里的 `TabBar::segmented()`):左栏两段(会话 / 关于,只切视图)、右栏一段(会话信息);⚠️ **单段也照画**(`view_tabs` 不因只有一项而隐藏),固定不滚动、随侧边栏折叠一起隐藏。选中态是组件自带的**滑动胶囊**(`tokens.background` + `raised_shadow()`,spring 动画),槽色 = `tokens.tab_bar_segmented`(⇒ 浅色主题下即 libadwaita 那种「浅槽 + 白胶囊」;深色主题下是否「胶囊更亮」由主题 token 决定)。⚠️ `Tab` 设了 `icon` 就**不再画 label**(gpui-kit 行为)⇒ 想要图标+文字得自己拼。两条侧边状态栏**当前都是空条**,保留只为与中间那条等高;两栏都不放折叠开关(已移到标题栏)。宽度记忆在 `AppRoot` 的 `ResizableState` 上。
 - **中间列**:`v_flex[终端区 dock, 公共状态栏]`;公共状态栏在 dock 外面且常驻。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」/「打开设置」两行操作)。
 - **分两层嵌套**:`main-split` = 左栏 | 中间列,`right-split` = 内层 | 右栏(面板宽度按下标存在 `ResizableState`,三面板同组会互相挤)。
 - **终端区 = dock,只用 center**(左右侧边栏不进 dock):每个会话一块 `SessionPane`,`add_panel_view(.., DockPlacement::Center, ..)` 挂入;`AppRoot::build_dock` 里 `set_locked(false)`。面板覆写 `title_bar(false)` / `inner_padding(false)` / `zoomable(false)` / `zoom_control() -> None`,`closable` 为真。⚠️ 注册必须走 `panel_handle`(裸 `Entity<P>` 时 skin 取不到表现层 trait,标签会退化成只写 `panel_name` 的标题栏)。
@@ -183,7 +183,7 @@ fn main() {
 - **关会话三条路**:标签 `×` / 中键 / 侧边栏右键菜单(按下标)。前两条走 [`AppRoot::close_panel_id`](`AppRoot::close_panel_id`)(按面板 id 找下标);不走 dock 的 `TabGroup::close_panel`(它拒绝关最后一块面板,而本应用要支持全关到欢迎页)。
 - **会话表是 dock 的镜像**:`AppRoot::terminals` 顺序 = `dock.layout(Center).panels()`,成员 = dock 里还在的面板,由 `sync_sessions_with_dock` 在 `DockEvent::LayoutChanged` 与新建 / 关闭后同步。
 - **公共状态栏**(`status_bar::render_status_bar`):只放当前会话指标(无会话时「无会话」,`.right(metrics)`)。⚠️ 侧边栏可见性**只由标题栏右端那两枚开关**改变;因为标题栏常驻,状态栏里不再需要任何「展开」入口。
-- **三条状态栏等高**:`status_bar::STATUS_BAR_HEIGHT` = 28px;状态栏里的图标按钮(只剩左栏的视图图标)要显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把状态栏撑高)。
+- **三条状态栏等高**:`status_bar::STATUS_BAR_HEIGHT` = 28px;状态栏里带图标的按钮要显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把状态栏撑高——目前两侧那条已无任何内容)。
 - **分栏竖线只由拖拽条画**:侧边栏状态栏都不画 `border_*_1`,主题的 `sidebar_border` 置透明(`change_theme` 里设)。⚠️ 换主题必须走 `crate::change_theme(mode, cx)`;⚠️ `sidebar_border` 兼作侧边栏菜单「嵌套项缩进导线」的颜色,会一起消失。
 
 ### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)
