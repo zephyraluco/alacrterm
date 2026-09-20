@@ -5,7 +5,8 @@
 //!
 //! 顶部是一条**路径输入框**,与「显示中的根目录」双向对齐:改内容就尝试跳过去(只认确实是
 //! 目录的路径,[`FilesState::navigate_to`]);终端 `cd` 改了目录则写回输入框
-//! ([`FilesState::sync_path_input`])。
+//! ([`FilesState::sync_path_input`])。没有目录可显示时(终端全关掉 / 远端会话)连这条也不摆,
+//! 只剩空占位(见 [`super::empty_state`])。
 //!
 //! **目录按需加载**:展开未读过的目录时后台读一层再回填,排序 = 目录在前、名字不区分大小写。
 //! 视图**只读**(行点击只展开 / 收起)。
@@ -426,6 +427,17 @@ impl FilesState {
 impl Render for FilesState {
     /// `_cx`:本实现只画自己的状态,主题色都在行渲染闭包自己那份 `cx` 上取。
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // 没有目录可显示(终端全关掉 / 远端会话 / 本地目录还没采到 ⇒ `root` 为 `None`):
+        // 只摆空占位,**连顶部那条路径输入框也不摆** —— 一条空框既没内容可编辑、也没东西可跳。
+        if self.root.is_none() {
+            return empty_state(
+                IconName::FolderClosed,
+                "没有可浏览的目录",
+                Some("打开一个本地终端后,这里会显示它的工作目录;远端会话拿不到目录"),
+            )
+            .into_any_element();
+        }
+
         let rows = self.visible_rows();
         // 顶部一行:路径输入框整行铺满(高 32px > 标签条的 24px ⇒ 用 [`PATH_ROW_HEIGHT`])。
         let header = h_flex()
@@ -441,20 +453,15 @@ impl Render for FilesState {
                 ),
             );
 
-        let body: AnyElement = match (self.root.is_some(), rows) {
-            // 没有会话 / 远端会话:拿不到本地目录(远端 cwd 探测不到,见模块文档)。
-            (false, _) => empty_state(
-                IconName::FolderClosed,
-                "没有可浏览的目录",
-                Some("打开一个本地终端后,这里会显示它的工作目录;远端会话拿不到目录"),
-            )
-            .into_any_element(),
-            (true, 0) => empty_state(IconName::FolderOpen, "这个目录是空的", None).into_any_element(),
-            (true, _) => tree(&self.tree, |ix, entry, selected, _window, cx| {
+        // 目录里一条都没有:换成空占位(输入框留着 —— 还能靠它跳去别的目录)。
+        let body: AnyElement = if rows == 0 {
+            empty_state(IconName::FolderOpen, "这个目录是空的", None).into_any_element()
+        } else {
+            tree(&self.tree, |ix, entry, selected, _window, cx| {
                 file_tree_row(ix, entry, selected, cx)
             })
             .h(TREE_ROW_HEIGHT * rows as f32)
-            .into_any_element(),
+            .into_any_element()
         };
 
         v_flex().w_full().child(header).child(body).into_any_element()
