@@ -13,6 +13,8 @@
 //! - **折叠开关**([`toggle_button`]):渲染在**标题栏右端**(由根视图摆放),折叠后仍点得到。
 //! - **两枚状态栏按钮**(显示「会话」视图的那条才有):左下 = 新建文件夹([`NewFolder`])、
 //!   右下 = 新建会话([`NewSession`]),都只加列表条目、不开终端(见 [`crate::dialog`])。
+//! - **空内容占位**([`empty_state`]):内容位没视图可摆(标签全被拖走)、或视图自己没内容
+//!   (会话列表 0 条、目录读不出 / 是空的)时,统一摆 gpui-kit 的 `Empty`。
 //!
 //! 两侧边栏用**两组嵌套的分栏面板**装配(内层 `main-split`、外层 `right-split`):面板宽度
 //! 按下标存在 `ResizableState` 里,三块面板挤在同一组会互相影响下标。[`Sidebar::pin_width`]
@@ -26,10 +28,11 @@ use gpui::{
     div, px,
 };
 use gpui_kit::component::{
-    Collapsible, Side, Sizable as _,
+    Collapsible, Icon, Side, Sizable as _,
     button::{Button, ButtonVariants as _},
+    empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
     resizable::ResizableState,
-    sidebar::{Sidebar as SidebarWidget, SidebarItem, SidebarMenu, SidebarMenuItem},
+    sidebar::{Sidebar as SidebarWidget, SidebarItem},
     status_bar::StatusBar,
     v_flex,
 };
@@ -88,6 +91,34 @@ impl SidebarSide {
             Self::Right => 1,
         }
     }
+}
+
+/// 侧边栏内容为空时的占位（gpui-kit [`Empty`]：虚线框 + 图标 + 标题 + 说明）。
+///
+/// 三处空内容共用它：「会话」列表一条都没有（[`sessions`]）、文件树没有可浏览的目录 /
+/// 目录是空的（[`files`]）、顶部标签全被拖走（[`Sidebar::render`]）。
+///
+/// ⚠️ 覆盖两处组件默认值：`.flex_none()`（`Empty` 自带 `flex_1`，而这里的内容位是
+/// **按内容定高**的 ⇒ 不钉住会被压成 0 高）、`.p_3()`（默认 `p_6`，侧边栏最窄只有 150px）。
+pub(super) fn empty_state(
+    icon: IconName,
+    title: &'static str,
+    description: Option<&'static str>,
+) -> Empty {
+    let header = EmptyHeader::new()
+        .media(
+            EmptyMedia::new()
+                .with_variant(EmptyMediaVariant::Icon)
+                .child(Icon::new(icon)),
+        )
+        .title(EmptyTitle::new().child(title));
+    // 说明是可选的：一句话就够的地方（比如空目录）不用凑第二行。
+    let header = match description {
+        Some(text) => header.description(EmptyDescription::new().child(text)),
+        None => header,
+    };
+
+    Empty::new().flex_none().p_3().header(header)
 }
 
 /// 可以停放在任一侧边栏的视图（[`SidebarTabs`] 里的元素）。
@@ -377,10 +408,8 @@ impl Render for Sidebar {
         let content = match active {
             Some(SidebarView::Sessions) => SidebarContent::Sessions(self.sessions.clone()),
             Some(SidebarView::Files) => SidebarContent::Files(self.files.clone()),
-            // 标签全被拖走的空标签条：给一句提示，否则整列看上去是坏的。
-            None => SidebarContent::Menu(
-                SidebarMenu::new().child(SidebarMenuItem::new("把标签拖到这里").disable(true)),
-            ),
+            // 标签全被拖走的空标签条：给一个空占位，否则整列看上去是坏的。
+            None => SidebarContent::Empty,
         };
 
         // 宽度由外层分栏面板决定：必须 w_full，否则会回落到组件内置默认宽度。
@@ -490,8 +519,8 @@ enum SidebarContent {
     Sessions(Entity<SessionsState>),
     /// 「文件管理器」视图的实体（它自己实现 `Render`，见 [`FilesState`]）。
     Files(Entity<FilesState>),
-    /// 内置菜单（空标签条提示）。
-    Menu(SidebarMenu),
+    /// 空占位（顶部标签全被拖走，内容位没有视图可摆）。
+    Empty,
 }
 
 impl Collapsible for SidebarContent {
@@ -505,18 +534,27 @@ impl Collapsible for SidebarContent {
 }
 
 impl SidebarItem for SidebarContent {
+    /// 三个分支都不需要 `id` / `window` / `cx`(渲染与交互都在实体自己身上),故加下划线。
     fn render(
         self,
-        id: impl Into<ElementId>,
-        window: &mut Window,
-        cx: &mut App,
+        _id: impl Into<ElementId>,
+        _window: &mut Window,
+        _cx: &mut App,
     ) -> impl IntoElement {
         match self {
             // 实体自己渲染自己：这里只把它摆进侧边栏的内容位（`div` 负责给出宽度与
             // 由内容决定的高度，`SidebarItem::render` 的返回类型也才统一）。
             Self::Sessions(sessions) => div().w_full().child(sessions).into_any_element(),
             Self::Files(files) => div().w_full().child(files).into_any_element(),
-            Self::Menu(menu) => menu.render(id, window, cx).into_any_element(),
+            // 空占位：标签条本身（固定高度）才是拖放落点，这里只负责让面板不显得是坏的。
+            Self::Empty => div()
+                .w_full()
+                .child(empty_state(
+                    IconName::LayoutDashboard,
+                    "这里还没有视图标签",
+                    Some("把视图标签拖到上方标签条即可"),
+                ))
+                .into_any_element(),
         }
     }
 }

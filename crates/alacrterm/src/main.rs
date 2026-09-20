@@ -165,7 +165,7 @@ impl AppRoot {
         let dock = Self::build_dock(window, cx);
         // 三个子组件实体：会话列表 + 文件管理器（两条侧边栏共用）+ 左右两条侧边栏。
         let sessions = cx.new(SessionsState::new);
-        let files = cx.new(FilesState::new);
+        let files = cx.new(|cx| FilesState::new(window, cx));
         let left_sidebar = cx.new(|cx| {
             Sidebar::new(SidebarSide::Left, sessions.clone(), files.clone(), cx)
         });
@@ -293,12 +293,14 @@ impl Render for AppRoot {
         // 会话表变了就同步进会话树（`TreeState` 是快照，必须在渲染前对齐，见该方法文档）。
         self.sessions.update(cx, |sessions, cx| sessions.sync_tree(cx));
 
-        // 文件管理器的根目录 = 当前会话的工作目录（目录真变了才重建树）。
+        // 文件管理器的根目录 = 当前会话的工作目录（目录真变了才重建树；
+        // 变了也会把新路径写回顶部那条路径输入框）。
         let cwd = self
             .terminals
             .get(self.active)
             .and_then(|session| session.view.read(cx).working_directory(cx));
-        self.files.update(cx, |files, cx| files.sync(cwd, cx));
+        self.files
+            .update(cx, |files, cx| files.sync(cwd, window, cx));
 
         // 侧边栏宽度只由用户拖拽决定：容器尺寸变化引起的比例重排先钉回去（见子实体）。
         self.left_sidebar

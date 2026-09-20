@@ -10,6 +10,7 @@
 //!   [`crate::AppRoot::open_session_record`]。
 //! - **拖放**:记录行与文件夹行都能拖(载荷 [`DragSessionEntry`]),落点合法性由
 //!   [`SessionsState::move_entry`] 把关。
+//! - **一条都没有**:内容位改摆空占位(见 [`empty_state`])——树零行时什么也不画。
 //!
 //! ⚠️ gpui-kit `tree` 的三条约定:
 //! - 行类型由行 id 前缀判断([`row_id`] / [`session_row`]),**不能**用
@@ -34,7 +35,7 @@ use gpui_kit::component::{
     v_flex,
 };
 
-use super::TAB_HEIGHT;
+use super::{TAB_HEIGHT, empty_state};
 use crate::actions::{MoveEntry, NewFolder, NewSession, OpenSession, RemoveEntry};
 use crate::assets::IconName;
 use crate::terminal_panel::SessionRequest;
@@ -481,19 +482,17 @@ impl crate::AppRoot {
 /// `.h(行数 × TREE_ROW_HEIGHT)` 手动给高度（`Tree` 的 `refine_style` 在链尾，能盖住
 /// `size_full`）；行数由 [`SessionsState::visible_rows`] 按展开状态算。
 impl Render for SessionsState {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `_cx`:本实现只画自己的状态(占位 + 树),主题色都在内部闭包自己那份 `cx` 上取。
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.visible_rows();
-        // 一条条目都没有时给一句提示：树本身零行、什么也不画，而列表是空的看不出「能点什么」。
+        // 一条条目都没有:树零行什么也不画,换成空占位(见 [`empty_state`])。
         if rows == 0 {
-            return div()
-                .px_3()
-                .py_2()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(
-                    "还没有会话：左下角 + 建文件夹，右下角 + 新建会话；双击会话条目打开终端",
-                )
-                .into_any_element();
+            return empty_state(
+                IconName::Inbox,
+                "还没有会话",
+                Some("左下角 + 新建文件夹、右下角 + 新建会话；双击会话条目打开终端"),
+            )
+            .into_any_element();
         }
 
         // 树 + 下方一条**拖到顶层**的空白落点：条目拖出文件夹后要有地方可放

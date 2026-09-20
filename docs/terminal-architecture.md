@@ -181,7 +181,7 @@ fn main() {
 
 **状态与渲染都归子组件**:一条侧边栏 = 一个实体(`Entity<Sidebar>`,左右各一个,见 `sidebar_panel/mod.rs`),它自带标签 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 视图标签条 + 当前视图内容 + 底部状态栏);根视图只把它 `.child(..)` 摆进分栏面板、把 `sidebar_panel::toggle_button` 摆进标题栏。各视图内容也是实体:「会话」`Entity<SessionsState>`、文件管理器 `Entity<FilesState>`(见 `sidebar_panel/`),记录树 / 目录项 + 展开状态 + `TreeState` + 增删改 + 它自己的渲染都在里面,两条侧边栏共用同一份。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 指标采样器 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 两条侧边栏互持 `sibling` 弱引用,标签跨栏拖动靠它。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
 
-- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成。**顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**。标签样式照 **VS Code 面板标签**(纯文字、无边框、按内容宽度左对齐,悬停 / 选中才有圆角浅灰底):手绘 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` / `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时点亮成插入提示,免得高亮把标签尺寸顶变。**标签可在两条侧边栏之间拖动**:同栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置);拖到另一栏 = 把视图搬过去并选中;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧顺序与选中项各存在自己的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;标签条为空时显示「把标签拖到这里」。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,各一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。
+- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成。**顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**。标签样式照 **VS Code 面板标签**(纯文字、无边框、按内容宽度左对齐,悬停 / 选中才有圆角浅灰底):手绘 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` / `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时点亮成插入提示,免得高亮把标签尺寸顶变。**标签可在两条侧边栏之间拖动**:同栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置);拖到另一栏 = 把视图搬过去并选中;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧顺序与选中项各存在自己的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;标签条为空时内容位改摆一个空占位(gpui-kit `Empty` 组件,见 `sidebar_panel::empty_state`)。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,各一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。
 
 #### 会话列表(文件夹树:记录 + 拖放)
 
@@ -199,7 +199,7 @@ fn main() {
 - ⚠️ `Tree` 内部是**等高虚拟列表** + 链尾 `refine_style(size_full)` ⇒ 它塞进 `Sidebar` 自己的虚拟列表(自动高度)时拿不到确定高度、会塌成 0;因此渲染时必须 `.h(行数 × TREE_ROW_HEIGHT)`(`TREE_ROW_HEIGHT = 28px`),行数 = `SessionsState::visible_rows()`(只算展开的文件夹的子项)。渲染外层是 `v_flex[tree, 顶层落点条]`。
 - ⚠️ `SessionsState::sync_tree` 在每次 `AppRoot::render` 开头(经 `sessions.update(..)`)按签名(`(名字, 是否文件夹, 层级)` 全量、含被收起的子树)同步,**签名没变就直接返回**:`TreeState::set_items` 会 notify,每帧无条件调用会自激成死循环。⚠️ 签名用 `Option<Vec<..>>`,`None` = 还没同步过——用空 `Vec` 表达「没同步过」会让首次同步被当成「签名没变」跳掉,树永远拿不到 items。
 - **选中**:树自己的 `selected_ix`(行点击设置),不跟当前终端挂钩(「当前会话」由标签栏体现)。⚠️ `ListItem` 默认的 `list_active` 选中底色太淡(主题把它压到 6% 不透明度),分不出悬停 ⇒ [`config::change_theme`] 里关掉 `list.active_highlight`,改用 `accent`(与侧边栏顶部选中的视图标签同色),配 `font_medium` + `sidebar_accent_foreground` 文字色。
-- **右键菜单**挂在组件级 `Tree::context_menu` 上(记录行 / 文件夹行各一套);**列表为空**时树是 0 行、什么也画不出来,`SessionsState::render` 会改成一句提示文字。
+- **右键菜单**挂在组件级 `Tree::context_menu` 上(记录行 / 文件夹行各一套);**列表为空**时树是 0 行、什么也画不出来,`SessionsState::render` 会改成一个空占位(gpui-kit `Empty` 组件,`sidebar_panel::empty_state`)。
 - `Sidebar::child` 只吃单一类型 ⇒ 各视图与内置菜单用 `SidebarContent` 枚举统一(`Collapsible + SidebarItem` 转发;视图实体自己实现 `Render`,枚举里只把它 `div().w_full().child(..)` 摆进内容位)。两层都不套 `SidebarGroup`(它会固定渲染一行 `h_8()` 段标题,标题已在顶部标签上)。`Sidebar` 的 id 带侧与当前视图名。
 - **两条侧边状态栏**:显示「会话」视图的那条两端各一枚按钮(左下 = 新建文件夹,右下 = 新建会话),其余情况是空条(只为与中间那条等高);两栏都不放折叠开关(已移到标题栏)。宽度与那一组 `ResizableState` 都在各自的 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 钉回期望宽度)。
 - **中间列**:`v_flex[终端区 dock, 公共状态栏]`;公共状态栏在 dock 外面且常驻。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」(直接开一个本地终端)/「打开设置」两行操作)。
@@ -221,13 +221,13 @@ fn main() {
 
 > 状态与渲染都在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(根目录 + 目录项缓存 + 展开状态 + `TreeState` + 它自己的 `Render`);作为 `SidebarContent::Files(Entity<FilesState>)` 摆进侧边栏内容位。默认停在**右侧边栏**(左栏是「会话」),两条侧边栏共用同一个实体。
 
-- **根目录 = 当前会话的工作目录**:`AppRoot::render` 每帧把当前会话的 `TerminalView::working_directory(cx)`(→ `Terminal::working_directory`)交给 `FilesState::sync`;目录真变了才清空整棵树重新读。拿不到(无会话 / SSH)⇒ `None`,面板显示一句提示。
+- **根目录 = 当前会话的工作目录**:`AppRoot::render` 每帧把当前会话的 `TerminalView::working_directory(cx)`(→ `Terminal::working_directory`)交给 `FilesState::sync`;目录真变了才清空整棵树重新读。拿不到(无会话 / SSH)⇒ `None`,面板改成一个空占位(gpui-kit `Empty` 组件;目录是空的时候也用它,见 `sidebar_panel::empty_state`)。
 - **目录来源有两层**:① shell 自己上报的位置(**仅 Windows**:`$PWD`,经 `platform` 的 shell 集成,见 §4.5——只有这样才能让 PowerShell 跟得上 `cd`);② PTY 前台进程的真实工作目录(`pty_info` 采样,给 cmd / bash / wsl 兜底)。`Terminal::working_directory()` 优先 ①、再回落 ②。
 - **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 读**一层**目录项(慢盘 / 超大目录不卡界面),回填前核对**代次**(`generation`,换根目录时 +1 ⇒ 在途结果直接丢掉)。排序 = 目录在前、名字不区分大小写。
 - ⚠️ **未加载的目录必须挂一个占位子项**(label「加载中…」):gpui-kit 的 `TreeItem::is_folder()` 就是「有没有子项」,没有子项的行既没有 caret、点击也不会展开(`TreeState::toggle_expand` 对非 folder 直接 return)⇒ 子目录永远打不开。`visible_rows` 的行数算法必须与 `build_items` + `TreeState::add_entry` 的展平规则**逐条一致**(含这条占位)。
 - 行类型同样**编码在行 id 前缀**里(`dir-0-2` / `file-1` / `loading-0-2`),判类型不用 `TreeEntry::is_folder()`(空目录 / 未加载目录都会被判反——前者没有子项、后者挂着占位子项)。目录行 = caret(有子项时)+ 文件夹图标 + 名字,文件行 = 文件图标 + 名字(视图**只读**,行点击只展开 / 收起,不打开文件),占位行是灰字。
 - 展开状态存 `FilesState::expanded`(下标链),由 `cx.subscribe(&tree, ..)` 收 `TreeEvent::{Expanded,Collapsed}` 回写(与 `SessionsState` 同一套理由:`set_items` 会重建 `TreeItem`)。
-- 顶部一行显示当前根目录,右端两枚按钮:**上一级**(`go_up`,手动往上浏览整块磁盘)与**重新加载**(`reload`,目录内容会变而树不监听文件系统)。因此 `FilesState` 把「终端 cwd」(`cwd`)与「显示中的根目录」(`root`)分开存:只有 **cwd 变化**才把 `root` 拉回终端所在目录,手动向上不会被每帧的 `sync` 顶回去。
+- 顶部一行是一条**路径输入框**（整行铺满），与「显示中的根目录」双向对齐：改内容就尝试跳过去（`navigate_to`，**只认确实是目录的路径**——不存在 / 不是目录 / 为空时什么都不动，否则打字中途那些不成立的中间态会把树清空）；终端 `cd` 改了根目录时把新路径写回输入框（`sync_path_input`，用 `InputState::set_value`，它内部关掉事件发射 ⇒ 不会回环触发 `navigate_to`）。⚠️ 输入框用组件**默认尺寸**（`Size::Medium`，高 32px）且关掉清除按钮（`cleanable(false)`：路径跟着终端走，一键清空只会把面板弄空）⇒ 那一行是**自己的** `PATH_ROW_HEIGHT = 36px`，**不能**复用它上面标签条的 `TAB_HEIGHT`（24px，输入框会溢出到树上）。因此 `FilesState` 把「终端 cwd」(`cwd`)与「显示中的根目录」(`root`)分开存:只有 **cwd 变化**才把 `root` 拉回终端所在目录,手动跳转不会被每帧的 `sync` 顶回去。
 - 高度与 `SessionsState` 同样处理:`.h(行数 × TREE_ROW_HEIGHT)`(行数手算,`Tree` 是虚拟列表 + `size_full()`);`sync_tree` 也靠 `(根目录, (名字, 是否目录, 层级) 全量)` 签名挡住每帧 `set_items`(`TreeState::set_items` 会 notify,否则自激)。
 
 ### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)
