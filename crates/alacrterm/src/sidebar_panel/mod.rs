@@ -5,6 +5,8 @@
 //!
 //! 视图内容是两个共享实体:[`sessions::SessionsState`](「会话」)与
 //! [`files::FilesState`](「文件管理器」)——标签落在哪一侧,就由哪一侧把它摆出来。
+//! 后者**只对远端会话可见**(本地目录用系统自己的文件管理器即可),可用性由根视图每帧
+//! 按当前会话同步进来([`Sidebar::set_files_enabled`])。
 //!
 //! 其余分工:
 //! - **视图标签条**([`tabs`]):挂在 `Sidebar::header` 上(固定顶部、不随内容滚动);
@@ -13,8 +15,9 @@
 //! - **折叠开关**([`toggle_button`]):渲染在**标题栏右端**(由根视图摆放),折叠后仍点得到。
 //! - **两枚状态栏按钮**(显示「会话」视图的那条才有):左下 = 新建文件夹([`NewFolder`])、
 //!   右下 = 新建会话([`NewSession`]),都只加列表条目、不开终端(见 [`crate::dialog`])。
-//! - **空内容占位**([`empty_state`]):内容位没视图可摆(标签全被拖走)、或视图自己没内容
-//!   (会话列表 0 条、目录读不出 / 是空的)时,统一摆 gpui-kit 的 `Empty`。
+//! - **空内容占位**([`empty_state`]):视图自己没内容(会话列表 0 条、目录读不出 / 是空的)时
+//!   统一摆 gpui-kit 的 `Empty`。⚠️ 内容位**一个可见标签都没有**时(标签全被拖走,或只剩
+//!   本地会话下不摆的「文件管理器」)什么都不摆 —— 只留侧边栏背景。
 //!
 //! 两侧边栏用**两组嵌套的分栏面板**装配(内层 `main-split`、外层 `right-split`):面板宽度
 //! 按下标存在 `ResizableState` 里,三块面板挤在同一组会互相影响下标。[`Sidebar::pin_width`]
@@ -95,8 +98,8 @@ impl SidebarSide {
 
 /// 侧边栏内容为空时的占位（gpui-kit [`Empty`]：虚线框 + 图标 + 标题 + 说明）。
 ///
-/// 三处空内容共用它：「会话」列表一条都没有（[`sessions`]）、文件树没有可浏览的目录 /
-/// 目录是空的（[`files`]）、顶部标签全被拖走（[`Sidebar::render`]）。
+/// 两处空内容共用它：「会话」列表一条都没有（[`sessions`]）、文件树没有可浏览的目录 /
+/// 目录是空的（[`files`]）。
 ///
 /// ⚠️ 覆盖两处组件默认值：`.flex_none()`（`Empty` 自带 `flex_1`，而这里的内容位是
 /// **按内容定高**的 ⇒ 不钉住会被压成 0 高）、`.p_3()`（默认 `p_6`，侧边栏最窄只有 150px）。
@@ -126,11 +129,23 @@ pub(super) fn empty_state(
 pub(crate) enum SidebarView {
     /// 终端会话列表（记录树）。
     Sessions,
-    /// 当前终端工作目录下的文件树。
+    /// 远端会话的文件树（本地会话下不摆，见 [`SidebarView::visible_with`]）。
     Files,
 }
 
 impl SidebarView {
+    /// 这个视图在当前会话下是否该摆出来。
+    ///
+    /// 「文件管理器」只服务**远端（SSH）会话**：本地目录用系统自己的文件管理器打开就好，
+    /// 应用里再摆一份既多余、又只能看到本机目录；所以本地会话（以及没有会话）时这个视图
+    /// 连同它的标签一起不摆。可用性由根视图每帧同步（`files_enabled`）。
+    fn visible_with(self, files_enabled: bool) -> bool {
+        match self {
+            Self::Sessions => true,
+            Self::Files => files_enabled,
+        }
+    }
+
     /// 标签文字。
     fn label(self) -> &'static str {
         match self {
@@ -216,6 +231,9 @@ pub(crate) struct Sidebar {
     /// 我是哪一条（决定 `Side::Right`、分栏面板下标、元素 id）。
     side: SidebarSide,
     tabs: SidebarTabs,
+    /// 「文件管理器」是否摆出来（只对远端会话可见，根视图每帧同步，见
+    /// [`Sidebar::set_files_enabled`]）。不影响标签数据本身：会话换回远端时它自己回来。
+    files_enabled: bool,
     visible: bool,
     /// 本栏的「期望宽度」（逻辑像素）：用户拖拽分隔条后的宽度记在这里。
     ///
@@ -249,6 +267,8 @@ impl Sidebar {
                 SidebarSide::Left => SidebarTabs::new(vec![SidebarView::Sessions]),
                 SidebarSide::Right => SidebarTabs::new(vec![SidebarView::Files]),
             },
+            // 先按「不可见」起步：根视图在首次渲染前就会按当前会话同步一次。
+            files_enabled: false,
             visible: true,
             width: match side {
                 SidebarSide::Left => SIDEBAR_DEFAULT_WIDTH,
@@ -282,6 +302,18 @@ impl Sidebar {
             return;
         }
         self.visible = visible;
+        cx.notify();
+    }
+
+    /// 同步「文件管理器」的可用性（根视图每帧按当前会话是不是远端调用）。
+    ///
+    /// 不可用时该视图的标签与内容一起不摆（[`SidebarView::visible_with`]）；标签数据
+    /// 本身不动，所以会话换回远端后它还会在原来的位置上。
+    pub(crate) fn set_files_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.files_enabled == enabled {
+            return;
+        }
+        self.files_enabled = enabled;
         cx.notify();
     }
 
@@ -334,6 +366,22 @@ impl Sidebar {
     /// 让本栏可见（拖放落地时意味着「用户在看它」）。
     fn show(&mut self) {
         self.visible = true;
+    }
+
+    /// 当前该摆出来的视图。
+    ///
+    /// 选中的那个不可用（本地会话下的「文件管理器」）就退到第一个可用的标签；一个可用的
+    /// 都没有则 `None`（内容位摆空占位）。**选中的下标不动**——会话换回远端时它自己回来。
+    fn active_view(&self) -> Option<SidebarView> {
+        match self.tabs.active_view() {
+            Some(view) if view.visible_with(self.files_enabled) => Some(view),
+            _ => self
+                .tabs
+                .views
+                .iter()
+                .copied()
+                .find(|view| view.visible_with(self.files_enabled)),
+        }
     }
 
     /// 点击标签：切到它代表的视图。
@@ -402,13 +450,14 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.tabs.active_view();
+        let active = self.active_view();
         // `Sidebar::child` 只吃单一类型，而两类内容（会话树实体 / 内置菜单）类型不同
         // ⇒ 用 [`SidebarContent`] 统一。
         let content = match active {
             Some(SidebarView::Sessions) => SidebarContent::Sessions(self.sessions.clone()),
             Some(SidebarView::Files) => SidebarContent::Files(self.files.clone()),
-            // 标签全被拖走的空标签条：给一个空占位，否则整列看上去是坏的。
+            // 没有可见的标签（全被拖走，或只剩本地会话下不摆的「文件管理器」）：
+            // 内容位**什么都不摆**，只留侧边栏背景。
             None => SidebarContent::Empty,
         };
 
@@ -519,7 +568,7 @@ enum SidebarContent {
     Sessions(Entity<SessionsState>),
     /// 「文件管理器」视图的实体（它自己实现 `Render`，见 [`FilesState`]）。
     Files(Entity<FilesState>),
-    /// 空占位（顶部标签全被拖走，内容位没有视图可摆）。
+    /// 没有可见的标签：内容位留白（不摆任何占位文案，只留侧边栏背景）。
     Empty,
 }
 
@@ -546,15 +595,8 @@ impl SidebarItem for SidebarContent {
             // 由内容决定的高度，`SidebarItem::render` 的返回类型也才统一）。
             Self::Sessions(sessions) => div().w_full().child(sessions).into_any_element(),
             Self::Files(files) => div().w_full().child(files).into_any_element(),
-            // 空占位：标签条本身（固定高度）才是拖放落点，这里只负责让面板不显得是坏的。
-            Self::Empty => div()
-                .w_full()
-                .child(empty_state(
-                    IconName::LayoutDashboard,
-                    "这里还没有视图标签",
-                    Some("把视图标签拖到上方标签条即可"),
-                ))
-                .into_any_element(),
+            // 留白：标签条本身（固定高度）才是拖放落点，内容位不摆任何东西。
+            Self::Empty => div().w_full().into_any_element(),
         }
     }
 }

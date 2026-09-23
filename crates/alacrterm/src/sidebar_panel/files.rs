@@ -1,12 +1,16 @@
-//! 「文件管理器」视图:当前终端工作目录下的文件树。
+//! 「文件管理器」视图:远端会话的文件树。
 //!
-//! 根目录 = **当前会话**的工作目录(Windows 上 PowerShell 的位置由 shell 集成上报,见
-//! `terminal::platform`);远端(SSH)会话拿不到远端 cwd,此时摆空占位(见 [`super::empty_state`])。
+//! **只供远端(SSH)会话使用**:本地目录用系统自己的文件管理器打开就好,应用里再摆一份没有
+//! 意义,所以本地终端下这个视图连同标签一起不摆(见 [`super::SidebarView::visible_with`])。
+//! 相应地,本视图也**不再跟随终端的工作目录** —— 跟随本地 shell 的 `cd` 靠的是 Windows 的
+//! shell 集成(PowerShell prompt 包装上报 `$PWD`),那个适配已整体移除。
+//!
+//! 远端目录的来源还没接上:[`FilesState::sync`] 是留给它的入口,当前没有调用方,
+//! 因此这个视图现在只会摆一个空占位(见 [`super::empty_state`])。
 //!
 //! 顶部是一条**路径输入框**,与「显示中的根目录」双向对齐:改内容就尝试跳过去(只认确实是
-//! 目录的路径,[`FilesState::navigate_to`]);终端 `cd` 改了目录则写回输入框
-//! ([`FilesState::sync_path_input`])。没有目录可显示时(终端全关掉 / 远端会话)连这条也不摆,
-//! 只剩空占位(见 [`super::empty_state`])。
+//! 目录的路径,[`FilesState::navigate_to`]);根目录变了则写回输入框
+//! ([`FilesState::sync_path_input`])。没有目录可显示时连这条也不摆,只剩空占位。
 //!
 //! **目录按需加载**:展开未读过的目录时后台读一层再回填,排序 = 目录在前、名字不区分大小写。
 //! 视图**只读**(行点击只展开 / 收起)。
@@ -94,13 +98,18 @@ enum LoadTarget {
 
 /// 「文件管理器」视图的状态:根目录 + 节点树 + 展开状态 + gpui-kit [`TreeState`]。
 ///
-/// **数据、树的交互状态与渲染都在这里**:[`crate::AppRoot`] 持有一个 `Entity<FilesState>`
-/// (两条侧边栏共用),每帧把当前会话的工作目录同步进来([`FilesState::sync`])。
+/// **数据、树的交互状态与渲染都在这里**:[`crate::AppRoot`] 建好实体后交给两条侧边栏
+/// (共用同一个),视图只在远端会话下摆出来;换根目录走 [`FilesState::sync`](目前留给
+/// 「远端目录」后端,还没有调用方)。
 pub(crate) struct FilesState {
-    /// 当前会话的工作目录(终端侧真值):只有它变了才把根目录拉回去。
-    /// `None` = 没有会话,或远端会话拿不到本地路径。
+    /// 上一次同步进来的工作目录(只有它变了才把根目录拉回去)。
+    ///
+    /// ⚠️ 目前没有调用方 —— 目录来源的入口 [`FilesState::sync`] 留给远端后端,接上之前
+    /// 本视图恒为空占位,这个字段只是那时的对照值。
+    #[allow(dead_code)]
     cwd: Option<PathBuf>,
-    /// 正在显示的根目录(默认 = [`FilesState::cwd`]);终端 cwd 变了会被拉回终端所在目录。
+    /// 正在显示的根目录(默认 = [`FilesState::cwd`]);[`FilesState::sync`] 会把它拉回
+    /// 给进来的目录,手动跳转([`FilesState::navigate_to`])也会改它。
     root: Option<PathBuf>,
     /// 根目录下的条目(`None` = 还没读到)。
     entries: Option<Vec<FileNode>>,
@@ -152,9 +161,11 @@ impl FilesState {
         }
     }
 
-    /// 与当前会话的工作目录对齐(根视图每帧调用,`cwd` 是当前会话的进程工作目录)。
+    /// 与给定的工作目录对齐:换根目录、重读一层,并让在途的读取作废。
     ///
-    /// 只在**目录真的变了**时动手:清空整棵树重新读一层,并让在途的读取作废。
+    /// ⚠️ 当前**没有调用方**:它此前由终端的工作目录驱动(本地 shell 的 `cd` 让文件树跟着走),
+    /// 那条链路已随 Windows shell 集成一起移除,这里留给「远端目录」后端接入时使用。
+    #[allow(dead_code)]
     pub(crate) fn sync(
         &mut self,
         cwd: Option<PathBuf>,
@@ -204,7 +215,7 @@ impl FilesState {
         self.reset(window, cx);
     }
 
-    /// 把当前根目录写回输入框(终端 `cd`、自己跳转成功后都走这里)。
+    /// 把当前根目录写回输入框(换根目录时都走这里)。
     ///
     /// ⚠️ 用 `InputState::set_value`:它内部关掉事件发射 ⇒ 不会回环触发
     /// [`FilesState::on_path_input_event`]。内容已一致时直接返回,免得把光标拽到末尾。
@@ -427,13 +438,13 @@ impl FilesState {
 impl Render for FilesState {
     /// `_cx`:本实现只画自己的状态,主题色都在行渲染闭包自己那份 `cx` 上取。
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // 没有目录可显示(终端全关掉 / 远端会话 / 本地目录还没采到 ⇒ `root` 为 `None`):
+        // 没有目录可显示(远端目录来源还没接上 ⇒ `root` 一直是 `None`):
         // 只摆空占位,**连顶部那条路径输入框也不摆** —— 一条空框既没内容可编辑、也没东西可跳。
         if self.root.is_none() {
             return empty_state(
                 IconName::FolderClosed,
-                "没有可浏览的目录",
-                Some("打开一个本地终端后,这里会显示它的工作目录;远端会话拿不到目录"),
+                "还没有可浏览的目录",
+                Some("远端目录浏览尚未接入;本地终端不摆这个视图"),
             )
             .into_any_element();
         }

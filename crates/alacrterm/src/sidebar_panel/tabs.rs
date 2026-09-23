@@ -56,19 +56,28 @@ impl Sidebar {
     /// 返回 [`AnyElement`] 而非 `impl IntoElement`：edition 2024 下 `impl Trait` 会捕获
     /// `&mut Context` 的生命周期，同一渲染树里连续调用多个渲染方法会借用冲突。
     pub(super) fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        tab_bar(self.side, &self.tabs, cx)
+        tab_bar(self.side, &self.tabs, self.files_enabled, cx)
     }
 }
 
 /// 标签条：每个标签既是拖源也是落点（落在第 `ix` 个标签上 = 占它的位置）；
 /// 标签条空白区域（含空标签条）是兜底落点 = 追加到末尾
 ///（落点语义见 [`Sidebar::drop_tab`] / [`Sidebar::append_tab`]）。
-fn tab_bar(side: SidebarSide, tabs: &SidebarTabs, cx: &mut Context<Sidebar>) -> AnyElement {
+///
+/// `files_enabled`（见 [`Sidebar::set_files_enabled`]）为假时，「文件管理器」**连标签都不摆**；
+/// 下标仍然是它在 [`SidebarTabs`] 里的真实下标，所以这里的过滤不会打乱 `enumerate` 的下标。
+fn tab_bar(
+    side: SidebarSide,
+    tabs: &SidebarTabs,
+    files_enabled: bool,
+    cx: &mut Context<Sidebar>,
+) -> AnyElement {
     // 先收成 `Vec`，免得迭代器一直借着 `cx`。
     let items: Vec<AnyElement> = tabs
         .views
         .iter()
         .enumerate()
+        .filter(|(_, view)| view.visible_with(files_enabled))
         .map(|(ix, view)| tab_element(side, ix, *view, ix == tabs.active, cx))
         .collect();
 

@@ -109,7 +109,7 @@ crates/
         mod.rs                  # Sidebar 实体(标签/折叠/宽度 + Render) + toggle_button + SidebarContent
         tabs.rs                 # 顶部视图标签条(点选 + 拖动换位 / 拖到另一条侧边栏)
         sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + Render)
-        files.rs                # FilesState(文件管理器:当前终端目录的文件树 + Render)
+        files.rs                # FilesState(文件管理器:目录树 + Render;只对远端会话可见)
       dialog/                   # 对话框(§3.4)
         mod.rs                  # 共同约定(表单实体先建 / 页脚自拼 / on_ok 兜底校验)
         connection.rs           # 「新建会话」:只加一条 SSH 记录
@@ -130,7 +130,6 @@ crates/
       alacritty.rs              # alacritty_terminal 桥接层
       alacritty/hyperlinks.rs   # OSC 8 / URL 正则 / 路径猜测
       pty_info.rs               # sysinfo 进程查询
-      platform.rs               # 平台差异(当前只有 Windows 一段:PowerShell 的 prompt 包装上报工作目录)
       mappings/                 # keys.rs mouse.rs colors.rs
   util/                         # shell 探测、路径工具
 ```
@@ -181,7 +180,7 @@ fn main() {
 
 **状态与渲染都归子组件**:一条侧边栏 = 一个实体(`Entity<Sidebar>`,左右各一个,见 `sidebar_panel/mod.rs`),它自带标签 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 视图标签条 + 当前视图内容 + 底部状态栏);根视图只把它 `.child(..)` 摆进分栏面板、把 `sidebar_panel::toggle_button` 摆进标题栏。各视图内容也是实体:「会话」`Entity<SessionsState>`、文件管理器 `Entity<FilesState>`(见 `sidebar_panel/`),记录树 / 目录项 + 展开状态 + `TreeState` + 增删改 + 它自己的渲染都在里面,两条侧边栏共用同一份。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 指标采样器 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 两条侧边栏互持 `sibling` 弱引用,标签跨栏拖动靠它。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
 
-- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成。**顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**。标签样式照 **VS Code 面板标签**(纯文字、无边框、按内容宽度左对齐,悬停 / 选中才有圆角浅灰底):手绘 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` / `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时点亮成插入提示,免得高亮把标签尺寸顶变。**标签可在两条侧边栏之间拖动**:同栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置);拖到另一栏 = 把视图搬过去并选中;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧顺序与选中项各存在自己的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;标签条为空时内容位改摆一个空占位(gpui-kit `Empty` 组件,见 `sidebar_panel::empty_state`)。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,各一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。
+- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成。**顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**。标签样式照 **VS Code 面板标签**(纯文字、无边框、按内容宽度左对齐,悬停 / 选中才有圆角浅灰底):手绘 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` / `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时点亮成插入提示,免得高亮把标签尺寸顶变。**标签可在两条侧边栏之间拖动**:同栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置);拖到另一栏 = 把视图搬过去并选中;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧顺序与选中项各存在自己的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;内容位**一个可见标签都没有**时(标签全被拖走,或只剩本地会话下不摆的「文件管理器」)`SidebarContent::Empty` 什么都不摆 —— 留白,不塞任何占位文案。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,各一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按当前会话是不是远端调 `Sidebar::set_files_enabled`,为假时该视图的**标签与内容一起不摆**(选中的下标不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
 
 #### 会话列表(文件夹树:记录 + 拖放)
 
@@ -217,17 +216,17 @@ fn main() {
 - **三条状态栏等高**:`status_bar::STATUS_BAR_HEIGHT` = 28px;状态栏里带图标的按钮要显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把状态栏撑高——目前两侧那条已无任何内容)。
 - **分栏竖线只由拖拽条画**:侧边栏状态栏都不画 `border_*_1`,主题的 `sidebar_border` 置透明(`config::change_theme` 里设)。⚠️ 换主题必须走 `config::change_theme(mode, cx)`;⚠️ `sidebar_border` 兼作侧边栏菜单「嵌套项缩进导线」的颜色,会一起消失。
 
-#### 文件管理器(当前终端目录下的文件树)
+#### 文件管理器(远端会话的目录树)
 
-> 状态与渲染都在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(根目录 + 目录项缓存 + 展开状态 + `TreeState` + 它自己的 `Render`);作为 `SidebarContent::Files(Entity<FilesState>)` 摆进侧边栏内容位。默认停在**右侧边栏**(左栏是「会话」),两条侧边栏共用同一个实体。
+> 状态与渲染都在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(根目录 + 目录项缓存 + 展开状态 + `TreeState` + 它自己的 `Render`);作为 `SidebarContent::Files(Entity<FilesState>)` 摆进侧边栏内容位。默认停在**右侧边栏**(左栏是「会话」),两条侧边栏共用同一个实体,**且只对远端会话可见**(见 §3.2)。
 
-- **根目录 = 当前会话的工作目录**:`AppRoot::render` 每帧把当前会话的 `TerminalView::working_directory(cx)`(→ `Terminal::working_directory`)交给 `FilesState::sync`;目录真变了才清空整棵树重新读。拿不到(无会话 / SSH)⇒ `None`,面板改成一个空占位(gpui-kit `Empty` 组件;目录是空的时候也用它,见 `sidebar_panel::empty_state`)。
-- **目录来源有两层**:① shell 自己上报的位置(**仅 Windows**:`$PWD`,经 `platform` 的 shell 集成,见 §4.5——只有这样才能让 PowerShell 跟得上 `cd`);② PTY 前台进程的真实工作目录(`pty_info` 采样,给 cmd / bash / wsl 兜底)。`Terminal::working_directory()` 优先 ①、再回落 ②。
+- **只在远端会话下摆出来**:本地终端的目录既不跟也不显示 —— 「跟随终端目录」靠的是 Windows 的 shell 集成(PowerShell 上报 `$PWD`,见 §4.5),那道适配已整体移除;本地目录用系统自己的文件管理器打开就好。所以 `AppRoot::render` 只同步可用性(`Sidebar::set_files_enabled`),不再把 `TerminalView::working_directory(cx)` 喂给文件树。
+- **远端目录的来源还没接上**:`FilesState::sync` 是留给它的入口(当前没有调用方),因此这个视图恒为 `None` 根目录 ⇒ 只摆一个空占位(gpui-kit `Empty` 组件;目录是空的时候也用它,见 `sidebar_panel::empty_state`)。
 - **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 读**一层**目录项(慢盘 / 超大目录不卡界面),回填前核对**代次**(`generation`,换根目录时 +1 ⇒ 在途结果直接丢掉)。排序 = 目录在前、名字不区分大小写。
 - ⚠️ **未加载的目录必须挂一个占位子项**(label「加载中…」):gpui-kit 的 `TreeItem::is_folder()` 就是「有没有子项」,没有子项的行既没有 caret、点击也不会展开(`TreeState::toggle_expand` 对非 folder 直接 return)⇒ 子目录永远打不开。`visible_rows` 的行数算法必须与 `build_items` + `TreeState::add_entry` 的展平规则**逐条一致**(含这条占位)。
 - 行类型同样**编码在行 id 前缀**里(`dir-0-2` / `file-1` / `loading-0-2`),判类型不用 `TreeEntry::is_folder()`(空目录 / 未加载目录都会被判反——前者没有子项、后者挂着占位子项)。目录行 = caret(有子项时)+ 文件夹图标 + 名字,文件行 = 文件图标 + 名字(视图**只读**,行点击只展开 / 收起,不打开文件),占位行是灰字。
 - 展开状态存 `FilesState::expanded`(下标链),由 `cx.subscribe(&tree, ..)` 收 `TreeEvent::{Expanded,Collapsed}` 回写(与 `SessionsState` 同一套理由:`set_items` 会重建 `TreeItem`)。
-- 顶部一行是一条**路径输入框**（整行铺满），与「显示中的根目录」双向对齐：改内容就尝试跳过去（`navigate_to`，**只认确实是目录的路径**——不存在 / 不是目录 / 为空时什么都不动，否则打字中途那些不成立的中间态会把树清空）；终端 `cd` 改了根目录时把新路径写回输入框（`sync_path_input`，用 `InputState::set_value`，它内部关掉事件发射 ⇒ 不会回环触发 `navigate_to`）。⚠️ **没有目录可显示时（终端全关掉 / 远端会话 / 本地目录还没采到 ⇒ `root` 为 `None`）这条输入框整个不摆**，只留空占位——一条空框既没内容可编辑、也没东西可跳。⚠️ 输入框用组件**默认尺寸**（`Size::Medium`，高 32px）且关掉清除按钮（`cleanable(false)`：路径跟着终端走，一键清空只会把面板弄空）⇒ 那一行是**自己的** `PATH_ROW_HEIGHT = 36px`，**不能**复用它上面标签条的 `TAB_HEIGHT`（24px，输入框会溢出到树上）。因此 `FilesState` 把「终端 cwd」(`cwd`)与「显示中的根目录」(`root`)分开存:只有 **cwd 变化**才把 `root` 拉回终端所在目录,手动跳转不会被每帧的 `sync` 顶回去。
+- 顶部一行是一条**路径输入框**（整行铺满），与「显示中的根目录」双向对齐：改内容就尝试跳过去（`navigate_to`，**只认确实是目录的路径**——不存在 / 不是目录 / 为空时什么都不动，否则打字中途那些不成立的中间态会把树清空）；根目录变了时把新路径写回输入框（`sync_path_input`，用 `InputState::set_value`，它内部关掉事件发射 ⇒ 不会回环触发 `navigate_to`）。⚠️ **没有目录可显示时（远端目录来源还没接上 ⇒ `root` 为 `None`）这条输入框整个不摆**，只留空占位——一条空框既没内容可编辑、也没东西可跳。⚠️ 输入框用组件**默认尺寸**（`Size::Medium`，高 32px）且关掉清除按钮（`cleanable(false)`：路径由视图自己管，一键清空只会把面板弄空）⇒ 那一行是**自己的** `PATH_ROW_HEIGHT = 36px`，**不能**复用它上面标签条的 `TAB_HEIGHT`（24px，输入框会溢出到树上）。`FilesState` 把「上一次同步进来的工作目录」(`cwd`)与「显示中的根目录」(`root`)分开存:只有 **cwd 变化**才把 `root` 拉回那个目录,手动跳转不会被后续的 `sync` 顶回去(⚠️ `cwd` 现在只服务于 `sync`,后者暂无调用方)。
 - 高度与 `SessionsState` 同样处理:`.h(行数 × TREE_ROW_HEIGHT)`(行数手算,`Tree` 是虚拟列表 + `size_full()`);`sync_tree` 也靠 `(根目录, (名字, 是否目录, 层级) 全量)` 签名挡住每帧 `set_items`(`TreeState::set_items` 会 notify,否则自激)。
 
 ### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)
@@ -558,8 +557,7 @@ graph LR
 - `ProcessIdGetter`:Unix 用 `tcgetpgrp` 取前台进程组;Windows 用 `GetProcessId(handle)`,为 0 时回落 `fallback_pid`
 - `emit_title_changed_if_changed`(每次 `Wakeup` 触发):后台用 `sysinfo` 刷新进程信息,比较 `cwd` / `name` 变化后才发 `Event::TitleChanged`
 - Windows 特判:`shell_program == title` 时忽略 shell 自身的 OSC 标题事件(否则 breadcrumb 会显示 `pwsh.exe` 路径)
-- **shell 集成**(`platform.rs`,文件整体 `#![cfg(windows)]`,平台差异统一收在这个模块):PowerShell 的 `cd`(`Set-Location`)只改 `$PWD`、**不动进程的当前目录** ⇒ 只靠进程 cwd 的话,「跟随终端目录」在 pwsh 下永远停在启动目录。所以启动 PowerShell(`pwsh` / `powershell`,且**用户没自带参数**)时追加 `-NoExit -EncodedCommand <base64(UTF-16LE 脚本)>`,注入一段 prompt 包装:画提示符前发一条 `ESC ] 2 ; alacrterm-cwd:<路径> BEL`,再调用原来的 prompt(原 prompt 存下来继续调用 ⇒ 用户提示符样式不变)。⚠️ 各使用点全部包在 `#[cfg(windows)]` 里:`ShellParams::new` 的注入、`Terminal::apply_reported_cwd` 与 `working_directory()`、`Event::PwshPathChanged`(连枚举变体都是 Windows-only)⇒ **其他平台与其他终端的启动参数 / 标题处理 / 工作目录来源一律不受影响**。
-- ⚠️ 走「标题」通道的原因:`alacritty_terminal` 的 `EventLoop` 自己持有 PTY 读取端(`EventLoop::new` 内部建 `Processor`、`pty_read` 私有)⇒ 我们**拿不到原始字节流**,它交给外面的通道只有 OSC 0/2 标题;而 alacritty 0.26 又**不认识 OSC 7**。收到带前缀的标题时 `Terminal` 只更新 `shell_reported_cwd` + `emit(Event::PwshPathChanged)`,**不改标题**(`breadcrumb_text` 不受影响)。非文件系统位置(如 `HKLM:`)没有 `ProviderPath` ⇒ 不上报,使用方保留上一次的目录。
+- **已移除的 shell 集成**(曾占一整个 `platform.rs`,文件整体 `#![cfg(windows)]`):PowerShell 的 `cd`(`Set-Location`)只改 `$PWD`、**不动进程的当前目录**,所以曾靠启动 PowerShell(`pwsh` / `powershell`,且用户没自带参数)时追加 `-NoExit -EncodedCommand <base64(UTF-16LE 脚本)>` 注入一段 prompt 包装:画提示符前发一条 `ESC ] 2 ; alacrterm-cwd:<路径> BEL`,再由 `Terminal` 从标题里解析出来。**整段已删除**(文件管理器不再跟随本地终端目录):`Terminal::working_directory()` 只剩 PTY 前台进程 cwd 一个来源(`client_side_working_directory`),`Event::PwshPathChanged` 与 `Terminal::shell_reported_cwd` 都不再有;`ShellParams::new` 也不再给 PowerShell 追加参数。留在 `#[cfg(windows)]` 里的只有「忽略 shell 自身的 OSC 标题」与 `resolve_path`(`SearchPathW`,判 `shell_program`)。
 
 ---
 
@@ -571,7 +569,7 @@ graph LR
 
 **向上事件**(`Event`,`cx.emit` 给视图):
 
-`TitleChanged` / `PwshPathChanged`(仅 Windows) / `BreadcrumbsChanged` / `CloseTerminal` / `Bell` / `Wakeup` / `BlinkChanged` / `SelectionsChanged` / `NewNavigationTarget` / `Open`
+`TitleChanged` / `BreadcrumbsChanged` / `CloseTerminal` / `Bell` / `Wakeup` / `BlinkChanged` / `SelectionsChanged` / `NewNavigationTarget` / `Open`
 
 **后端事件**(`TerminalBackendEvent`,alacritty 回调 → channel):
 
@@ -585,7 +583,6 @@ graph LR
 |---|---|
 | `Wakeup` / `SelectionsChanged` | 仅 `cx.notify()` 触发重绘 |
 | `TitleChanged` / `BreadcrumbsChanged` | 读 `terminal.breadcrumb_text`(空则 `"终端"`)写入 `self.title` 并 `notify` |
-| `PwshPathChanged` | 仅 `cx.notify()`:PowerShell 上报了新工作目录(标题没变),文件管理器据此换根目录(仅 Windows,见 §4.5) |
 | `CloseTerminal` | 标记 `exited = true` 并 `notify()`(不退出应用),状态栏显示「已断开」 |
 
 ---
