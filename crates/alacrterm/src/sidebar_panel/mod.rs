@@ -269,7 +269,8 @@ impl Sidebar {
             },
             // 先按「不可见」起步：根视图在首次渲染前就会按当前会话同步一次。
             files_enabled: false,
-            visible: true,
+            // 默认折叠：启动只留标题栏 + 中间列 + 状态栏，展开靠标题栏右端那两枚开关。
+            visible: false,
             width: match side {
                 SidebarSide::Left => SIDEBAR_DEFAULT_WIDTH,
                 SidebarSide::Right => RIGHT_SIDEBAR_DEFAULT_WIDTH,
