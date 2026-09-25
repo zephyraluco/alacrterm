@@ -109,6 +109,11 @@ pub(crate) struct FilesState {
     loading: Vec<String>,
     /// 顶部路径输入框:显示 [`FilesState::root`],改内容就跳过去。
     path_input: Entity<InputState>,
+    /// 路径还没写回输入框(根目录可能是后台异步问回来的,那时没有窗口 ⇒ 见 [`FilesState::sync`])。
+    path_input_pending: bool,
+    /// 最近一次路径跳转请求的序号:输入框每敲一个字符就发一次 ⇒ 同时在飞的请求有好几个,
+    /// 只有**最新**那次的回答算数(见 [`FilesState::navigate_to`])。
+    nav_seq: u64,
     /// 根目录代次:换目录时 +1,在途的读取对不上就丢掉。
     generation: u64,
     /// 文件树的交互状态(选中 / 滚动)。
@@ -144,6 +149,8 @@ impl FilesState {
             expanded: Vec::new(),
             loading: Vec::new(),
             path_input,
+            path_input_pending: false,
+            nav_seq: 0,
             generation: 0,
             tree,
             sig: None,
@@ -157,6 +164,12 @@ impl FilesState {
     /// 由 [`crate::AppRoot`] 每帧调用(和「文件管理器只服务远端会话」那条判断同一处),
     /// 句柄的比较是 `Arc::ptr_eq`(`SshFs: PartialEq`)⇒ 每帧调用的代价可以忽略。
     pub(crate) fn sync(&mut self, fs: Option<SshFs>, window: &mut Window, cx: &mut Context<Self>) {
+        // ⚠️ 写回输入框需要窗口,而根目录可能是后台异步问回来的(见 [`Self::reset_no_window`])
+        // ⇒ 在这里补上。不能每帧无条件写:用户可能正在改那个框,会把他的输入顶掉。
+        if self.path_input_pending {
+            self.path_input_pending = false;
+            self.sync_path_input(window, cx);
+        }
         if self.fs == fs {
             return;
         }
@@ -186,6 +199,9 @@ impl FilesState {
     ///
     /// 「不存在就不动」是刻意的:打字中途必然经过一串不成立的中间态(把 `/a/b` 改成 `/a/c`
     /// 要先经过 `/a/c` 之前的 `/a/` 那种半截值),那时清空树只会让面板闪成空的。
+    ///
+    /// ⚠️ 输入框每敲一个字符就发一次,所以同时有多个请求在飞 —— 只有**最新**那次的回答算数
+    /// ([`FilesState::nav_seq`]),否则先发的短路径后回来会把树拽回上级目录。
     fn navigate_to(&mut self, text: &str, cx: &mut Context<Self>) {
         let Some(fs) = self.fs.clone() else {
             return;
@@ -195,6 +211,8 @@ impl FilesState {
             return;
         }
         let generation = self.generation;
+        self.nav_seq += 1;
+        let seq = self.nav_seq;
         // 「是不是目录」要问远端 ⇒ 先发请求,回来再决定跳不跳。
         let task = cx.background_spawn({
             let text = text.clone();
@@ -208,8 +226,8 @@ impl FilesState {
                     return;
                 }
                 let _ = this.update(&mut cx, |this, cx| {
-                    // 期间换过会话 / 换过目录 ⇒ 这次跳转作废。
-                    if this.generation != generation {
+                    // 期间换过会话 / 换过目录,或者这次已经不是最新请求 ⇒ 这次跳转作废。
+                    if this.generation != generation || this.nav_seq != seq {
                         return;
                     }
                     this.root = Some(text);
@@ -242,8 +260,11 @@ impl FilesState {
         self.reset_no_window(cx);
     }
 
-    /// [`FilesState::reset`] 里不需要窗口的那半(路径跳转回来时用:那时没有窗口)。
+    /// [`FilesState::reset`] 里不需要窗口的那半:**所有异步回调**(问家目录 / 路径跳转回来)
+    /// 都走它 —— 那时没有窗口,写回输入框留给下一帧(见 [`FilesState::sync`])。
     fn reset_no_window(&mut self, cx: &mut Context<Self>) {
+        // 根目录变了 ⇒ 下一帧把新路径写回输入框(那时才有窗口,根目录可能是刚问到的)。
+        self.path_input_pending = true;
         // 代次 +1 ⇒ 在途的读取回来会被丢掉,不会把旧目录的内容填进新树。
         self.generation += 1;
         self.entries = None;
@@ -492,7 +513,7 @@ impl Render for FilesState {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         // 还没有根目录(没有远端会话 / 正在问家目录 / 问失败):
         // 只摆空占位,**连顶部那条路径输入框也不摆** —— 一条空框既没内容可编辑、也没东西可跳。
-        let Some(root) = self.root.clone() else {
+        if self.root.is_none() {
             let placeholder = match &self.error {
                 // 连不上 SFTP:把原因说清楚(多半是认证被拒 / 服务端没开 sftp 子系统)。
                 Some(error) => v_flex()
@@ -517,7 +538,7 @@ impl Render for FilesState {
                 .into_any_element(),
             };
             return placeholder;
-        };
+        }
 
         let rows = self.visible_rows();
         // 顶部一行:路径输入框整行铺满(高 32px > 标签条的 24px ⇒ 用 [`PATH_ROW_HEIGHT`])。
@@ -562,24 +583,8 @@ impl Render for FilesState {
             .into_any_element()
         };
 
-        // 根目录那一行(便于看清当前在哪;路径输入框里也有,但长路径会被截断)。
-        let root_row = h_flex()
-            .w_full()
-            .px_2()
-            .pb_1()
-            .gap_x_2()
-            .items_center()
-            .text_xs()
-            .text_color(_cx.theme().muted_foreground)
-            .child(Icon::new(IconName::FolderOpen).size_3())
-            .child(ellipsis_label(root.into()));
-
-        v_flex()
-            .w_full()
-            .child(header)
-            .child(root_row)
-            .child(body)
-            .into_any_element()
+        // 根目录只在上面那条输入框里显示(它随 `root` 变化写回,见 [`FilesState::sync_path_input`])。
+        v_flex().w_full().child(header).child(body).into_any_element()
     }
 }
 
