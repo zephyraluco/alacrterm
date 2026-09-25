@@ -443,18 +443,17 @@ impl FilesState {
 
     /// 交给侧边栏虚拟列表的全部内容项:路径输入框 + 每一行(或一句空占位)。
     pub(super) fn sidebar_items(&mut self, cx: &mut Context<Self>) -> Vec<FilesItem> {
-        // 还没有根目录(没有远端会话 / 正在问家目录 / 问失败):只摆空占位,
-        // **连顶部那条路径输入框也不摆** —— 一条空框既没内容可编辑、也没东西可跳。
+        // 远端目录信息还没到(含首层列表在途,否则会先闪一句「这个目录是空的」)⇒ 什么都不摆。
+        if self.error.is_none() && (self.root.is_none() || self.entries.is_none()) {
+            return Vec::new();
+        }
+
+        // 问家目录失败:连根目录都没有 ⇒ 只摆原因,路径输入框也不摆(空框没东西可跳)。
         if self.root.is_none() {
-            let (title, description) = if self.error.is_some() {
-                ("无法读取远端目录", "当前会话的远端文件系统不可用")
-            } else {
-                ("还没有可浏览的目录", "打开一个 SSH 会话后，这里显示它的家目录")
-            };
             return vec![FilesItem::Placeholder {
                 icon: IconName::FolderClosed,
-                title,
-                description,
+                title: "无法读取远端目录",
+                description: "当前会话的远端文件系统不可用",
                 detail: self.error.clone().map(SharedString::from),
             }];
         }
