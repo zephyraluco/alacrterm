@@ -84,6 +84,8 @@ impl ConnectionForm {
         }
         let password = self.trimmed(&self.password, cx);
         Some(SessionRecord {
+            // id 由 `SessionsState::add_record` 分配（这里先占位）。
+            id: 0,
             name: SharedString::from(self.trimmed(&self.name, cx)),
             user: self.trimmed(&self.user, cx),
             host: self.trimmed(&self.host, cx),

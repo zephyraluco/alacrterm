@@ -27,8 +27,8 @@
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, Styled as _, WeakEntity, Window,
-    div, px,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription,
+    WeakEntity, Window, div, px,
 };
 use gpui_kit::component::{
     Collapsible, Icon, Side, Sizable as _,
@@ -47,6 +47,7 @@ use crate::status_bar::STATUS_BAR_HEIGHT;
 
 pub(crate) mod files;
 pub(crate) mod sessions;
+mod shared;
 mod tabs;
 
 use files::FilesState;
@@ -251,6 +252,12 @@ pub(crate) struct Sidebar {
     files: Entity<FilesState>,
     /// 另一条侧边栏：标签跨栏拖动时要把视图从它那儿取过来。
     sibling: Option<WeakEntity<Sidebar>>,
+    /// 把「会话」/「文件管理器」的变化（增删改 / 展收 / 加载完成）转发一次重绘。
+    ///
+    /// ⚠️ 必须转发：两个视图都不再自己实现 `Render`（行由本实体的内容区渲染），
+    /// 它们的 `notify` 落不到窗口上。
+    _sessions_sub: Subscription,
+    _files_sub: Subscription,
 }
 
 impl Sidebar {
@@ -277,9 +284,11 @@ impl Sidebar {
             },
             resize: cx.new(|_| ResizableState::default()),
             split_width: None,
-            sessions,
-            files,
+            sessions: sessions.clone(),
+            files: files.clone(),
             sibling: None,
+            _sessions_sub: cx.observe(&sessions, |_, _, cx| cx.notify()),
+            _files_sub: cx.observe(&files, |_, _, cx| cx.notify()),
         }
     }
 
@@ -452,14 +461,24 @@ impl Sidebar {
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active_view();
-        // `Sidebar::child` 只吃单一类型，而两类内容（会话树实体 / 内置菜单）类型不同
-        // ⇒ 用 [`SidebarContent`] 统一。
-        let content = match active {
-            Some(SidebarView::Sessions) => SidebarContent::Sessions(self.sessions.clone()),
-            Some(SidebarView::Files) => SidebarContent::Files(self.files.clone()),
+        // 内容 = **一组 item**（不一定是 1 项）：文件树一行一项，交给组件内部的虚拟列表，
+        // 由它按可见区间渲染（见 [`SidebarContent`] 与 `files` 模块文档）。
+        let contents: Vec<SidebarContent> = match active {
+            Some(SidebarView::Sessions) => self
+                .sessions
+                .update(cx, |sessions, cx| sessions.sidebar_items(cx))
+                .into_iter()
+                .map(SidebarContent::Sessions)
+                .collect(),
+            Some(SidebarView::Files) => self
+                .files
+                .update(cx, |files, cx| files.sidebar_items(cx))
+                .into_iter()
+                .map(SidebarContent::Files)
+                .collect(),
             // 没有可见的标签（全被拖走，或只剩本地会话下不摆的「文件管理器」）：
             // 内容位**什么都不摆**，只留侧边栏背景。
-            None => SidebarContent::Empty,
+            None => Vec::new(),
         };
 
         // 宽度由外层分栏面板决定：必须 w_full，否则会回落到组件内置默认宽度。
@@ -473,7 +492,8 @@ impl Render for Sidebar {
         .w_full()
         // 顶部固定的标签条（不随下方内容滚动）。
         .header(self.render_tabs(cx))
-        .child(content)
+        // 一组内容项：会话视图 1 项；文件管理器一行一项（组件内部虚拟列表只渲染可见行）。
+        .children(contents)
         .flex_1()
         .min_h_0();
         // 右栏用 Side::Right：组件内部的边框 / 折叠动画方向朝右。
@@ -561,16 +581,14 @@ pub(crate) fn toggle_button(sidebar: &Entity<Sidebar>, cx: &mut Context<AppRoot>
     .into_any_element()
 }
 
-/// `SidebarWidget::child` 只接受单一类型，而侧边栏内容有几类（视图实体 / 内置菜单）
-/// ⇒ 用一个枚举把它们的类型统一起来。
+/// `SidebarWidget::children` 只接受单一类型，而侧边栏内容是「两份视图混合的一组项」
+/// ⇒ 用一个枚举把类型统一起来。两个视图都是**一行一项**（见 [`files::FilesItem`]）。
 #[derive(Clone)]
 enum SidebarContent {
-    /// 「会话」视图的实体（它自己实现 `Render`，见 [`SessionsState`]）。
-    Sessions(Entity<SessionsState>),
-    /// 「文件管理器」视图的实体（它自己实现 `Render`，见 [`FilesState`]）。
-    Files(Entity<FilesState>),
-    /// 没有可见的标签：内容位留白（不摆任何占位文案，只留侧边栏背景）。
-    Empty,
+    /// 「会话」列表的一项。
+    Sessions(sessions::SessionsItem),
+    /// 「文件管理器」的一项（路径输入框 / 一行 / 空占位）。
+    Files(files::FilesItem),
 }
 
 impl Collapsible for SidebarContent {
@@ -584,20 +602,17 @@ impl Collapsible for SidebarContent {
 }
 
 impl SidebarItem for SidebarContent {
-    /// 三个分支都不需要 `id` / `window` / `cx`(渲染与交互都在实体自己身上),故加下划线。
+    /// 两个分支都不用 `id` / `window`（渲染与交互都在行元素自己身上），故加下划线。
     fn render(
         self,
         _id: impl Into<ElementId>,
         _window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> impl IntoElement {
         match self {
-            // 实体自己渲染自己：这里只把它摆进侧边栏的内容位（`div` 负责给出宽度与
-            // 由内容决定的高度，`SidebarItem::render` 的返回类型也才统一）。
-            Self::Sessions(sessions) => div().w_full().child(sessions).into_any_element(),
-            Self::Files(files) => div().w_full().child(files).into_any_element(),
-            // 留白：标签条本身（固定高度）才是拖放落点，内容位不摆任何东西。
-            Self::Empty => div().w_full().into_any_element(),
+            // 两个视图都是读行数据 / 接交互在 `render` 里自己干的。
+            Self::Sessions(item) => item.render(cx),
+            Self::Files(item) => item.render(cx),
         }
     }
 }

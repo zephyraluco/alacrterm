@@ -1,41 +1,27 @@
 //! 「会话」视图:文件夹形式的**记录树**(MobaXterm 那种形态),状态收在 [`SessionsState`]。
 //!
-//! 列表内容是**会话记录**(连接配置),与终端实例完全无关:有没有在跑终端取决于用户是否
-//! 双击过它,关掉终端也不影响列表;没有自动生成的根文件夹(顶层就是用户建的文件夹与记录)。
+//! 列表内容是**会话记录**(连接配置),与终端实例无关:关掉终端不影响列表,也没有自动生成的
+//! 根文件夹(顶层就是用户建的文件夹与记录)。入口:状态栏左下角建文件夹、右下角新建会话,
+//! 文件夹行右键可再建会话 / 子文件夹,右键删除(文件夹连带内容),**双击记录行开终端**
+//! ([`OpenSession`]);记录与文件夹都能**拖动**,落点合法性由 [`SessionsState::move_entry`]
+//! 把关。
 //!
-//! - **加**:状态栏左下角建文件夹([`NewFolder`])、右下角新建会话([`NewSession`]);
-//!   文件夹行右键可以「在这里新建会话 / 新建子文件夹」。
-//! - **删**:记录行 / 文件夹行的右键菜单(文件夹连带里面内容)。
-//! - **开终端**:双击记录行或右键「打开会话」→ [`OpenSession`] →
-//!   [`crate::AppRoot::open_session_record`]。
-//! - **拖放**:记录行与文件夹行都能拖(载荷 [`DragSessionEntry`]),落点合法性由
-//!   [`SessionsState::move_entry`] 把关。
-//! - **一条都没有**:内容位改摆空占位(见 [`empty_state`])——树零行时什么也不画。
+//! ⚠️ 虚拟化、摊平缓存与行骨架都走 [`super::shared`](与「文件管理器」共用);本模块只管
+//! 记录模型 + 展开状态 + 摊平([`SessionsItem`] 一行一项,动机见 `files` 模块文档)。
 //!
-//! ⚠️ gpui-kit `tree` 的三条约定:
-//! - 行类型由行 id 前缀判断([`row_id`] / [`session_row`]),**不能**用
-//!   `TreeEntry::is_folder()`(它是「有没有子项」,空文件夹会被当成叶子);
-//! - `Tree` 是等高虚拟列表 + `size_full()` ⇒ 必须自己 `.h(可见行数 × TREE_ROW_HEIGHT)`;
-//! - 展开状态存在 [`SessionsState::expanded`](每次同步都会重建 `TreeItem`);
-//!   `set_items` 会 notify ⇒ 靠内容签名挡,签名用 `Option`。
-//!
-//! 行交互一律派发 action([`OpenSession`] / [`RemoveEntry`] / …):`SidebarItem::render`
-//! 只拿得到 `&mut App`。
+//! 行交互一律派发 action([`OpenSession`] / [`RemoveEntry`] / …):行元素只拿得到 `&mut App`。
+
+use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, CursorStyle, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, CursorStyle, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    Window, div, px,
 };
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, StyledExt as _,
-    h_flex,
-    list::ListItem,
-    tree::{TreeEntry, TreeEvent, TreeItem, TreeState, tree},
-    v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, menu::ContextMenuExt as _};
 
-use super::{TAB_HEIGHT, empty_state};
+use super::empty_state;
+use super::shared::{DragPreview, RowCache, row_content, row_shell};
 use crate::actions::{MoveEntry, NewFolder, NewSession, OpenSession, RemoveEntry};
 use crate::assets::IconName;
 use crate::terminal_panel::SessionRequest;
@@ -67,8 +53,16 @@ impl SessionEntry {
         }
     }
 
-    /// 这一项是文件夹吗（⚠️ 不能用 gpui-kit 的 `TreeItem::is_folder()` 代替：
-    /// 它按「有没有子项」判断，空文件夹会被当成叶子）。
+    /// 这一项的稳定 id：展开状态按它记，所以增删 / 移动都不用修正任何下标。
+    pub(crate) fn id(&self) -> u64 {
+        match self {
+            Self::Folder(folder) => folder.id,
+            Self::Session(record) => record.id,
+        }
+    }
+
+    /// 这一项是文件夹吗（⚠️ 与「有没有子项」是两回事：空文件夹也是文件夹，
+    /// 画不画 caret 由摊平时的 `SessionRow::has_children` 决定）。
     pub(crate) fn is_folder(&self) -> bool {
         matches!(self, Self::Folder(_))
     }
@@ -76,6 +70,8 @@ impl SessionEntry {
 
 /// 会话列表里的一个文件夹。
 pub(crate) struct SessionFolder {
+    /// 稳定 id（由 [`SessionsState::add_folder`] 分配）。
+    pub(crate) id: u64,
     /// 文件夹名（行标题）。
     pub(crate) name: SharedString,
     /// 子条目（文件夹 / 记录混排，顺序即显示顺序）。
@@ -83,8 +79,9 @@ pub(crate) struct SessionFolder {
 }
 
 impl SessionFolder {
-    pub(crate) fn new(name: SharedString) -> Self {
+    pub(crate) fn new(id: u64, name: SharedString) -> Self {
         Self {
+            id,
             name,
             children: Vec::new(),
         }
@@ -93,6 +90,8 @@ impl SessionFolder {
 
 /// 会话列表里的一条**会话记录**：只保存连接参数（只在内存里，重启不保留）。
 pub(crate) struct SessionRecord {
+    /// 稳定 id（由 [`SessionsState::add_record`] 分配；构造时先填 0）。
+    pub(crate) id: u64,
     /// 显示名（列表里的行标题，也是打开后标签页的名字）。
     pub(crate) name: SharedString,
     /// 登录用户名。
@@ -126,143 +125,133 @@ impl SessionRecord {
 
 // ---------------------------------------------------------------- 视图状态
 
-/// 会话树每行高度（算整棵树高度时也用它）。
-const TREE_ROW_HEIGHT: Pixels = px(28.);
+/// 摊平后的一行(交给侧边栏的虚拟列表)。
+#[derive(Clone)]
+struct SessionRow {
+    /// 从顶层开始的下标链:既定位条目,也是展开状态的键。
+    path: SessionPath,
+    label: SharedString,
+    /// 缩进层级(顶层是 0)。
+    depth: usize,
+    is_folder: bool,
+    /// 文件夹有子项时才画 caret(与「点了会不会展开」无关:空文件夹点了也没反应)。
+    has_children: bool,
+    /// 文件夹当前是否展开(会话行恒 `false`)。
+    expanded: bool,
+}
 
-/// 「会话」视图（记录树）的状态：记录模型 + 展开状态 + gpui-kit [`TreeState`]，
-/// 连同渲染都在这里（侧边栏只把这个实体摆进内容位）。
+/// 「会话」视图(记录树)的状态:记录模型 + 展开状态 + 摊平后的行清单。
+///
+/// **数据与交互状态都在这里**;渲染不在这里 —— [`SessionsState::sidebar_items`] 把
+/// 「要摆哪些项」交给侧边栏(它负责虚拟化)。
 pub(crate) struct SessionsState {
-    /// 「会话」列表的条目树（顺序 = 显示顺序）。
+    /// 「会话」列表的条目树(顺序 = 显示顺序)。
     entries: Vec<SessionEntry>,
-    /// 展开着的文件夹路径（同步时按它给 `TreeItem::expanded(..)` 赋值，
-    /// 也是[【算行数】](SessionsState::visible_rows)的依据）。
-    expanded: Vec<SessionPath>,
-    /// 「会话」树的交互状态（选中 / 滚动 / 键盘导航）。
-    tree: Entity<TreeState>,
-    /// 上一次同步树用的内容签名：变了才重建 items（`set_items` 会 notify）。
-    ///
-    /// ⚠️ `None` = 还没同步过（不能用空 `Vec` 表示，否则首次同步会被当成「没变」跳掉）。
-    tree_sig: Option<Vec<(SharedString, bool, usize)>>,
-    /// 树的展收事件订阅（RAII：不存着就会在 `new` 返回时解除）。
-    _tree_sub: Subscription,
+    /// 展开着的文件夹(按 [`SessionEntry::id`] 记 ⇒ 增删 / 移动都不用修正下标)。
+    expanded: Vec<u64>,
+    /// 最近点中的那一行(只做高亮)。
+    selected: Option<SessionPath>,
+    /// 摊平后的行清单缓存(见 [`RowCache`]:侧边栏每帧都会来要,不缓存就是每帧 `O(条目数)`)。
+    rows: RowCache<SessionRow>,
+    /// 下一个可用的条目 id(自增;文件夹与记录共用一个序列)。
+    next_id: u64,
 }
 
 impl SessionsState {
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        let tree = cx.new(|cx| TreeState::new(cx));
-        // 展收会改变行数（高度按行数算），所以事件要回传到本实体。
-        let sub = cx.subscribe(&tree, |state: &mut Self, _, event, cx| {
-            state.on_tree_event(event, cx);
-        });
+    pub(crate) fn new() -> Self {
         Self {
             entries: Vec::new(),
             expanded: Vec::new(),
-            tree,
-            tree_sig: None,
-            _tree_sub: sub,
+            selected: None,
+            rows: RowCache::default(),
+            next_id: 0,
         }
     }
 
-    /// 会话树当前显示多少行（展开的文件夹才计入子项）。
-    ///
-    /// ⚠️ `Tree` 是虚拟列表 + `size_full()`，必须自己算出行数（见 [`Render`] 实现）。
-    fn visible_rows(&self) -> usize {
+    /// 分配一个新的条目 id。
+    fn alloc_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    /// 摊平后的行清单(见 [`RowCache`];侧边栏每帧都会来要一次)。
+    fn rows(&mut self) -> Rc<Vec<SessionRow>> {
+        if let Some(rows) = self.rows.cached() {
+            return rows;
+        }
+        let mut out = Vec::new();
         let mut path = SessionPath::new();
-        Self::count_rows(&self.entries, &self.expanded, &mut path)
+        Self::flatten(&self.entries, &self.expanded, &mut path, &mut out);
+        self.rows.store(out)
     }
 
-    /// [`SessionsState::visible_rows`] 的递归实现（`path` 是当前递归位置）。
-    fn count_rows(entries: &[SessionEntry], expanded: &[SessionPath], path: &mut SessionPath) -> usize {
-        let mut rows = 0;
-        for (ix, entry) in entries.iter().enumerate() {
-            rows += 1;
-            path.push(ix);
-            if let SessionEntry::Folder(folder) = entry
-                && expanded.iter().any(|open| open == path)
-            {
-                rows += Self::count_rows(&folder.children, expanded, path);
-            }
-            path.pop();
-        }
-        rows
-    }
-
-    /// 把会话列表（文件夹 + 记录）同步进 `TreeState`（在 `AppRoot::render` 开头调用）。
-    ///
-    /// 两个要点：
-    /// 1. `TreeState::set_items` 会 `notify` ⇒ **不能每帧无条件调用**，这里靠内容签名
-    ///    （条目的「类型 + 名字 + 层级」全量序列，含被收起的子树）挡一下，否则自激成死循环；
-    /// 2. 每次同步都会**重建** `TreeItem`，所以展开状态不能存在树里：它存在
-    ///    [`SessionsState::expanded`]（用户展开 / 收起时由 [`SessionsState::on_tree_event`]
-    ///    更新），同步时按它给每个文件夹行 `.expanded(..)` 赋值。
-    ///
-    /// 列表内容是**记录**，与终端实例无关：所以这里不问 `AppRoot::terminals`，
-    /// 也不去同步「当前会话」的高亮——选中项就是用户点过的那一行，由树自己管。
-    pub(crate) fn sync_tree(&mut self, cx: &mut Context<Self>) {
-        let mut sig = Vec::new();
-        Self::collect_sig(&self.entries, 0, &mut sig);
-        if self.tree_sig.as_ref() == Some(&sig) {
-            return;
-        }
-        self.tree_sig = Some(sig);
-
-        let mut path = SessionPath::new();
-        let items = Self::build_items(&self.entries, &self.expanded, &mut path);
-        self.tree
-            .update(cx, |state, cx| state.set_items(items, cx));
-    }
-
-    /// 内容签名的一段（递归收集）：`(名字, 是不是文件夹, 层级)`。
-    ///
-    /// 带上层级是为了让「把条目挪进 / 挪出文件夹」这种结构变化也能被感知到
-    /// （光看名字序列，`[文件夹 A, 记录 x]` 与 `[文件夹 A[记录 x]]` 长得一样）。
-    fn collect_sig(
+    /// [`SessionsState::rows`] 的递归实现:按展开状态把条目树摊成一行行。
+    fn flatten(
         entries: &[SessionEntry],
-        depth: usize,
-        out: &mut Vec<(SharedString, bool, usize)>,
-    ) {
-        for entry in entries {
-            out.push((entry.label(), entry.is_folder(), depth));
-            if let SessionEntry::Folder(folder) = entry {
-                Self::collect_sig(&folder.children, depth + 1, out);
-            }
-        }
-    }
-
-    /// 按列表内容建树项（`path` 是当前递归位置，既是行 id 也是展开状态的键）。
-    fn build_items(
-        entries: &[SessionEntry],
-        expanded: &[SessionPath],
+        expanded: &[u64],
         path: &mut SessionPath,
-    ) -> Vec<TreeItem> {
-        let mut items = Vec::with_capacity(entries.len());
+        out: &mut Vec<SessionRow>,
+    ) {
         for (ix, entry) in entries.iter().enumerate() {
             path.push(ix);
-            let mut item = TreeItem::new(row_id(entry.is_folder(), path), entry.label());
-            if let SessionEntry::Folder(folder) = entry {
-                item = item.expanded(expanded.iter().any(|open| open == path));
-                item.children = Self::build_items(&folder.children, expanded, path);
+            let is_folder = entry.is_folder();
+            let is_open = is_folder && expanded.contains(&entry.id());
+            out.push(SessionRow {
+                path: path.clone(),
+                label: entry.label(),
+                depth: path.len() - 1,
+                is_folder,
+                has_children: matches!(entry, SessionEntry::Folder(folder) if !folder.children.is_empty()),
+                expanded: is_open,
+            });
+            // 展开的文件夹要接着摊它的子项。
+            if is_open
+                && let SessionEntry::Folder(folder) = entry
+            {
+                Self::flatten(&folder.children, expanded, path, out);
             }
             path.pop();
-            items.push(item);
         }
+    }
+
+    /// 按行号取一行(行数刚变过时外层可能还在渲染旧下标 ⇒ 取不到就返 `None`)。
+    fn row(&self, ix: usize) -> Option<SessionRow> {
+        self.rows.row(ix)
+    }
+
+    /// 交给侧边栏虚拟列表的全部内容项:每一行 + 列表末尾那条「拖到顶层」落点。
+    ///
+    /// 一条条目都没有时只摆空占位(见 [`empty_state`])。
+    pub(super) fn sidebar_items(&mut self, cx: &mut Context<Self>) -> Vec<SessionsItem> {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return vec![SessionsItem::Empty];
+        }
+        let state = cx.entity().downgrade();
+        let mut items: Vec<SessionsItem> = (0..rows.len())
+            .map(|ix| SessionsItem::Row {
+                state: state.clone(),
+                ix,
+            })
+            .collect();
+        // 末尾补一条**拖到顶层**的空白落点:条目拖出文件夹后要有地方可放,
+        // 顺带让最后一行下面留一点呼吸空间。
+        items.push(SessionsItem::TopLevelDrop);
         items
     }
 
-    /// 树事件：用户展开 / 收起文件夹 ⇒ 更新 [`SessionsState::expanded`] 并重绘。
-    ///
-    /// 树的高度是按行数算出来的，所以展收必须回传到本实体（不能等别的重绘顺手带上）。
-    fn on_tree_event(&mut self, event: &TreeEvent, cx: &mut Context<Self>) {
-        let (id, expand) = match event {
-            TreeEvent::Expanded(id) => (id, true),
-            TreeEvent::Collapsed(id) => (id, false),
-        };
-        let Some(path) = path_of_id(id.as_ref()) else {
-            return;
-        };
-        self.expanded.retain(|open| open != &path);
-        if expand {
-            self.expanded.push(path);
+    /// 点一行:文件夹展开 / 收起,会话行只记选中(开终端是**双击**,见行渲染)。
+    fn activate_row(&mut self, path: SessionPath, is_folder: bool, cx: &mut Context<Self>) {
+        self.selected = Some(path.clone());
+        if is_folder
+            && let Some(id) = self.entry(&path).map(SessionEntry::id)
+        {
+            let was_open = self.expanded.contains(&id);
+            self.expanded.retain(|open| *open != id);
+            if !was_open {
+                self.expanded.push(id);
+            }
+            self.rows.bump();
         }
         cx.notify();
     }
@@ -300,16 +289,18 @@ impl SessionsState {
     /// 记录是配置，用户双击它才会按它建终端。
     pub(crate) fn add_record(
         &mut self,
-        record: SessionRecord,
+        mut record: SessionRecord,
         folder: Option<SessionPath>,
         cx: &mut Context<Self>,
     ) {
+        record.id = self.alloc_id();
         let target = folder.unwrap_or_default();
         if let Some(children) = Self::children_mut(&mut self.entries, &target) {
             children.push(SessionEntry::Session(record));
             // 落进文件夹时顺手展开它，否则新条目看不见。
             self.expand_folder(&target);
         }
+        self.rows.bump();
         cx.notify();
     }
 
@@ -320,11 +311,13 @@ impl SessionsState {
         parent: Option<SessionPath>,
         cx: &mut Context<Self>,
     ) {
+        let id = self.alloc_id();
         let target = parent.unwrap_or_default();
         if let Some(children) = Self::children_mut(&mut self.entries, &target) {
-            children.push(SessionEntry::Folder(SessionFolder::new(name)));
+            children.push(SessionEntry::Folder(SessionFolder::new(id, name)));
             self.expand_folder(&target);
         }
+        self.rows.bump();
         cx.notify();
     }
 
@@ -338,18 +331,17 @@ impl SessionsState {
         if let Some(children) = Self::children_mut(&mut self.entries, parent)
             && *ix < children.len()
         {
+            // 展开标记按条目 id 记 ⇒ 删掉一项后不用担心下标串位（残留的 id 只会被忽略）。
             children.remove(*ix);
-            // 删掉一项后，同一父目录下排在它后面的条目下标都会前移一位，
-            // 展开标记（按路径存）要跟着挪，否则展开状态会串到邻居身上。
-            Self::shift_paths_after_removal(&mut self.expanded, path);
         }
+        self.rows.bump();
         cx.notify();
     }
 
     /// 把一个条目挪到 `into` 这个文件夹下（拖放放下）：`into` 为空 = 顶层。
     ///
-    /// 追加到目标目录末尾（不做行间插入——用户要的是「拖到别的文件夹下」）；
-    /// 同时把被拖动那棵子树的展开标记一起搬到新位置。
+    /// 追加到目标目录末尾（不做行间插入 —— 用户要的是「拖到别的文件夹下」）。
+    /// ⚠️ 展开状态按条目 id 记，所以搬动子树不用跟着搬任何标记。
     pub(crate) fn move_entry(&mut self, from: &[usize], into: &[usize], cx: &mut Context<Self>) {
         // 四种无效情况：没路径（顶层本身）、目标就是自己、目标是自己的子孙（会拖成环）、
         // 源条目已经不存在。全部先校验，之后再动模型（保证失败时什么都不改）。
@@ -361,36 +353,15 @@ impl SessionsState {
             return;
         }
 
-        // 跟随被拖动子树一起搬走的展开标记（存的是相对于 `from` 的相对路径）。
-        let mut carried: Vec<SessionPath> = Vec::new();
-        self.expanded.retain(|open| {
-            if open.starts_with(from) {
-                carried.push(open[from.len()..].to_vec());
-                false
-            } else {
-                true
-            }
-        });
-        // 取出来之后，同一父目录下排在后面的展开标记下标要前移一位。
-        Self::shift_paths_after_removal(&mut self.expanded, from);
-        // 目标路径也得按「取出后」的下标算（同一个目录里时会差一位）。
+        // 目标路径得按「取出源之后」的下标算（同一个目录里时会差一位）。
         let removed = Self::shift_path_after_removal(into.to_vec(), from);
-
         let entry = Self::take_entry(&mut self.entries, from).expect("刚刚确认过这条路径有条目");
-        let destination = Self::children_mut(&mut self.entries, &removed)
-            .expect("目标文件夹刚刚校验过");
-        let landed = destination.len();
+        let destination =
+            Self::children_mut(&mut self.entries, &removed).expect("目标文件夹刚刚校验过");
         destination.push(entry);
-
-        // 子树里原来展开的文件夹，在新位置继续展开；目标目录本身也展开，
-        // 否则刚拖进去的条目看不见。
-        for relative in carried {
-            let mut open = removed.clone();
-            open.push(landed);
-            open.extend(relative);
-            self.expanded.push(open);
-        }
+        // 目标目录本身也展开，否则刚拖进去的条目看不见。
         self.expand_folder(&removed);
+        self.rows.bump();
         cx.notify();
     }
 
@@ -406,10 +377,12 @@ impl SessionsState {
         path.is_empty() || matches!(self.entry(path), Some(SessionEntry::Folder(_)))
     }
 
-    /// 把一个文件夹标记为展开（新条目落进它时用；它同时决定树的行数）。
+    /// 把一个文件夹标记为展开（新条目落进它 / 拖进去时用）。
     fn expand_folder(&mut self, path: &[usize]) {
-        if !self.expanded.iter().any(|open| open == path) {
-            self.expanded.push(path.to_vec());
+        if let Some(id) = self.entry(path).map(SessionEntry::id)
+            && !self.expanded.contains(&id)
+        {
+            self.expanded.push(id);
         }
     }
 
@@ -422,14 +395,6 @@ impl SessionsState {
             path[parent.len()] -= 1;
         }
         path
-    }
-
-    /// [`SessionsState::shift_path_after_removal`] 的批量版（用于展开标记列表）。
-    fn shift_paths_after_removal(paths: &mut [SessionPath], removed: &[usize]) {
-        for path in paths {
-            let shifted = Self::shift_path_after_removal(std::mem::take(path), removed);
-            *path = shifted;
-        }
     }
 
     /// 按一条记录生成「开终端」的参数（双击记录行 / 右键「打开会话」）。
@@ -464,76 +429,63 @@ impl crate::AppRoot {
     }
 }
 
-/// 「会话」视图的**渲染**：gpui-kit 的 [`tree`]（文件夹形式的会话树）+ 下方一条
-/// 「拖到顶层」的空白落点。
+// ---------------------------------------------------------------- 侧边栏内容项
+
+/// 「会话」视图交给侧边栏虚拟列表的一项。
 ///
-/// 数据与交互状态都在本实体里（条目树 / 展开状态 / `Entity<TreeState>`），所以渲染也放在这里：
-/// 侧边栏只把这个实体摆进它的内容位（见 `sidebar_panel::SidebarContent`）。
-///
-/// 行的交互一律**派发 action**（[`OpenSession`] / [`RemoveEntry`] / …）而不是直接改状态：
-/// `ListItem` 的回调只拿得到 `&mut App`，而 action 走的是与应用其它入口完全相同的路径
-/// （见 [`crate::actions`]）。
-///
-/// ⚠️ `Tree` 内部是**虚拟列表 + `size_full()`**，而它是塞在 `Sidebar` 自己的虚拟列表里的
-/// 一个自动高度 item ⇒ 拿不到确定高度、高度会塌成 0。所以必须
-/// `.h(行数 × TREE_ROW_HEIGHT)` 手动给高度（`Tree` 的 `refine_style` 在链尾，能盖住
-/// `size_full`）；行数由 [`SessionsState::visible_rows`] 按展开状态算。
-impl Render for SessionsState {
-    /// `_cx`:本实现只画自己的状态(占位 + 树),主题色都在内部闭包自己那份 `cx` 上取。
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.visible_rows();
-        // 一条条目都没有:树零行什么也不画,换成空占位(见 [`empty_state`])。
-        if rows == 0 {
-            return empty_state(
+/// ⚠️ **一行一项**:侧边栏内容区是它自己的虚拟列表,只渲染可见区间 + overdraw;
+/// 再嵌一个内层虚拟列表的话,内层拿到的可用高度会等于整棵树 ⇒ 虚拟化失效(见模块文档)。
+#[derive(Clone)]
+pub(super) enum SessionsItem {
+    /// 一条会话 / 文件夹(`ix` 是行清单下标,渲染时按需读)。
+    Row {
+        state: WeakEntity<SessionsState>,
+        ix: usize,
+    },
+    /// 列表末尾那条「拖到顶层」的空白落点(条目拖出文件夹后要有地方可放)。
+    TopLevelDrop,
+    /// 一条条目都没有:空占位。
+    Empty,
+}
+
+impl SessionsItem {
+    /// 画这一项。`cx` 是侧边栏的 `&mut App`(读行数据 / 派发 action 都在这里)。
+    pub(super) fn render(self, cx: &mut App) -> AnyElement {
+        match self {
+            Self::Row { state, ix } => {
+                // 行数刚变过时外层可能还在渲染旧下标 ⇒ 取不到就摆个空元素。
+                let Ok(Some(row)) = state.read_with(&*cx, |sessions, _| sessions.row(ix)) else {
+                    return div().w_full().into_any_element();
+                };
+                let selected = state
+                    .read_with(&*cx, |sessions, _| {
+                        sessions.selected.as_deref() == Some(row.path.as_slice())
+                    })
+                    .unwrap_or(false);
+                div()
+                    .w_full()
+                    .child(session_row_element(ix, &row, selected, &state, cx))
+                    .into_any_element()
+            }
+            // 「拖到顶层」的落点:纯空白,只接拖放。
+            Self::TopLevelDrop => div()
+                .id("session-tree-top-level-drop")
+                .w_full()
+                .h(px(16.))
+                .drag_over::<DragSessionEntry>(|style, _, _, cx| {
+                    style.bg(cx.theme().tokens.accent)
+                })
+                .on_drop(move |drag: &DragSessionEntry, window, cx| {
+                    drop_into(drag.path.clone(), None, window, cx)
+                })
+                .into_any_element(),
+            Self::Empty => empty_state(
                 IconName::Inbox,
                 "还没有会话",
                 Some("左下角 + 新建文件夹、右下角 + 新建会话；双击会话条目打开终端"),
             )
-            .into_any_element();
+            .into_any_element(),
         }
-
-        // 树 + 下方一条**拖到顶层**的空白落点：条目拖出文件夹后要有地方可放
-        // （见 [`drop_into`]）。它同时也让最后一行下面留出一点呼吸空间。
-        v_flex()
-            .w_full()
-            .child(
-                tree(&self.tree, move |ix, entry, selected, _window, cx| {
-                    session_tree_row(ix, entry, selected, cx)
-                })
-                .h(TREE_ROW_HEIGHT * rows as f32)
-                // 右键菜单由树统一挂（文件夹行 / 会话行各一套）：
-                // 「打开会话」按记录开终端，「删除…」只删列表条目，都不会动已开的终端。
-                .context_menu(move |_ix, entry, menu, _, _| match session_row(entry) {
-                    Some(SessionRow::Session(path)) => menu
-                        .menu("打开会话", Box::new(OpenSession { path: path.clone() }))
-                        .separator()
-                        .menu("删除会话", Box::new(RemoveEntry { path })),
-                    Some(SessionRow::Folder(path)) => menu
-                        .menu(
-                            "在这里新建会话",
-                            Box::new(NewSession {
-                                folder: Some(path.clone()),
-                            }),
-                        )
-                        .menu("新建子文件夹", Box::new(NewFolder { parent: Some(path.clone()) }))
-                        .separator()
-                        .menu("删除文件夹", Box::new(RemoveEntry { path })),
-                    None => menu,
-                }),
-            )
-            .child(
-                div()
-                    .id("session-tree-top-level-drop")
-                    .w_full()
-                    .h(px(16.))
-                    .drag_over::<DragSessionEntry>(|style, _, _, cx| {
-                        style.bg(cx.theme().tokens.accent)
-                    })
-                    .on_drop(move |drag: &DragSessionEntry, window, cx| {
-                        drop_into(drag.path.clone(), None, window, cx)
-                    }),
-            )
-            .into_any_element()
     }
 }
 
@@ -546,79 +498,17 @@ struct DragSessionEntry {
     label: SharedString,
 }
 
-/// 拖会话条目时跟着鼠标的小卡片（形状同侧边栏标签拖拽的预览）。
-struct SessionDragPreview {
-    label: SharedString,
-}
-
-impl Render for SessionDragPreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .h(TAB_HEIGHT)
-            .flex()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().tokens.accent)
-            .text_color(cx.theme().accent_foreground)
-            .child(self.label.clone())
-    }
-}
-
 /// 放下：把条目挪进 `into` 这个文件夹（`None` = 顶层），动作交给
 /// [`MoveEntry`](crate::actions::MoveEntry) 统一处理（合法性校验也在那边）。
 fn drop_into(from: SessionPath, into: Option<SessionPath>, window: &mut Window, cx: &mut App) {
     window.dispatch_action(Box::new(MoveEntry { from, into }), cx);
 }
 
-/// 会话树里一行指向什么（由行 id 解出，见 [`row_id`]）。
-///
-/// ⚠️ 不能用 `TreeEntry::is_folder()` 判断类型：gpui-kit 的 `TreeItem::is_folder()`
-/// 是「**有没有子项**」的意思，空文件夹会被当成叶子（于是画成会话行、双击还想开终端）。
-/// 所以类型编码在行 id 的前缀里。
-#[derive(Clone, PartialEq, Eq)]
-enum SessionRow {
-    Folder(SessionPath),
-    Session(SessionPath),
-}
-
-/// 行 id：`folder-0-2` = 顶层第 0 个文件夹里的第 2 个条目；`session-1` = 顶层第 1 个条目。
-///
-/// 前缀区分类型（见 [`SessionRow`] 里的说明），后面用 `-` 串起路径下标——
-/// 与 `SessionsState` 的模型路径（[`SessionPath`]）一一对应，增删 / 嵌套都不会错位。
-fn row_id(is_folder: bool, path: &[usize]) -> SharedString {
-    let mut id = String::from(if is_folder { "folder" } else { "session" });
-    for ix in path {
-        id.push('-');
-        id.push_str(&ix.to_string());
-    }
-    id.into()
-}
-
-/// 从行 id 解出类型与路径（`folder-0-2` / `session-1`）。
-fn path_of_id(id: &str) -> Option<SessionPath> {
-    let (_, rest) = id.split_once('-')?;
-    rest.split('-').map(|step| step.parse().ok()).collect()
-}
-
-/// 行 id → [`SessionRow`]（前缀无法识别时 `None`，此时按「不可交互」处理）。
-fn session_row(entry: &TreeEntry) -> Option<SessionRow> {
-    let id = entry.item().id.as_ref();
-    let (kind, _) = id.split_once('-')?;
-    let path = path_of_id(id)?;
-    match kind {
-        "folder" => Some(SessionRow::Folder(path)),
-        "session" => Some(SessionRow::Session(path)),
-        _ => None,
-    }
-}
-
 /// 会话树的一行（文件夹行 / 会话行）。
 ///
 /// **同一目录下的文件夹与会话是同级**：两行都从 `pl(层级缩进)` 开始，会话行不再额外
 /// 缩进一个 caret 的宽度（否则会话看上去像比同目录的文件夹低一级）。
-/// - **文件夹行**：子项非空时给 caret（展开 / 收起由 `TreeState`
-///   自己的行点击处理），否则只画文件夹图标（空文件夹点了也不会有反应）；
+/// - **文件夹行**：有子项时画 caret（展开 / 收起由行点击处理）；
 /// - **会话行**：**单击只选中，双击才建终端**
 ///   （`OpenSession` → [`crate::AppRoot::open_session_record`]）
 ///   ——列表是记录，终端是实例，两者刻意分开。
@@ -626,122 +516,97 @@ fn session_row(entry: &TreeEntry) -> Option<SessionRow> {
 /// **两行都可以拖动**（载荷 [`DragSessionEntry`]）：拖到文件夹行上 = 放进那个文件夹，
 /// 拖到会话行上 = 放进它所在的那个目录，拖到列表下方的空白条 = 提到顶层；
 /// 落点合法性（不能拖进自己 / 自己的子孙）由 [`SessionsState::move_entry`] 把关。
-///
-/// 两行的悬停 / 选中样式由 gpui-kit 的 `ListItem` 统一画（选中底色 = 主题 `accent`，
-/// 见 [`crate::config::change_theme`] 里关掉 `list.active_highlight` 的原因）。
-fn session_tree_row(ix: usize, entry: &TreeEntry, selected: bool, cx: &mut App) -> ListItem {
-    let (radius, accent_fg) = {
-        let theme = cx.theme();
-        (theme.radius, theme.sidebar_accent_foreground)
+fn session_row_element(
+    ix: usize,
+    row: &SessionRow,
+    selected: bool,
+    state: &WeakEntity<SessionsState>,
+    cx: &mut App,
+) -> AnyElement {
+    let label = row.label.clone();
+    let payload = DragSessionEntry {
+        path: row.path.clone(),
+        label: label.clone(),
     };
-    let label = entry.item().label.clone();
-    let depth = entry.depth() as f32;
-    // 缩进：每层 16px，顶层留 8px 内边距；文件夹与会话共用。
-    let indent = px(8. + depth * 16.);
-    let row = ListItem::new(ix)
-        .h(TREE_ROW_HEIGHT)
-        .pr_2()
-        .rounded(radius)
-        .text_sm()
-        .overflow_x_hidden()
+    // 拖到这一行上 = 放进它（文件夹）/ 放进它所在的目录（会话行：同级末尾）。
+    let drop_path = if row.is_folder {
+        row.path.clone()
+    } else {
+        row.path[..row.path.len() - 1].to_vec()
+    };
+    // 两个闭包各持一份路径（`move` 只能移动一次）。
+    let click_path = row.path.clone();
+    let menu_path = row.path.clone();
+    let is_folder = row.is_folder;
+    let icon = match (row.is_folder, row.expanded) {
+        (true, true) => IconName::FolderOpen,
+        (true, false) => IconName::Folder,
+        // 会话记录目前只有 SSH 一种（见 `dialog/connection.rs`）。
+        (false, _) => IconName::Globe,
+    };
+    // caret 只在**有子项的**文件夹上画（空文件夹点了也不会有反应）。
+    let caret = (row.is_folder && row.has_children).then(|| {
+        if row.expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        }
+    });
+
+    row_shell(ix, row.depth, selected, cx)
         .cursor(CursorStyle::PointingHand)
-        .when(selected, |this| this.font_medium().text_color(accent_fg));
-
-    match session_row(entry) {
-        // 文件夹行：拖到它上面 = 放进它里面。
-        Some(SessionRow::Folder(path)) => {
-            let payload = DragSessionEntry {
-                path: path.clone(),
-                label: label.clone(),
-            };
-            let drop_path = path.clone();
-            row.pl(indent)
-                .on_drag(payload, move |drag: &DragSessionEntry, _, _, cx| {
-                    cx.new(|_| SessionDragPreview {
-                        label: drag.label.clone(),
-                    })
-                })
-                .drag_over::<DragSessionEntry>(|style, _, _, cx| {
-                    style.bg(cx.theme().tokens.accent)
-                })
-                .on_drop(move |drag: &DragSessionEntry, window, cx| {
-                    drop_into(drag.path.clone(), Some(drop_path.clone()), window, cx)
-                })
-                .child(
-                    h_flex()
-                        .gap_x_2()
-                        .items_center()
-                        // caret 只在「真的有子项」时画（`is_folder()` = 有没有子项）。
-                        .when(entry.is_folder(), |this| {
-                            this.child(Icon::new(if entry.is_expanded() {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size_3())
-                        })
-                        .child(Icon::new(if entry.is_expanded() {
-                            IconName::FolderOpen
-                        } else {
-                            IconName::Folder
-                        })
-                        .size_3())
-                        .child(ellipsis_label(label)),
+        .on_drag(payload, |drag: &DragSessionEntry, _, _, cx| {
+            cx.new(|_| DragPreview {
+                label: drag.label.clone(),
+            })
+        })
+        .drag_over::<DragSessionEntry>(|style, _, _, cx| style.bg(cx.theme().tokens.accent))
+        .on_drop(move |drag: &DragSessionEntry, window, cx| {
+            drop_into(drag.path.clone(), Some(drop_path.clone()), window, cx)
+        })
+        .child(row_content(caret, icon, label))
+        // 行点击：**双击会话行**才按记录开终端（列表是记录，终端是实例）；
+        // 其余情况（单击 / 文件夹行双击）= 选中，文件夹顺带展开 / 收起。
+        .on_click({
+            let state = state.clone();
+            move |event, window, cx| {
+                if event.click_count() >= 2 && !is_folder {
+                    window.dispatch_action(Box::new(OpenSession { path: click_path.clone() }), cx);
+                    return;
+                }
+                let _ = state.update(cx, |sessions, cx| {
+                    sessions.activate_row(click_path.clone(), is_folder, cx)
+                });
+            }
+        })
+        // 右键菜单（⚠️ 必须在链尾：它会把元素包进一个相对定位的包装元素）。
+        // 文件夹行 / 会话行各一套；「删除…」只删列表条目，不会动已开的终端。
+        .context_menu(move |menu, _window, _cx| {
+            if is_folder {
+                menu.menu(
+                    "在这里新建会话",
+                    Box::new(NewSession {
+                        folder: Some(menu_path.clone()),
+                    }),
                 )
-        }
-        // 会话行：拖到它上面 = 放进**它所在的目录**（同级末尾），
-        // 这样「拖到另一个文件夹里的某个会话上」也会进那个文件夹。
-        Some(SessionRow::Session(path)) => {
-            let payload = DragSessionEntry {
-                path: path.clone(),
-                label: label.clone(),
-            };
-            let drop_path = path.clone();
-            let open_path = path;
-            row
-                // 与同目录的文件夹行同一缩进（同级），不再多缩一个 caret 宽度。
-                .pl(indent)
-                // 双击（`click_count >= 2`）才按记录开终端；单击留给树自己选中。
-                .on_click(move |event, window, cx| {
-                    if event.click_count() < 2 {
-                        return;
-                    }
-                    window.dispatch_action(Box::new(OpenSession { path: open_path.clone() }), cx);
-                })
-                .on_drag(payload, move |drag: &DragSessionEntry, _, _, cx| {
-                    cx.new(|_| SessionDragPreview {
-                        label: drag.label.clone(),
-                    })
-                })
-                .drag_over::<DragSessionEntry>(|style, _, _, cx| {
-                    style.bg(cx.theme().tokens.accent)
-                })
-                .on_drop(move |drag: &DragSessionEntry, window, cx| {
-                    // 目标的父目录（`session-0` 的父目录就是顶层）。
-                    let parent = drop_path[..drop_path.len() - 1].to_vec();
-                    drop_into(drag.path.clone(), Some(parent), window, cx)
-                })
-                .child(
-                    h_flex()
-                        .gap_x_2()
-                        .items_center()
-                        // 会话记录目前只有 SSH 一种（见 `dialog/connection.rs`）。
-                        .child(Icon::new(IconName::Globe).size_3())
-                        .child(ellipsis_label(label)),
+                .menu(
+                    "新建子文件夹",
+                    Box::new(NewFolder {
+                        parent: Some(menu_path.clone()),
+                    }),
                 )
-        }
-        // id 不是我们的两种前缀：不该出现，退化成一行纯文字（不挂任何交互）。
-        None => row.pl(indent).child(label),
-    }
-}
-
-/// 行标题：单行省略号（树不换行，窄侧边栏里长名字要被截断）。
-fn ellipsis_label(label: SharedString) -> AnyElement {
-    div()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(label)
+                .separator()
+                .menu("删除文件夹", Box::new(RemoveEntry { path: menu_path.clone() }))
+            } else {
+                menu.menu(
+                    "打开会话",
+                    Box::new(OpenSession {
+                        path: menu_path.clone(),
+                    }),
+                )
+                .separator()
+                .menu("删除会话", Box::new(RemoveEntry { path: menu_path.clone() }))
+            }
+        })
         .into_any_element()
 }

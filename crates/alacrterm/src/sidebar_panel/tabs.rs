@@ -11,11 +11,12 @@
 
 use gpui::{
     AnyElement, AppContext as _, Context, CursorStyle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Pixels, StatefulInteractiveElement as _, Styled as _,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 
+use super::shared::DragPreview;
 use super::{Sidebar, SidebarSide, SidebarTabs, SidebarView, TAB_HEIGHT};
 
 /// 标签之间的缝:主要间距来自各自的左右内边距。
@@ -29,25 +30,6 @@ pub(super) struct DragSidebarTab {
     pub(super) side: SidebarSide,
     /// 在来源侧标签条里的下标（按下标取标签，避免同名视图重定位）。
     pub(super) index: usize,
-}
-
-/// 拖标签时跟着鼠标的小卡片。
-struct TabDragPreview {
-    label: SharedString,
-}
-
-impl Render for TabDragPreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .h(TAB_HEIGHT)
-            .flex()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().tokens.accent)
-            .text_color(cx.theme().accent_foreground)
-            .child(self.label.clone())
-    }
 }
 
 impl Sidebar {
@@ -132,7 +114,7 @@ fn tab_element(
         })
         .on_click(cx.listener(move |this, _, _, cx| this.select_tab(index, cx)))
         .on_drag(DragSidebarTab { side, index }, move |_, _, _, cx| {
-            cx.new(|_| TabDragPreview {
+            cx.new(|_| DragPreview {
                 label: view.label().into(),
             })
         })

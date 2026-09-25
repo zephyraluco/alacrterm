@@ -1,43 +1,33 @@
 //! 「文件管理器」视图:远端会话的目录树(走 SFTP,见 `ssh::SshFs`)。
 //!
-//! **只供远端(SSH)会话使用**:本地目录用系统自己的文件管理器打开就好,应用里再摆一份没有
-//! 意义,所以本地终端下这个视图连同标签一起不摆(见 [`super::SidebarView::visible_with`])。
-//! 数据源是当前会话的 SFTP 句柄(每帧由 [`crate::AppRoot`] 同步进来),起始根目录 = 远端家目录;
-//! 远端 shell 的 `cd` 拿不到(要改远端 prompt 才行),所以根目录**不跟随终端**,由用户自己跳。
+//! **只供远端(SSH)会话使用**(本地目录用系统的文件管理器就好):数据源是当前会话的 SFTP
+//! 句柄(每帧由 [`crate::AppRoot`] 同步进来),起始根目录 = 远端家目录。远端 shell 的 `cd`
+//! 拿不到,所以根目录**不跟随终端**,由顶部那条路径输入框跳过去([`FilesState::navigate_to`];
+//! 根目录变了会写回输入框,[`FilesState::sync_path_input`])。目录**按需异步加载**一层,
+//! 排序由 `ssh::SshFs` 负责(目录在前);视图**只读**。
 //!
-//! 顶部是一条**路径输入框**,与「显示中的根目录」双向对齐:改内容就尝试跳过去(只认确实是
-//! 目录的路径,[`FilesState::navigate_to`]);根目录变了则写回输入框
-//! ([`FilesState::sync_path_input`])。没有目录可显示时连这条也不摆,只剩空占位。
-//!
-//! **目录按需异步加载**:展开未读过的目录时后台读一层再回填,排序由 `ssh::SshFs` 负责
-//! (目录在前、名字不区分大小写)。视图**只读**(行点击只展开 / 收起)。
-//!
-//! ⚠️ gpui-kit `tree` 的约定(与 [`sessions`](super::sessions) 同一批):
-//! - 行类型编码在行 id 前缀里(`dir-0-2` / `file-1` / `loading-0-2`),不用 `TreeEntry::is_folder()`;
-//! - `Tree` 是等高虚拟列表 + `size_full()` ⇒ 必须自己 `.h(可见行数 × TREE_ROW_HEIGHT)`;
-//! - **未加载的目录要挂占位子项**(「加载中…」),否则没 caret、点了也不展开;
-//! - 展开状态自己存(`FilesState::expanded`);`set_items` 会 notify ⇒ 靠签名挡。
+//! ⚠️ **虚拟化靠外层侧边栏的列表**:把树**摊平成一行一项**([`FilesItem`])交给侧边栏自己的
+//! 虚拟列表 —— 嵌套第二个虚拟列表会因为内层拿到的可用高度等于整棵树而失效(机制见
+//! `docs/terminal-architecture.md` §3.2)。摊平、行骨架与缓存都在 [`super::shared`]。
+
+use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Context, CursorStyle, Entity, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Pixels, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, StyledExt as _,
-    h_flex,
+    ActiveTheme as _, h_flex,
     input::{Input, InputEvent, InputState},
     list::ListItem,
-    tree::{TreeEntry, TreeEvent, TreeItem, TreeState, tree},
     v_flex,
 };
 use terminal::{RemoteEntry, SshFs};
 
 use super::empty_state;
+use super::shared::{RowCache, ellipsis_label, row_content, row_shell};
 use crate::assets::IconName;
-
-/// 文件树每行高度:`Tree` 内部的虚拟列表是**等高**的,所以这个值也得用来算整棵树的高度。
-const TREE_ROW_HEIGHT: Pixels = px(28.);
 
 /// 顶部路径输入框那一行的高度(输入框 @ `Size::Medium` = 32px,上下各留 2px)。
 ///
@@ -82,18 +72,42 @@ fn nodes_from(parent: &str, entries: Vec<RemoteEntry>) -> Vec<FileNode> {
 
 /// 后台读取的结果回填到哪里。
 enum LoadTarget {
-    /// 换根目录(首次连上 / 输入框跳转)。
+    /// 重读**当前**根目录(会话切换 / 切回已知目录):根路径不变。
     Root,
+    /// 输入框跳转:列表读成功后再把根目录切成它 —— 读失败就别动,否则面板会闪成空的。
+    Navigate(String),
     /// 某个刚被展开的目录。
     Dir(FilePath),
 }
 
 // ---------------------------------------------------------------- 视图状态
 
-/// 「文件管理器」视图的状态:远端句柄 + 根目录 + 节点树 + 展开状态 + gpui-kit [`TreeState`]。
+/// 摊平后的一行(交给侧边栏的虚拟列表)。
+#[derive(Clone)]
+struct FileRow {
+    /// 从根目录开始的下标链:既定位节点,也是展开状态的键。
+    path: FilePath,
+    label: SharedString,
+    /// 缩进层级(根目录下的条目是 0)。
+    depth: usize,
+    kind: RowKind,
+}
+
+/// 这一行是什么(决定图标与能不能展开)。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    /// 目录;`expanded` = 当前是否展开。
+    Dir { expanded: bool },
+    File,
+    /// 未加载目录的占位行(「加载中…」)。
+    Loading,
+}
+
+/// 「文件管理器」视图的状态:远端句柄 + 根目录 + 节点树 + 展开状态 + 摊平后的行清单。
 ///
-/// **数据、树的交互状态与渲染都在这里**:[`crate::AppRoot`] 建好实体后交给两条侧边栏
+/// **数据与交互状态都在这里**:[`crate::AppRoot`] 建好实体后交给两条侧边栏
 /// (共用同一个),视图只在远端会话下摆出来;换会话走 [`FilesState::sync`]。
+/// 渲染不在这里 —— [`FilesState::sidebar_items`] 把「要摆哪些项」交给侧边栏(它负责虚拟化)。
 pub(crate) struct FilesState {
     /// 当前会话的 SFTP 句柄;`None` = 没有远端会话(本地会话 / 没有会话)。
     fs: Option<SshFs>,
@@ -103,10 +117,12 @@ pub(crate) struct FilesState {
     entries: Option<Vec<FileNode>>,
     /// 读目录失败的原因(连不上 SFTP / 路径不存在等),显示在空占位上。
     error: Option<String>,
-    /// 展开着的目录(下标链;同步时给 `TreeItem::expanded(..)` 赋值,也是算行数的依据)。
+    /// 展开着的目录(下标链)。
     expanded: Vec<FilePath>,
     /// 正在后台读取的目录(同一个目录不重复发起)。
     loading: Vec<String>,
+    /// 最近点中的那一行(只做高亮;文件树是只读视图)。
+    selected: Option<FilePath>,
     /// 顶部路径输入框:显示 [`FilesState::root`],改内容就跳过去。
     path_input: Entity<InputState>,
     /// 路径还没写回输入框(根目录可能是后台异步问回来的,那时没有窗口 ⇒ 见 [`FilesState::sync`])。
@@ -116,24 +132,14 @@ pub(crate) struct FilesState {
     nav_seq: u64,
     /// 根目录代次:换目录时 +1,在途的读取对不上就丢掉。
     generation: u64,
-    /// 文件树的交互状态(选中 / 滚动)。
-    tree: Entity<TreeState>,
-    /// 上一次同步用的签名(`根目录 + (名字, 是否目录, 层级)` 全量序列):变了才重建 items。
-    /// ⚠️ `None` = 还没同步过(用空 `Vec` 表示会让首次同步被当成「没变」跳掉)。
-    sig: Option<(Option<String>, Vec<(SharedString, bool, usize)>)>,
-    /// 树的展收事件订阅(RAII:不存着就会在 `new` 返回时解除)。
-    _tree_sub: Subscription,
-    /// 路径输入框的事件订阅(同上)。
+    /// 摊平后的行清单缓存(见 [`RowCache`]:侧边栏每帧都会来要,不缓存就是每帧 `O(总节点数)`)。
+    rows: RowCache<FileRow>,
+    /// 路径输入框的事件订阅(RAII:不存着就会在 `new` 返回时解除)。
     _input_sub: Subscription,
 }
 
 impl FilesState {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let tree = cx.new(|cx| TreeState::new(cx));
-        // 展收会改行数(高度按行数算),且展开未读过的目录要发起后台读取 ⇒ 事件回传本实体。
-        let sub = cx.subscribe(&tree, |state: &mut Self, _, event, cx| {
-            state.on_tree_event(event, cx);
-        });
         let path_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入远端目录路径"));
         // 用 `subscribe_in`:处理时要 `&mut Window`(写回输入框内容)。
         let input_sub = cx.subscribe_in(
@@ -148,13 +154,12 @@ impl FilesState {
             error: None,
             expanded: Vec::new(),
             loading: Vec::new(),
+            selected: None,
             path_input,
             path_input_pending: false,
             nav_seq: 0,
             generation: 0,
-            tree,
-            sig: None,
-            _tree_sub: sub,
+            rows: RowCache::default(),
             _input_sub: input_sub,
         }
     }
@@ -215,6 +220,7 @@ impl FilesState {
         let seq = self.nav_seq;
         // 「是不是目录」要问远端 ⇒ 先发请求,回来再决定跳不跳。
         let task = cx.background_spawn({
+            let fs = fs.clone();
             let text = text.clone();
             async move { fs.is_dir(text).await }
         });
@@ -230,8 +236,8 @@ impl FilesState {
                     if this.generation != generation || this.nav_seq != seq {
                         return;
                     }
-                    this.root = Some(text);
-                    this.reset_no_window(cx);
+                    this.generation += 1;
+                    this.spawn_load(fs, text.clone(), LoadTarget::Navigate(text), cx);
                 });
             }
         })
@@ -271,7 +277,9 @@ impl FilesState {
         self.error = None;
         self.expanded.clear();
         self.loading.clear();
-        self.sig = None;
+        self.selected = None;
+        // 树 / 展开状态都清了 ⇒ 行清单重建。
+        self.rows.bump();
         match (self.fs.clone(), self.root.clone()) {
             // 已知根目录:直接读它。
             (Some(fs), Some(root)) => self.spawn_load(fs, root, LoadTarget::Root, cx),
@@ -280,8 +288,6 @@ impl FilesState {
             // 没有远端会话:清空即可(视图此时也不会摆出来)。
             (None, _) => {}
         }
-        // 立刻把(暂时为空的)树推给 `TreeState`,免得旧目录的行残留到新目录读回来为止。
-        self.sync_tree(cx);
         cx.notify();
     }
 
@@ -337,8 +343,8 @@ impl FilesState {
                         if this.generation != generation {
                             return;
                         }
-                        // 内容变了 ⇒ 作废签名,让 `sync_tree` 重建。
-                        this.sig = None;
+                        // 内容变了 ⇒ 行清单要重建。
+                        this.rows.bump();
                         let entries = match result {
                             Ok(entries) => {
                                 this.error = None;
@@ -351,7 +357,15 @@ impl FilesState {
                             }
                         };
                         match &target {
+                            // 重读当前根目录:根路径不变。
                             LoadTarget::Root => this.entries = Some(entries),
+                            // 跳转成功:到这里才换根目录(失败时旧树原样留着)。
+                            LoadTarget::Navigate(root) => {
+                                this.root = Some(root.clone());
+                                this.path_input_pending = true;
+                                this.expanded.clear();
+                                this.entries = Some(entries);
+                            }
                             LoadTarget::Dir(path) => {
                                 if let Some(entries_root) = this.entries.as_mut()
                                     && let Some(node) = Self::node_mut(entries_root, path)
@@ -360,7 +374,6 @@ impl FilesState {
                                 }
                             }
                         }
-                        this.sync_tree(cx);
                         cx.notify();
                     });
                 }
@@ -369,122 +382,124 @@ impl FilesState {
         .detach();
     }
 
-    /// 把节点树推给 `TreeState`(内容没变就跳过)。
-    fn sync_tree(&mut self, cx: &mut Context<Self>) {
-        let nodes = self.entries.as_deref().unwrap_or(&[]);
-        let mut sig = Vec::new();
-        Self::collect_sig(nodes, 0, &mut sig);
-        let sig = (self.root.clone(), sig);
-        if self.sig.as_ref() == Some(&sig) {
-            return;
+    /// 摊平后的行清单(见 [`RowCache`];侧边栏每帧都会来要一次)。
+    fn rows(&mut self) -> Rc<Vec<FileRow>> {
+        if let Some(rows) = self.rows.cached() {
+            return rows;
         }
-        self.sig = Some(sig);
-
+        let mut out = Vec::new();
         let mut path = FilePath::new();
-        let items = Self::build_items(nodes, &self.expanded, &mut path);
-        self.tree
-            .update(cx, |state, cx| state.set_items(items, cx));
-    }
-
-    /// 内容签名的一段(递归):`(名字, 是不是目录, 层级)`。
-    ///
-    /// 带层级是为了感知「文件挪进 / 挪出子目录」(光看名字序列这两种长得一样)。
-    fn collect_sig(
-        nodes: &[FileNode],
-        depth: usize,
-        out: &mut Vec<(SharedString, bool, usize)>,
-    ) {
-        for node in nodes {
-            out.push((node.name.clone(), node.is_dir, depth));
-            if let Some(children) = &node.children {
-                Self::collect_sig(children, depth + 1, out);
-            }
-        }
-    }
-
-    /// 按节点树建树项(`path` 是当前递归位置:既是行 id,也是展开状态的键)。
-    fn build_items(nodes: &[FileNode], expanded: &[FilePath], path: &mut FilePath) -> Vec<TreeItem> {
-        let mut items = Vec::with_capacity(nodes.len());
-        for (ix, node) in nodes.iter().enumerate() {
-            path.push(ix);
-            let mut item = TreeItem::new(row_id(node.is_dir, path), node.name.clone())
-                .expanded(expanded.contains(path));
-            if node.is_dir {
-                item.children = match &node.children {
-                    Some(children) => Self::build_items(children, expanded, path),
-                    // 还没读过:挂一个占位子项。**必须挂** —— 没有子项的行既没 caret、
-                    // 点了也不展开(`TreeState::toggle_expand` 对非 folder 直接 return)。
-                    None => vec![TreeItem::new(placeholder_id(path), "加载中…")],
-                };
-            }
-            path.pop();
-            items.push(item);
-        }
-        items
-    }
-
-    /// 树事件:展开 / 收起一行 ⇒ 更新 [`FilesState::expanded`],需要时后台读该目录。
-    ///
-    /// 树的高度按行数算,所以展收必须回传本实体(不能等别的重绘顺手带上)。
-    fn on_tree_event(&mut self, event: &TreeEvent, cx: &mut Context<Self>) {
-        let (id, expand) = match event {
-            TreeEvent::Expanded(id) => (id, true),
-            TreeEvent::Collapsed(id) => (id, false),
-        };
-        let Some(path) = path_of_id(id.as_ref()) else {
-            return;
-        };
-        self.expanded.retain(|open| open != &path);
-        if expand {
-            self.expanded.push(path.clone());
-            // 目录还没读过 ⇒ 读它(读完自己会 `sync_tree`;展开状态先记着,回来时按它赋值)。
-            let pending = self
-                .node(&path)
-                .filter(|node| node.is_dir && node.children.is_none())
-                .map(|node| node.path.clone());
-            if let (Some(dir), Some(fs)) = (pending, self.fs.clone()) {
-                self.spawn_load(fs, dir, LoadTarget::Dir(path), cx);
-            }
-        }
-        cx.notify();
-    }
-
-    /// 树当前显示多少行(展开的目录才计入子项)。
-    ///
-    /// ⚠️ `Tree` 是虚拟列表 + `size_full()`,塞在 `Sidebar` 自己的虚拟列表里拿不到确定高度
-    /// ⇒ 必须自己算出行数并 `.h(行数 × TREE_ROW_HEIGHT)`;算法要与
-    /// [`FilesState::build_items`] + `TreeState::add_entry` 的展平规则**逐条一致**(含占位行)。
-    fn visible_rows(&self) -> usize {
-        let mut rows = 0;
-        let mut path = FilePath::new();
-        Self::count_rows(
+        Self::flatten(
             self.entries.as_deref().unwrap_or(&[]),
             &self.expanded,
             &mut path,
-            &mut rows,
+            &mut out,
         );
-        rows
+        self.rows.store(out)
     }
 
-    /// [`FilesState::visible_rows`] 的递归实现(`path` 是当前递归位置)。
-    fn count_rows(
+    /// [`FilesState::rows`] 的递归实现:按展开状态把节点树摊成一行行。
+    fn flatten(
         nodes: &[FileNode],
         expanded: &[FilePath],
         path: &mut FilePath,
-        rows: &mut usize,
+        out: &mut Vec<FileRow>,
     ) {
         for (ix, node) in nodes.iter().enumerate() {
-            *rows += 1;
             path.push(ix);
-            if node.is_dir && expanded.contains(path) {
+            let kind = if node.is_dir {
+                RowKind::Dir {
+                    expanded: expanded.contains(path),
+                }
+            } else {
+                RowKind::File
+            };
+            out.push(FileRow {
+                path: path.clone(),
+                label: node.name.clone(),
+                depth: path.len() - 1,
+                kind,
+            });
+            // 展开的目录要接着摊子项;还没读过的目录摊一行「加载中…」占位。
+            if let RowKind::Dir { expanded: true } = kind {
                 match &node.children {
-                    Some(children) => Self::count_rows(children, expanded, path, rows),
-                    // 未加载的展开目录:树里只有那一个占位行。
-                    None => *rows += 1,
+                    Some(children) => Self::flatten(children, expanded, path, out),
+                    None => out.push(FileRow {
+                        path: path.clone(),
+                        label: "加载中…".into(),
+                        depth: path.len(),
+                        kind: RowKind::Loading,
+                    }),
                 }
             }
             path.pop();
         }
+    }
+
+    /// 按行号取一行(行数刚变过时外层可能还在渲染旧下标 ⇒ 取不到就返 `None`)。
+    fn row(&self, ix: usize) -> Option<FileRow> {
+        self.rows.row(ix)
+    }
+
+    /// 交给侧边栏虚拟列表的全部内容项:路径输入框 + 每一行(或一句空占位)。
+    pub(super) fn sidebar_items(&mut self, cx: &mut Context<Self>) -> Vec<FilesItem> {
+        // 还没有根目录(没有远端会话 / 正在问家目录 / 问失败):只摆空占位,
+        // **连顶部那条路径输入框也不摆** —— 一条空框既没内容可编辑、也没东西可跳。
+        if self.root.is_none() {
+            let (title, description) = if self.error.is_some() {
+                ("无法读取远端目录", "当前会话的远端文件系统不可用")
+            } else {
+                ("还没有可浏览的目录", "打开一个 SSH 会话后，这里显示它的家目录")
+            };
+            return vec![FilesItem::Placeholder {
+                icon: IconName::FolderClosed,
+                title,
+                description,
+                detail: self.error.clone().map(SharedString::from),
+            }];
+        }
+
+        let rows = self.rows();
+        let mut items = Vec::with_capacity(rows.len() + 2);
+        // 顶部路径输入框(跟着内容一起滚动,与改造前一致)。
+        items.push(FilesItem::Path(self.path_input.clone()));
+        if rows.is_empty() {
+            items.push(FilesItem::Placeholder {
+                icon: IconName::FolderOpen,
+                title: "这个目录是空的",
+                description: "可以用上面的路径框跳到别的目录",
+                detail: self.error.clone().map(SharedString::from),
+            });
+        } else {
+            let state = cx.entity().downgrade();
+            items.extend((0..rows.len()).map(|ix| FilesItem::Row {
+                state: state.clone(),
+                ix,
+            }));
+        }
+        items
+    }
+
+    /// 点一行:目录展开 / 收起(未读过的目录顺带发起加载),文件行只记选中。
+    fn activate_row(&mut self, path: FilePath, kind: RowKind, cx: &mut Context<Self>) {
+        self.selected = Some(path.clone());
+        if matches!(kind, RowKind::Dir { .. }) {
+            let was_open = self.expanded.iter().any(|open| open == &path);
+            self.expanded.retain(|open| open != &path);
+            if !was_open {
+                self.expanded.push(path.clone());
+                // 目录还没读过 ⇒ 读它(读完后回填子项、行清单再重建)。
+                let pending = self
+                    .node(&path)
+                    .filter(|node| node.is_dir && node.children.is_none())
+                    .map(|node| node.path.clone());
+                if let (Some(dir), Some(fs)) = (pending, self.fs.clone()) {
+                    self.spawn_load(fs, dir, LoadTarget::Dir(path), cx);
+                }
+            }
+            self.rows.bump();
+        }
+        cx.notify();
     }
 
     /// 按路径取节点(`[]` 取不到 ⇒ `None`)。
@@ -508,83 +523,96 @@ impl FilesState {
     }
 }
 
-impl Render for FilesState {
-    /// `_cx`:本实现只画自己的状态,主题色都在行渲染闭包自己那份 `cx` 上取。
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // 还没有根目录(没有远端会话 / 正在问家目录 / 问失败):
-        // 只摆空占位,**连顶部那条路径输入框也不摆** —— 一条空框既没内容可编辑、也没东西可跳。
-        if self.root.is_none() {
-            let placeholder = match &self.error {
-                // 连不上 SFTP:把原因说清楚(多半是认证被拒 / 服务端没开 sftp 子系统)。
-                Some(error) => v_flex()
-                    .gap_2()
-                    .child(empty_state(
-                        IconName::FolderClosed,
-                        "无法读取远端目录",
-                        Some("当前会话的远端文件系统不可用"),
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(_cx.theme().muted_foreground)
-                            .child(error.clone()),
-                    )
-                    .into_any_element(),
-                None => empty_state(
-                    IconName::FolderClosed,
-                    "还没有可浏览的目录",
-                    Some("打开一个 SSH 会话后，这里显示它的家目录"),
+// ---------------------------------------------------------------- 侧边栏内容项
+
+/// 文件管理器交给侧边栏虚拟列表的一项。
+///
+/// ⚠️ **一行一项**:侧边栏内容区是它自己的虚拟列表,只渲染可见区间 + overdraw;
+/// 再嵌一个内层虚拟列表的话,内层拿到的可用高度会等于整棵树 ⇒ 虚拟化失效(见模块文档)。
+#[derive(Clone)]
+pub(super) enum FilesItem {
+    /// 顶部路径输入框。
+    Path(Entity<InputState>),
+    /// 文件树的一行(`ix` 是行清单下标,渲染时按需从 [`FilesState`] 读)。
+    Row {
+        state: WeakEntity<FilesState>,
+        ix: usize,
+    },
+    /// 空占位(没有可浏览的目录 / 目录是空的 / 读目录失败)。
+    Placeholder {
+        icon: IconName,
+        title: &'static str,
+        description: &'static str,
+        /// 失败原因(有则补一行小字)。
+        detail: Option<SharedString>,
+    },
+}
+
+impl FilesItem {
+    /// 画这一项。`cx` 是侧边栏的 `&mut App`(读行数据、接点击都在这里)。
+    pub(super) fn render(self, cx: &mut App) -> AnyElement {
+        match self {
+            // 路径输入框整行铺满(32px 的输入框 + 上下各 2px,见 [`PATH_ROW_HEIGHT`])。
+            Self::Path(input) => h_flex()
+                .w_full()
+                .h(PATH_ROW_HEIGHT)
+                .px_2()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(&input)
+                            // 不要清除按钮(路径跟着会话走,一键清空只会把面板弄空)。
+                            .cleanable(false)
+                            .aria_label("远端目录路径"),
+                    ),
                 )
                 .into_any_element(),
-            };
-            return placeholder;
+            Self::Row { state, ix } => {
+                // 行数刚变过时外层可能还在渲染旧下标 ⇒ 取不到就摆个空元素。
+                let Ok(Some(row)) = state.read_with(&*cx, |files, _| files.row(ix)) else {
+                    return div().w_full().into_any_element();
+                };
+                let selected = state
+                    .read_with(&*cx, |files, _| {
+                        files.selected.as_deref() == Some(row.path.as_slice())
+                    })
+                    .unwrap_or(false);
+                let path = row.path.clone();
+                let kind = row.kind;
+                let element = row_element(ix, &row, selected, cx);
+                // 占位行不接受点击;目录点一下展开 / 收起,文件行只记选中。
+                let element = if matches!(kind, RowKind::Loading) {
+                    element.into_any_element()
+                } else {
+                    element
+                        .on_click(move |_, _window, cx| {
+                            let _ = state
+                                .update(cx, |files, cx| files.activate_row(path.clone(), kind, cx));
+                        })
+                        .into_any_element()
+                };
+                div().w_full().child(element).into_any_element()
+            }
+            Self::Placeholder {
+                icon,
+                title,
+                description,
+                detail,
+            } => {
+                let mut body = v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(empty_state(icon, title, Some(description)));
+                if let Some(detail) = detail {
+                    body = body.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(detail),
+                    );
+                }
+                body.into_any_element()
+            }
         }
-
-        let rows = self.visible_rows();
-        // 顶部一行:路径输入框整行铺满(高 32px > 标签条的 24px ⇒ 用 [`PATH_ROW_HEIGHT`])。
-        let header = h_flex()
-            .w_full()
-            .h(PATH_ROW_HEIGHT)
-            .px_2()
-            .child(
-                div().flex_1().min_w_0().child(
-                    Input::new(&self.path_input)
-                        // 不要清除按钮(路径跟着会话走,一键清空只会把面板弄空)。
-                        .cleanable(false)
-                        .aria_label("远端目录路径"),
-                ),
-            );
-
-        // 目录里一条都没有:换成空占位(输入框留着 —— 还能靠它跳去别的目录)。
-        let body: AnyElement = if rows == 0 {
-            let description = match &self.error {
-                Some(error) => error.clone(),
-                None => "这个目录是空的".to_string(),
-            };
-            v_flex()
-                .gap_2()
-                .child(empty_state(
-                    IconName::FolderOpen,
-                    "这个目录是空的",
-                    None,
-                ))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(_cx.theme().muted_foreground)
-                        .child(description),
-                )
-                .into_any_element()
-        } else {
-            tree(&self.tree, |ix, entry, selected, _window, cx| {
-                file_tree_row(ix, entry, selected, cx)
-            })
-            .h(TREE_ROW_HEIGHT * rows as f32)
-            .into_any_element()
-        };
-
-        // 根目录只在上面那条输入框里显示(它随 `root` 变化写回,见 [`FilesState::sync_path_input`])。
-        v_flex().w_full().child(header).child(body).into_any_element()
     }
 }
 
@@ -592,117 +620,29 @@ impl Render for FilesState {
 
 /// 文件树的一行:目录(可展开)/ 文件 / 占位(「加载中…」)。
 ///
-/// 展收由 `TreeState` 自己处理(`on_entry_click` → `toggle_expand`),我们只负责画:caret 只在
-/// 真的有子项时画(未加载的目录挂着占位子项,所以也有);文件行没有交互(视图只读)。
-///
-/// 悬停 / 选中样式由 [`ListItem`] 统一画(选中底色 = 主题 `accent`,见
-/// [`crate::config::change_theme`] 里关掉 `list.active_highlight` 的原因)。
-fn file_tree_row(ix: usize, entry: &TreeEntry, selected: bool, cx: &mut App) -> ListItem {
-    let (radius, accent_fg) = {
-        let theme = cx.theme();
-        (theme.radius, theme.sidebar_accent_foreground)
-    };
-    let label = entry.item().label.clone();
-    let indent = px(8. + entry.depth() as f32 * 16.);
-    let row = ListItem::new(ix)
-        .h(TREE_ROW_HEIGHT)
-        .pr_2()
-        .rounded(radius)
-        .text_sm()
-        .overflow_x_hidden()
-        .cursor(if row_is_dir(entry) == Some(true) {
-            CursorStyle::PointingHand
-        } else {
-            CursorStyle::Arrow
-        })
-        .when(selected, |this| this.font_medium().text_color(accent_fg));
-
-    match row_is_dir(entry) {
-        Some(true) => row.pl(indent).child(
-            h_flex()
-                .gap_x_2()
-                .items_center()
-                .when(entry.is_folder(), |this| {
-                    this.child(
-                        Icon::new(if entry.is_expanded() {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size_3(),
-                    )
-                })
-                .child(
-                    Icon::new(if entry.is_expanded() {
-                        IconName::FolderOpen
-                    } else {
-                        IconName::Folder
-                    })
-                    .size_3(),
-                )
-                .child(ellipsis_label(label)),
-        ),
-        Some(false) => row
-            .pl(indent)
-            .child(
-                h_flex()
-                    .gap_x_2()
-                    .items_center()
-                    .child(Icon::new(IconName::File).size_3())
-                    .child(ellipsis_label(label)),
-            ),
+/// caret 只在目录行上画(未加载的目录也有 —— 行清单里它后面跟着一行占位)。
+fn row_element(ix: usize, row: &FileRow, selected: bool, cx: &mut App) -> ListItem {
+    let label = row.label.clone();
+    let item = row_shell(ix, row.depth, selected, cx).cursor(match row.kind {
+        RowKind::Dir { .. } => CursorStyle::PointingHand,
+        _ => CursorStyle::Arrow,
+    });
+    match row.kind {
+        RowKind::Dir { expanded } => item.child(row_content(
+            Some(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            }),
+            if expanded {
+                IconName::FolderOpen
+            } else {
+                IconName::Folder
+            },
+            label,
+        )),
+        RowKind::File => item.child(row_content(None, IconName::File, label)),
         // 占位行(「加载中…」):不该有任何交互,退化成一行灰字。
-        None => row.pl(indent).child(ellipsis_label(label)),
+        RowKind::Loading => item.child(ellipsis_label(label)),
     }
-}
-
-/// 这一行是目录 / 文件 / 占位(由行 id 前缀判断,见 [`row_id`])。
-///
-/// ⚠️ **不能**用 `TreeEntry::is_folder()`:它的意思是「有没有子项」,未加载的目录挂着占位
-/// 子项、空目录反而没有 ⇒ 判类型会把两者都判反。
-fn row_is_dir(entry: &TreeEntry) -> Option<bool> {
-    let id = entry.item().id.as_ref();
-    let (kind, _) = id.split_once('-')?;
-    match kind {
-        "dir" => Some(true),
-        "file" => Some(false),
-        _ => None,
-    }
-}
-
-/// 目录 / 文件行的 id(`dir-0-2` / `file-1`),下标链与 [`FilePath`] 一一对应。
-fn row_id(is_dir: bool, path: &[usize]) -> SharedString {
-    encode_id(if is_dir { "dir" } else { "file" }, path)
-}
-
-/// 未加载目录的占位子项 id(前缀 `loading` ⇒ [`row_is_dir`] 返回 `None`,画成灰字)。
-fn placeholder_id(path: &[usize]) -> SharedString {
-    encode_id("loading", path)
-}
-
-/// 拼一个 `前缀-下标-下标` 形式的行 id。
-fn encode_id(kind: &str, path: &[usize]) -> SharedString {
-    let mut id = String::from(kind);
-    for ix in path {
-        id.push('-');
-        id.push_str(&ix.to_string());
-    }
-    id.into()
-}
-
-/// 从行 id 解出路径(`dir-0-2` / `file-1` / `loading-0-2`)。
-fn path_of_id(id: &str) -> Option<FilePath> {
-    let (_, rest) = id.split_once('-')?;
-    rest.split('-').map(|step| step.parse().ok()).collect()
-}
-
-/// 行标题 / 路径:单行省略号(树不换行,窄侧边栏里长名字要被截断)。
-fn ellipsis_label(label: SharedString) -> AnyElement {
-    div()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(label)
-        .into_any_element()
 }

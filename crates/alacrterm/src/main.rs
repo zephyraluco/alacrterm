@@ -161,7 +161,7 @@ impl AppRoot {
         let dock = Self::build_dock(window, cx);
         // 三个子组件实体：会话列表 + 文件管理器（两条侧边栏共用）+ 左右两条侧边栏。
         // 这两个视图状态只有侧边栏需要，根视图只借用它们装配，不持有。
-        let sessions = cx.new(SessionsState::new);
+        let sessions = cx.new(|_| SessionsState::new());
         let files = cx.new(|cx| FilesState::new(window, cx));
         let left_sidebar = cx.new(|cx| {
             Sidebar::new(SidebarSide::Left, sessions.clone(), files.clone(), cx)
@@ -250,9 +250,6 @@ impl AppRoot {
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 主体：侧边栏与终端由各自的模块渲染，中间是可拖拽分隔条（视图标签在侧边栏顶部）。
-
-        // 会话表变了就同步进会话树（`TreeState` 是快照，必须在渲染前对齐，见该方法文档）。
-        self.sessions.update(cx, |sessions, cx| sessions.sync_tree(cx));
 
         // 「文件管理器」只服务**远端**会话：本地目录用系统自己的文件管理器打开就好，
         // 应用里再摆一份既多余、又只能看到本机目录。所以本地终端（以及没有会话时）

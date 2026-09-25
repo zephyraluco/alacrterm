@@ -120,8 +120,9 @@ crates/
       sidebar_panel/            # 左右侧边栏(§3.2)
         mod.rs                  # Sidebar 实体(标签/折叠/宽度 + Render) + toggle_button + SidebarContent
         tabs.rs                 # 顶部视图标签条(点选 + 拖动换位 / 拖到另一条侧边栏)
-        sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + Render)
-        files.rs                # FilesState(文件管理器:远端 SFTP 目录树 + Render)
+        shared.rs               # 两棵树共用:行骨架 / 缩进 / 省略号标签 / RowCache / 拖拽预览卡片
+        sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + 摊平成 SessionsItem)
+        files.rs                # FilesState(文件管理器:远端 SFTP 目录树 + 摊平成 FilesItem)
       dialog/                   # 对话框(§3.4)
         mod.rs                  # 共同约定(表单实体先建 / 页脚自拼 / on_ok 兜底校验)
         connection.rs           # 「新建会话」:只加一条 SSH 记录
@@ -203,13 +204,13 @@ fn main() {
 
 `AppRoot::render` 只负责装配:`h_resizable("right-split")[h_resizable("main-split")[左栏, 中间列], 右栏]`;容器渲染方法统一返回 `AnyElement`(edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,同一渲染树里连续 `&mut cx` 会借用冲突)。
 
-**状态与渲染都归子组件**:一条侧边栏 = 一个实体(`Entity<Sidebar>`,左右各一个,见 `sidebar_panel/mod.rs`),它自带标签 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 视图标签条 + 当前视图内容 + 底部状态栏);根视图只把它 `.child(..)` 摆进分栏面板、把 `sidebar_panel::toggle_button` 摆进标题栏。各视图内容也是实体:「会话」`Entity<SessionsState>`、文件管理器 `Entity<FilesState>`(见 `sidebar_panel/`),记录树 / 目录项 + 展开状态 + `TreeState` + 增删改 + 它自己的渲染都在里面,两条侧边栏共用同一份。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 指标采样器 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 两条侧边栏互持 `sibling` 弱引用,标签跨栏拖动靠它。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
+**状态与渲染都归子组件**:一条侧边栏 = 一个实体(`Entity<Sidebar>`,左右各一个,见 `sidebar_panel/mod.rs`),它自带标签 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 视图标签条 + 当前视图内容 + 底部状态栏);根视图只把它 `.child(..)` 摆进分栏面板、把 `sidebar_panel::toggle_button` 摆进标题栏。各视图内容是两个实体:「会话」`Entity<SessionsState>` 与文件管理器 `Entity<FilesState>` —— 两者都**不实现 `Render`**:各自把「要摆哪些项」摊成**一行一项**(`SessionsItem` / `FilesItem`)交给侧边栏内容区(它才是虚拟列表),两条侧边栏共用同一份。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 指标采样器 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 两条侧边栏互持 `sibling` 弱引用,标签跨栏拖动靠它。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
 
-- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成。**顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**。标签样式照 **VS Code 面板标签**(纯文字、无边框、按内容宽度左对齐,悬停 / 选中才有圆角浅灰底):手绘 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` / `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时点亮成插入提示,免得高亮把标签尺寸顶变。**标签可在两条侧边栏之间拖动**:同栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置);拖到另一栏 = 把视图搬过去并选中;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧顺序与选中项各存在自己的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;内容位**一个可见标签都没有**时(标签全被拖走,或只剩本地会话下不摆的「文件管理器」)`SidebarContent::Empty` 什么都不摆 —— 留白,不塞任何占位文案。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,各一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按当前会话是不是远端调 `Sidebar::set_files_enabled`,为假时该视图的**标签与内容一起不摆**(选中的下标不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
+- **两侧边栏**(`sidebar_panel`):列容器 `v_flex[Sidebar(flex_1), 本栏状态栏(w_full)]`,宽度同步靠同列布局完成。**顶部都有视图标签条**(`Sidebar::header` 里的 `tab_bar`,见 `sidebar_panel/tabs.rs`),固定不滚动、随侧边栏折叠一起隐藏;⚠️ **只有一个标签也照画**。标签样式照 **VS Code 面板标签**(纯文字、无边框、按内容宽度左对齐,悬停 / 选中才有圆角浅灰底):手绘 `h_flex`(`tab_element`;选中 = `tokens.accent` 底 + `accent_foreground` 字,圆角 = 主题 `radius`),不用 `ToggleGroup` / `TabBar`(两者都拖不动)。⚠️ 标签条容器必须显式 `.h(TAB_HEIGHT)`:标签可能一个都没有(全被拖走),空 flex 容器高度会塌成 0 ⇒ 兜底落点悬停不到。⚠️ 每个标签常驻一条透明左边框(`border_l_2` + `accent.opacity(0)`),拖动悬停时点亮成插入提示,免得高亮把标签尺寸顶变。**标签可在两条侧边栏之间拖动**:同栏内拖 = 换位(落在第 i 个标签上 = 占它现在的位置);拖到另一栏 = 把视图搬过去并选中;落点 = 每个标签自己(载荷 `DragSidebarTab{side,index}`)+ 标签条空白区兜底(追加末尾,目标栏为空时也只能拖到这里)。两侧顺序与选中项各存在自己的 `Sidebar` 实体里(各一份 `SidebarTabs`),**同一视图可出现在任一侧**;内容项**为空**时(标签全被拖走,或只剩本地会话下不摆的「文件管理器」)内容列表就是空的 —— 留白,不塞任何占位文案。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,各一个文件;`sidebar_panel/mod.rs` 只管外壳(容器装配 / 两端按钮 / 折叠开关)。⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按当前会话是不是远端调 `Sidebar::set_files_enabled`,为假时该视图的**标签与内容一起不摆**(选中的下标不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
 
 #### 会话列表(文件夹树:记录 + 拖放)
 
-> 状态与渲染都在 `sidebar_panel/sessions.rs` 的 `SessionsState` 实体里(记录模型 + 展开状态 + `TreeState` + 全部增删改 + 它的 `Render`);它作为 `SidebarContent::Sessions(Entity<SessionsState>)` 被摆进侧边栏的内容位。
+> 状态在 `sidebar_panel/sessions.rs` 的 `SessionsState` 实体里(记录模型 + 展开状态 + 摊平后的行清单);渲染交给 `SidebarContent::Sessions(SessionsItem)` —— **一行一项**摆进侧边栏内容位。
 
 列表内容是**会话记录**(连接配置),与终端实例**完全无关**:一条记录有没有在跑终端,取决于用户是否双击过它;关掉终端也不影响列表。形态参考 MobaXterm —— **没有自动生成的根文件夹**,顶层直接就是用户自己建的文件夹(可嵌套)与记录;文件夹行只显示名字(**不显示「里面有几条」**)。
 
@@ -217,14 +218,14 @@ fn main() {
 - **加条目**:状态栏**左下角**文件夹图标(`NewFolder`,落顶层)、**右下角** `+`(`NewSession`,落顶层);文件夹行右键可以「在这里新建会话 / 新建子文件夹」(带 `folder` / `parent` 参数落进那个文件夹)。新条目一律**追加到目标目录末尾**,并顺手展开目标文件夹(否则新条目看不见)。
 - **删条目**:记录行右键「删除会话」、文件夹行右键「删除文件夹」(**连带**里面的内容)。两条都只改列表,不动已开的终端。
 - **开终端**:双击记录行(单击只选中)、或右键「打开会话」→ `OpenSession` → `AppRoot::open_session_record`(**跨组件:**向 `SessionsState` 要参数、再 `spawn_session`)。同一条记录可以开任意多个终端。
-- **拖放**:记录行与文件夹行都能拖(载荷 `DragSessionEntry{path,label}` + 自绘 `SessionDragPreview`);落在**文件夹行**上 = 放进该文件夹,落在**会话行**上 = 放进它所在的那个目录,落在列表下方那条 16px 空白落点(`#session-tree-top-level-drop`)上 = **提到顶层**;`drag_over` 用 `tokens.accent` 高亮落点。合法性由 `SessionsState::move_entry` 把关:目标必须存在、且不能是**自己或自己的子孙**(否则会把子树拖成环)。⚠️ 移动时「跟随被拖动子树的展开标记」要一起搬到新路径(存的是相对路径),同一目录下排在源条目之后的展开标记下标要前移一位 —— 两个方向都有专门的 helper(`shift_path_after_removal` / `shift_paths_after_removal`)。
-- **行**(`session_tree_row`,组件要求返回 `ListItem`):**同一目录下文件夹与会话同级**——两行都从 `pl(8px + depth × 16px)` 开始(不给会话行多加一个 caret 宽度的缩进,否则会话看上去低一级)。文件夹行 = 子项非空时才画的 caret + 文件夹图标 + 名字;会话行 = 地球图标 + 名字(记录目前只有 SSH 一种)。⚠️ **行类型由行 id 前缀判断**(`folder-0-2` / `session-1`,`row_id` / `session_row` 互转),**不能**用 `TreeEntry::is_folder()`:gpui-kit 的 `TreeItem::is_folder()` 是「有没有子项」的意思,**空文件夹会被当成叶子**(画成会话行、双击还想开终端)。caret 仍用 `entry.is_folder()`(空文件夹没有子项、点了也不会有反应)。
-- **展开状态存在 `SessionsState::expanded`**(`Vec<SessionPath>`),**不在** `TreeItem` 里:条目树每次同步都重建 `TreeItem`(见下),存树里会每刷一次就全部收起。同步时按它给文件夹行 `.expanded(..)`;用户展收由 `SessionsState::new` 里的 `cx.subscribe(&tree, ..)` 收 `TreeEvent::{Expanded,Collapsed}`(行 id → 路径)回写,并 `cx.notify()`。它同时是**算行数**的依据。
-- ⚠️ `Tree` 内部是**等高虚拟列表** + 链尾 `refine_style(size_full)` ⇒ 它塞进 `Sidebar` 自己的虚拟列表(自动高度)时拿不到确定高度、会塌成 0;因此渲染时必须 `.h(行数 × TREE_ROW_HEIGHT)`(`TREE_ROW_HEIGHT = 28px`),行数 = `SessionsState::visible_rows()`(只算展开的文件夹的子项)。渲染外层是 `v_flex[tree, 顶层落点条]`。
-- ⚠️ `SessionsState::sync_tree` 在每次 `AppRoot::render` 开头(经 `sessions.update(..)`)按签名(`(名字, 是否文件夹, 层级)` 全量、含被收起的子树)同步,**签名没变就直接返回**:`TreeState::set_items` 会 notify,每帧无条件调用会自激成死循环。⚠️ 签名用 `Option<Vec<..>>`,`None` = 还没同步过——用空 `Vec` 表达「没同步过」会让首次同步被当成「签名没变」跳掉,树永远拿不到 items。
-- **选中**:树自己的 `selected_ix`(行点击设置),不跟当前终端挂钩(「当前会话」由标签栏体现)。⚠️ `ListItem` 默认的 `list_active` 选中底色太淡(主题把它压到 6% 不透明度),分不出悬停 ⇒ [`config::change_theme`] 里关掉 `list.active_highlight`,改用 `accent`(与侧边栏顶部选中的视图标签同色),配 `font_medium` + `sidebar_accent_foreground` 文字色。
-- **右键菜单**挂在组件级 `Tree::context_menu` 上(记录行 / 文件夹行各一套);**列表为空**时树是 0 行、什么也画不出来,`SessionsState::render` 会改成一个空占位(gpui-kit `Empty` 组件,`sidebar_panel::empty_state`)。
-- `Sidebar::child` 只吃单一类型 ⇒ 各视图与内置菜单用 `SidebarContent` 枚举统一(`Collapsible + SidebarItem` 转发;视图实体自己实现 `Render`,枚举里只把它 `div().w_full().child(..)` 摆进内容位)。两层都不套 `SidebarGroup`(它会固定渲染一行 `h_8()` 段标题,标题已在顶部标签上)。`Sidebar` 的 id 带侧与当前视图名。
+- **拖放**:记录行与文件夹行都能拖(载荷 `DragSessionEntry{path,label}` + 共用预览卡片 `shared::DragPreview`);落在**文件夹行**上 = 放进该文件夹,落在**会话行**上 = 放进它所在的那个目录,落在列表下方那条 16px 空白落点(`#session-tree-top-level-drop`)上 = **提到顶层**;`drag_over` 用 `tokens.accent` 高亮落点。合法性由 `SessionsState::move_entry` 把关:目标必须存在、且不能是**自己或自己的子孙**(否则会把子树拖成环)。⚠️ 取出源条目会让同目录里排在它后面的下标前移一位,所以目标路径要按「取出后」算(`shift_path_after_removal`)。
+- **行**(`session_row_element`,返回 `AnyElement` 因为它把右键菜单包在外面):**同一目录下文件夹与会话同级**——两行都从 `pl(8px + depth × 16px)` 开始(不给会话行多加一个 caret 宽度的缩进,否则会话看上去低一级)。文件夹行 = 有子项时才画的 caret + 文件夹图标 + 名字;会话行 = 地球图标 + 名字(记录目前只有 SSH 一种)。caret 只看「有没有子项」(`SessionRow::has_children`):空文件夹没有 caret、点了也只选中。
+- **展开状态存在 `SessionsState::expanded`**(`Vec<u64>`,存的是条目 **id**),由行点击经 `SessionsState::activate_row` 改;改完 `RowCache::bump` 让摊平缓存失效。⚠️ 用**稳定 id** 而不是下标链:增删 / 拖动搬家都不会让展开状态串到邻居身上(早先按路径存时,删除后同目录里排在后面的标记都得跟着挪。那套 `shift_paths_after_removal` 已经删掉)。
+- ⚠️ **虚拟化靠外层侧边栏的列表**:与「文件管理器」同一套(机制见下节 §3.2「文件管理器」)—— 把条目树**摊平成一行一项**(`SessionsState::sidebar_items` → `SessionsItem`),交给侧边栏自己的虚拟列表,自己**不再嵌套** gpui-kit 的 `Tree`。摊平结果与行骨架走共用模块 `sidebar_panel/shared.rs`(`RowCache` 缓存 + `row_shell` / `row_content`),只在增删改 / 展收后重建。列表末尾固定一条 `SessionsItem::TopLevelDrop`(《拖到顶层》的那条 16px 空白落点)。
+- ⚠️ 与文件树相同:`SessionsState` **不再自己实现 `Render`** ⇒ 它的 `cx.notify()` 落不到窗口上,靠 `Sidebar::new` 里的 `cx.observe(&sessions, ..)` 转发重绘。
+- **选中**:`SessionsState::selected`(行点击设置),不跟当前终端挂钩(「当前会话」由标签栏体现)。⚠️ `ListItem` 默认的 `list_active` 选中底色太淡(主题把它压到 6% 不透明度),分不出悬停 ⇒ [`config::change_theme`] 里关掉 `list.active_highlight`,改用 `accent`(与侧边栏顶部选中的视图标签同色),配 `font_medium` + `sidebar_accent_foreground` 文字色。
+- **右键菜单**挂在**行元素自己**身上(`ContextMenuExt::context_menu`,⚠️ 必须放链尾;记录行 / 文件夹行各一套);**列表为空**时改摆 `SessionsItem::Empty`(gpui-kit `Empty` 组件,`sidebar_panel::empty_state`)。
+- `Sidebar::children` 只吃单一类型 ⇒ 两个视图的项用 `SidebarContent` 枚举统一(`Collapsible + SidebarItem` 转发,`render` 直接转调 `SessionsItem` / `FilesItem::render`)。两层都不套 `SidebarGroup`(它会固定渲染一行 `h_8()` 段标题,标题已在顶部标签上)。`Sidebar` 的 id 带侧与当前视图名。
 - **两条侧边状态栏**:显示「会话」视图的那条两端各一枚按钮(左下 = 新建文件夹,右下 = 新建会话),其余情况是空条(只为与中间那条等高);两栏都不放折叠开关(已移到标题栏)。宽度与那一组 `ResizableState` 都在各自的 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 钉回期望宽度)。**两条侧边栏默认折叠**(`visible: false`),展开只能靠标题栏右端那两枚开关(`sidebar_panel::toggle_button`)。
 - **中间列**:`v_flex[终端区 dock, 公共状态栏]`;公共状态栏在 dock 外面且常驻。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」(直接开一个本地终端)/「打开设置」两行操作)——**启动时就是这个状态**(不自动开会话)。
 - **分两层嵌套**:`main-split` = 左栏 | 中间列,`right-split` = 内层 | 右栏(面板宽度按下标存在 `ResizableState`,三面板同组会互相挤)。
@@ -243,18 +244,20 @@ fn main() {
 
 #### 文件管理器(远端会话的目录树)
 
-> 状态与渲染都在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(远端句柄 + 根目录 + 目录项缓存 + 展开状态 + `TreeState` + 它自己的 `Render`);作为 `SidebarContent::Files(Entity<FilesState>)` 摆进侧边栏内容位。默认停在**右侧边栏**(左栏是「会话」),两条侧边栏共用同一个实体,**且只对远端会话可见**(见 §3.2)。
+> 状态在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(远端句柄 + 根目录 + 目录项缓存 + 展开状态 + 摊平后的行清单);渲染交给 `SidebarContent::Files(FilesItem)` —— **一行一项**摆进侧边栏内容位(它自己的虚拟列表)。默认停在**右侧边栏**(左栏是「会话」),两条侧边栏共用同一个实体,**且只对远端会话可见**(见 §3.2)。
 
 - **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步两件事:可用性(`Sidebar::set_files_enabled(remote)`)与**数据源**(当前会话的 `SshFs` 句柄,来自 `TerminalView::remote_fs(cx)`)。
 - **数据源是 SFTP**(`ssh::SshFs`,见 §5.3):起始根目录 = 远端家目录(`home_dir()`);远端 shell 的 `cd` 拿不到(要改远端 prompt),所以根目录**不跟随终端**,由用户自己跳。
 - ⚠️ **必须等会话连上再给句柄**(`TerminalView::is_connected`):连上之前主机密钥可能还没确认,而 SFTP 那条连接**没有确认通道**(`ClientHandler::new` 传 `None`)⇒ 只会失败。判断放在句柄那一层,`FilesState::sync` 自己只比较 `Option<SshFs>`(`Arc::ptr_eq`)。
 - **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 调 `list_dir`(一层),回填前核对**代次**(`generation`,换根目录 / 换会话时 +1 ⇒ 在途结果直接丢掉)。排序由 `SshFs` 负责:目录在前、名字不区分大小写。
-- ⚠️ **未加载的目录必须挂一个占位子项**(label「加载中…」):gpui-kit 的 `TreeItem::is_folder()` 就是「有没有子项」,没有子项的行既没有 caret、点击也不会展开(`TreeState::toggle_expand` 对非 folder 直接 return)⇒ 子目录永远打不开。`visible_rows` 的行数算法必须与 `build_items` + `TreeState::add_entry` 的展平规则**逐条一致**(含这条占位)。
-- 行类型同样**编码在行 id 前缀**里(`dir-0-2` / `file-1` / `loading-0-2`),判类型不用 `TreeEntry::is_folder()`(空目录 / 未加载目录都会被判反——前者没有子项、后者挂着占位子项)。目录行 = caret(有子项时)+ 文件夹图标 + 名字,文件行 = 文件图标 + 名字(视图**只读**,行点击只展开 / 收起,不打开文件),占位行是灰字。
-- 展开状态存 `FilesState::expanded`(下标链),由 `cx.subscribe(&tree, ..)` 收 `TreeEvent::{Expanded,Collapsed}` 回写(与 `SessionsState` 同一套理由:`set_items` 会重建 `TreeItem`)。
+- **展开的目录还没读回来时**,摊平会在它后面插一行「加载中…」占位(`RowKind::Loading`),这样它看起来仍是可展开的父节点。
+- 行有四种形态(都由 `RowKind` 决定):目录展开(`ChevronDown` + `FolderOpen`) / 目录收起(`ChevronRight` + `Folder`) / 文件(`File` 图标) / 占位(灰字,不接点击)。视图**只读** —— 行点击只展开 / 收起(文件行只记选中),不打开文件。
+- 展开状态存 `FilesState::expanded`(下标链),由 `FilesState::activate_row` 自己改;改完 `RowCache::bump` 让摊平缓存失效。
 - 顶部一行是一条**路径输入框**(整行铺满),**根目录就显示在它里面**(唯一的显示处,⚠️ 不要再另加一行「当前根目录」——那是重复且白占一行高度),与「显示中的根目录」双向对齐:改内容就尝试跳过去(`navigate_to`,先 `fs.is_dir()` 问远端,**只认确实是目录的路径**——不存在 / 不是目录 / 为空时什么都不动,否则打字中途那些不成立的中间态会把树清空);根目录变了时把新路径写回输入框(`sync_path_input`,用 `InputState::set_value`,它内部关掉事件发射 ⇒ 不会回环触发 `navigate_to`)。⚠️ **还没有根目录时(没有远端会话 / 正在问家目录)这条输入框整个不摆**,只留空占位。⚠️ 输入框用组件**默认尺寸**(`Size::Medium`,高 32px)且关掉清除按钮(`cleanable(false)`)⇒ 那一行是**自己的** `PATH_ROW_HEIGHT = 36px`,**不能**复用它上面标签条的 `TAB_HEIGHT`(24px,输入框会溢出到树上)。两条容易踩的机制:**(a) 写回要推迟到下一帧**(`path_input_pending`,由 `FilesState::sync` 每帧补一次):根目录是后台异步问回来的(`home_dir`),那条回调里没有窗口、写不进输入框;⚠️ 但不能每帧无条件写,否则会把用户正在敲的内容顶掉。**(b) 跳转请求带序号**(`nav_seq`):输入框每敲一个字符就发一次 `is_dir` 查询,只有**最新**那次的回答算数,否则先发的短路径后回来会把树拽回上级目录。
 - 失败要**说清原因**:连不上 SFTP(认证被拒 / 服务端没开 sftp 子系统)时把 `SshError` 的话显示在空占位上;某个目录读不到(没权限 / 连接断了)则显示成「这个目录是空的」+ 一句原因。⚠️ 连接能在下次请求时重连(`SshFs` 内部),所以这里的错误只是**当时**的结果。
-- 高度与 `SessionsState` 同样处理:`.h(行数 × TREE_ROW_HEIGHT)`(行数手算,`Tree` 是虚拟列表 + `size_full()`);`sync_tree` 也靠 `(根目录, (名字, 是否目录, 层级) 全量)` 签名挡住每帧 `set_items`(`TreeState::set_items` 会 notify,否则自激)。
+- ⚠️⚠️ **虚拟化靠外层的侧边栏列表,不要再嵌内层虚拟列表**。侧边栏内容区是 gpui-kit `Sidebar` 自己的虚拟列表(`#inner` 里 `list(list_state).size_full()`,高度确定 ⇒ 只渲染可见项 + overdraw),所以文件树是把整棵树**摊平成一行一项**(`FilesState::sidebar_items` → `FilesItem`)交给它。早先的做法是把整棵树(`gpui-kit` 的 `Tree`)塞成**一项**、并按行数给它 `.h(行数 × 28)`,于是内层 `uniform_list` 的「视口」= 那一项的高度 = 整棵树 ⇒ 它的可见区间按**自身 bounds 高度**算(`last_visible_element_ix = ceil((-scroll_offset.y + bounds.height) / item_height)`,**不看 `content_mask`**)⇒ 每帧构建 / 布局**所有**行元素,目录一大就卡,且卡顿与条目数成正比。
+- 摊平结果与行骨架走共用模块 `sidebar_panel/shared.rs`(`RowCache` 缓存 + `row_shell` / `row_content` / `ellipsis_label` / `indent`):侧边栏每帧都会来要一次行清单,不缓存就会每帧 `O(总节点数)`。
+- ⚠️ 文件树**不再自己实现 `Render`** ⇒ 它的 `cx.notify()` 落不到窗口上(`App::notify` 只失效「正在渲染该实体」的窗口),所以 `Sidebar::new` 用 `cx.observe(&files, ..)` 把变化转成侧边栏自己的重绘。
 
 ### 3.3 会话模型(`Session` / `SessionRequest`)
 
@@ -268,8 +271,8 @@ struct Session { view: Entity<TerminalView>, pane: Entity<SessionPane> }
 
 // crates/alacrterm/src/sidebar_panel/sessions.rs —— 记录那条线(纯数据 + 该视图的增删改/拖放)
 enum SessionEntry { Folder(SessionFolder), Session(SessionRecord) }
-struct SessionFolder { name: SharedString, children: Vec<SessionEntry> }
-struct SessionRecord { name: SharedString, user: String, host: String, port: u16, password: Option<String> }
+struct SessionFolder { id: u64, name: SharedString, children: Vec<SessionEntry> }
+struct SessionRecord { id: u64, name: SharedString, user: String, host: String, port: u16, password: Option<String> }
 type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3.2 会话列表)
 ```
 
