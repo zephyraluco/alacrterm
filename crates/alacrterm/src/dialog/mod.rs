@@ -10,3 +10,4 @@
 
 mod connection;
 mod folder;
+pub(crate) mod host_key;

@@ -1,9 +1,10 @@
 mod mappings;
 
 mod alacritty;
+mod backend;
 mod pty_info;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use log::trace;
 
 use futures::{
@@ -19,6 +20,7 @@ use mappings::mouse::{
 use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
+use ssh::{SshEvent, SshSession};
 use std::collections::{HashMap, VecDeque};
 
 use util::{paths::PathStyle, shell::Shell, truncate_and_trailoff};
@@ -37,6 +39,13 @@ use thiserror::Error;
 use alacritty_terminal::vte::ansi::{Attr, Handler, Processor, StdSyncHandler};
 pub use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
+pub use crate::backend::TerminalTarget;
+use crate::backend::{INITIAL_PTY_SIZE, TerminalBackend};
+
+/// 远端会话用的类型（连接参数、主机密钥确认、远端文件系统）从 [`ssh`] crate 透出 ——
+/// 视图层与应用层不必自己依赖 `ssh`。
+pub use ssh::{HostKeyDecision, HostKeyPrompt, RemoteEntry, SshAuth, SshFs, SshParams};
+
 use gpui::{
     App, AppContext as _, BackgroundExecutor, Bounds, ClipboardItem, Context, EventEmitter, Hsla,
     Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -45,7 +54,7 @@ use gpui::{
 
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
-    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches, apply_config,
+    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, RegexSearches, apply_config,
     clear_saved_screen, content_text, display_offset,
     find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
     open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
@@ -629,6 +638,11 @@ pub enum Event {
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
+    /// 需要用户确认一台未知主机的主机密钥（远端会话）。
+    ///
+    /// 握手线程在等 [`HostKeyPrompt::respond`]，不回答就超时放弃连接 ——
+    /// 宿主拿到这个事件要在 [`HOST_KEY_TIMEOUT`](ssh::HOST_KEY_TIMEOUT) 内弹窗。
+    HostKeyPrompt(HostKeyPrompt),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -861,13 +875,13 @@ pub struct TerminalBuilder {
 }
 
 impl TerminalBuilder {
-    /// Create a new terminal with the given working directory and shell.
+    /// 建一个终端：本地 shell 走 PTY，**远端主机走 russh**（见 [`TerminalTarget`]）。
     ///
-    /// The returned task resolves once the PTY has been spawned and the
-    /// terminal emulator is ready to be subscribed to via [`Self::subscribe`].
+    /// 返回的 task 在「连接已经起来」后 resolve（本地 = PTY 已 spawn；远端 = SSH 线程已拉起，
+    /// 认证还在后台跑），之后用 [`Self::subscribe`] 接上事件。
     pub fn new(
         working_directory: Option<PathBuf>,
-        shell: Shell,
+        target: TerminalTarget,
         mut env: HashMap<String, String>,
         cx: &App,
     ) -> Task<Result<TerminalBuilder>> {
@@ -889,121 +903,157 @@ impl TerminalBuilder {
 
             insert_zed_terminal_env(&mut env);
 
-            #[derive(Default)]
-            struct ShellParams {
-                program: String,
-                args: Option<Vec<String>>,
-                title_override: Option<String>,
-            }
-
-            impl ShellParams {
-                fn new(
-                    program: String,
-                    args: Option<Vec<String>>,
-                    title_override: Option<String>,
-                ) -> Self {
-                    log::debug!("Using {program} as shell");
-                    Self {
-                        program,
-                        args,
-                        title_override,
-                    }
-                }
-            }
-
-            let shell_params = match shell.clone() {
-                Shell::System => {
-                    if cfg!(windows) {
-                        Some(ShellParams::new(
-                            util::shell::get_windows_system_shell(),
-                            None,
-                            None,
-                        ))
-                    } else {
-                        None
-                    }
-                }
-                Shell::Program(program) => Some(ShellParams::new(program, None, None)),
-                Shell::WithArguments {
-                    program,
-                    args,
-                    title_override,
-                } => Some(ShellParams::new(program, Some(args), title_override)),
-            };
-            let terminal_title_override =
-                shell_params.as_ref().and_then(|e| e.title_override.clone());
-
-            #[cfg(windows)]
-            let shell_program = shell_params.as_ref().map(|params| {
-                use util::ResultExt;
-
-                Self::resolve_path(&params.program)
-                    .log_err()
-                    .unwrap_or(params.program.clone())
-            });
-
-            // Note: when remoting, this shell_kind will scrutinize `ssh` or
-            // `wsl.exe` as a shell and fall back to posix or powershell based on
-            // the compilation target. This is fine right now due to the restricted
-            // way we use the return value, but would become incorrect if we
-            // supported remoting into windows.
-            let shell_kind = shell.shell_kind(cfg!(windows));
-
-            let alacritty_shell = shell_params.as_ref().map(|params| {
-                (
-                    params.program.clone(),
-                    params.args.clone().unwrap_or_default(),
-                )
-            });
-            let pty_options = pty_options(
-                alacritty_shell,
-                working_directory.clone(),
-                env.clone(),
-                // We pass in the foreground thread's signal mask to the child process via pty_options,
-                // so terminal construction can run on a background thread without breaking Ctrl-C and other signals
-                // otherwise the terminal would inherit the background executor's signal mask which blocks
-                // some terminal signals
-                #[cfg(windows)]
-                shell_kind.tty_escape_args(),
-            );
-
-            let scrolling_history = DEFAULT_SCROLL_HISTORY_LINES;
-            let config = pty_term_config(scrolling_history);
-
-            //Setup the pty...
-            let pty = match open_pty(&pty_options, TerminalBounds::default(), 0) {
-                Ok(pty) => pty,
-                Err(error) => {
-                    bail!(TerminalError {
-                        directory: working_directory,
-                        program: shell_params.as_ref().map(|params| params.program.clone()),
-                        args: shell_params.as_ref().and_then(|params| params.args.clone()),
-                        title_override: terminal_title_override,
-                        source: error,
-                    });
-                }
-            };
-
+            let config = pty_term_config(DEFAULT_SCROLL_HISTORY_LINES);
             // Spawn a background channel so the Alacritty EventLoop can communicate with us.
             //TODO: Remove with a bounded sender which can be dispatched on &self
             let (events_tx, events_rx) = unbounded();
             //Set up the terminal...
             let term = new_term(&config, TerminalBounds::default(), events_tx.clone());
 
-            let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
+            // 本地独有的「进程侧」信息；远端（SSH）下一律缺席。
+            #[cfg(windows)]
+            let mut shell_program: Option<String> = None;
 
-            //And connect them together
-            let pty_tx = spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+            // 两条路只有一件事相同（都得有人把字节写进 `term`），其余全不同：
+            // - 本地：起进程 + alacritty 的 PTY 事件循环，它自己写 `term`；
+            // - 远端：russh 直连，没人替我们写 ⇒ 由 `subscribe` 里的事件泵代劳。
+            let (backend, ssh_events, title_override, is_remote_terminal) = match &target {
+                TerminalTarget::Ssh(params) => {
+                    let (ssh_tx, ssh_events) = unbounded::<SshEvent>();
+                    let session = SshSession::connect(params.clone(), INITIAL_PTY_SIZE, ssh_tx)
+                        .with_context(|| format!("无法启动 SSH 会话（{}）", params.endpoint()))?;
+                    log::debug!("SSH 会话已启动:{}", params.endpoint());
+                    (TerminalBackend::Ssh(session), Some(ssh_events), None, true)
+                }
+                TerminalTarget::Local(shell) => {
+                    #[derive(Default)]
+                    struct ShellParams {
+                        program: String,
+                        args: Option<Vec<String>>,
+                        title_override: Option<String>,
+                    }
+
+                    impl ShellParams {
+                        fn new(
+                            program: String,
+                            args: Option<Vec<String>>,
+                            title_override: Option<String>,
+                        ) -> Self {
+                            log::debug!("Using {program} as shell");
+                            Self {
+                                program,
+                                args,
+                                title_override,
+                            }
+                        }
+                    }
+
+                    let shell_params = match shell.clone() {
+                        Shell::System => {
+                            if cfg!(windows) {
+                                Some(ShellParams::new(
+                                    util::shell::get_windows_system_shell(),
+                                    None,
+                                    None,
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        Shell::Program(program) => Some(ShellParams::new(program, None, None)),
+                        Shell::WithArguments {
+                            program,
+                            args,
+                            title_override,
+                        } => Some(ShellParams::new(program, Some(args), title_override)),
+                    };
+                    let title_override =
+                        shell_params.as_ref().and_then(|e| e.title_override.clone());
+
+                    #[cfg(windows)]
+                    {
+                        shell_program = shell_params.as_ref().map(|params| {
+                            use util::ResultExt;
+
+                            Self::resolve_path(&params.program)
+                                .log_err()
+                                .unwrap_or(params.program.clone())
+                        });
+                    }
+
+                    // Note: when remoting, this shell_kind will scrutinize `ssh` or
+                    // `wsl.exe` as a shell and fall back to posix or powershell based on
+                    // the compilation target. This is fine right now due to the restricted
+                    // way we use the return value, but would become incorrect if we
+                    // supported remoting into windows.
+                    let shell_kind = shell.shell_kind(cfg!(windows));
+
+                    let alacritty_shell = shell_params.as_ref().map(|params| {
+                        (
+                            params.program.clone(),
+                            params.args.clone().unwrap_or_default(),
+                        )
+                    });
+                    let pty_options = pty_options(
+                        alacritty_shell,
+                        working_directory.clone(),
+                        env.clone(),
+                        // We pass in the foreground thread's signal mask to the child process via pty_options,
+                        // so terminal construction can run on a background thread without breaking Ctrl-C and other signals
+                        // otherwise the terminal would inherit the background executor's signal mask which blocks
+                        // some terminal signals
+                        #[cfg(windows)]
+                        shell_kind.tty_escape_args(),
+                    );
+
+                    //Setup the pty...
+                    let pty = match open_pty(&pty_options, TerminalBounds::default(), 0) {
+                        Ok(pty) => pty,
+                        Err(error) => {
+                            bail!(TerminalError {
+                                directory: working_directory,
+                                program: shell_params.as_ref().map(|params| params.program.clone()),
+                                args: shell_params.as_ref().and_then(|params| params.args.clone()),
+                                title_override,
+                                source: error,
+                            });
+                        }
+                    };
+
+                    let info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
+
+                    //And connect them together
+                    let pty_tx = spawn_event_loop(
+                        term.clone(),
+                        events_tx.clone(),
+                        pty,
+                        pty_options.drain_on_exit,
+                    )?;
+
+                    (
+                        TerminalBackend::Pty {
+                            pty_tx,
+                            info: Arc::new(info),
+                        },
+                        None,
+                        title_override,
+                        false,
+                    )
+                }
+            };
 
             let terminal = Terminal {
-                terminal_pty: TerminalPty {
-                    pty_tx,
-                    info: Arc::new(pty_info),
-                },
+                backend,
+                ssh_events,
+                ssh_pending: None,
+                resized_once: false,
+                ssh_status_shown: false,
+                // 本地：PTY 建好就算可用；远端：等 `SshEvent::Connected`（见 `is_connected`）。
+                connected: !is_remote_terminal,
                 term,
                 term_config: config,
                 output_processor: Processor::<StdSyncHandler>::new(),
-                title_override: terminal_title_override,
+                title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
                 last_content: Default::default(),
                 last_mouse: None,
@@ -1016,30 +1066,47 @@ impl TerminalBuilder {
                 selection_phase: SelectionPhase::Ended,
                 hyperlink_regex_searches: RegexSearches::new(&Vec::<String>::new(), 5_000),
                 vi_mode_enabled: false,
-                is_remote_terminal: false,
+                is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
                 mouse_down_position: None,
                 #[cfg(windows)]
                 shell_program,
-                template: CopyTemplate { shell, env },
+                template: CopyTemplate { target, env },
                 child_exited: None,
                 keyboard_input_sent: false,
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
-                path_style: PathStyle::local(),
+                // 远端是台 Unix 主机（SSH 连 Windows 时这里会判错，但那只影响超链接里的
+                // 路径切分，属于可接受误差）。
+                path_style: if is_remote_terminal {
+                    PathStyle::Posix
+                } else {
+                    PathStyle::local()
+                },
             };
 
-            Ok(TerminalBuilder {
-                terminal,
-                events_rx,
-            })
+            Ok(TerminalBuilder { terminal, events_rx })
         };
         cx.background_spawn(fut)
     }
 
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
+        // SSH：远端字节没有任何人替我们喂进模拟器，得自己起一个事件泵。
+        // （本地 PTY 那条由 alacritty 的 `EventLoop` 代劳，见下面的 event loop。）
+        if let Some(mut ssh_events) = self.terminal.ssh_events.take() {
+            self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
+                while let Some(event) = ssh_events.next().await {
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.process_ssh_event(event, cx);
+                    })?;
+                }
+                anyhow::Ok(())
+            });
+            return self.terminal;
+        }
+
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
             while let Some(event) = self.events_rx.next().await {
@@ -1120,14 +1187,23 @@ impl TerminalBuilder {
     }
 }
 
-struct TerminalPty {
-    // The sender to the pty process.
-    pty_tx: PtySender,
-    info: Arc<PtyProcessInfo>,
-}
-
 pub struct Terminal {
-    terminal_pty: TerminalPty,
+    /// 谁在搬字节：本地 PTY 或远端 SSH（见 [`backend`]）。
+    backend: TerminalBackend,
+    /// SSH 事件流（**只**在 SSH 后端下为 `Some`），[`Terminal::subscribe`] 会把它取走并
+    /// 起一个任务把远端字节喂进模拟器 —— 本地 PTY 那条由 alacritty 事件循环代劳。
+    ssh_events: Option<UnboundedReceiver<SshEvent>>,
+    /// 终端按真实尺寸重排之前攒下的远端输出（见 [`Terminal::feed_remote_bytes`]）。
+    ssh_pending: Option<Vec<u8>>,
+    /// 是否已经按真实尺寸重排过一次（见 [`Terminal::feed_remote_bytes`]）。
+    resized_once: bool,
+    /// 屏幕上是否正摆着一行 SSH 进度（远端一开口就擦掉，见 [`Terminal::process_ssh_event`]）。
+    ssh_status_shown: bool,
+    /// 会话是否可用了：本地恒为 `true`（PTY 建好就算可用），远端等 `SshEvent::Connected`。
+    ///
+    /// 远端在它变真之前，同一份连接参数还不能拿去做别的连接（那时主机密钥可能还没确认，
+    /// 见 [`Terminal::remote_fs`]）。
+    connected: bool,
     term: Arc<AlacrittyTermLock>,
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
@@ -1162,7 +1238,7 @@ pub struct Terminal {
 }
 
 struct CopyTemplate {
-    shell: Shell,
+    target: TerminalTarget,
     env: HashMap<String, String>,
 }
 
@@ -1179,9 +1255,97 @@ const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
 /// 会直接把剪贴板覆盖掉。取值对齐 gpui `div` 的拖拽阈值（zed 上游同为 `2.0`）。
 const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 
+/// 终端拿到真实尺寸之前最多攒多少远端字节（见 [`Terminal::feed_remote_bytes`]）。
+///
+/// 正常情况下这个窗口只有一两帧，攒不到 1 KiB；这个上限防的是「远端在首帧前猛吐输出」。
+const SSH_PENDING_LIMIT: usize = 256 * 1024;
+
 impl Terminal {
     fn process_pty_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         self.process_event(event, cx);
+    }
+
+    /// 处理一条 SSH 事件。
+    ///
+    /// 本地那条路是「alacritty 事件循环把字节写进 term，只发一条 `Wakeup` 告诉我们重绘」；
+    /// SSH 没有那层，所以**字节由本函数亲手写进 term**（顺手补一次重绘）。
+    fn process_ssh_event(&mut self, event: SshEvent, cx: &mut Context<Self>) {
+        match event {
+            // 进度（连接中 / 认证中）：写成屏幕上的一行，原地刷新（不堆积）。
+            // 建连可能要几秒，不写用户就只能干等。
+            SshEvent::Status(text) => {
+                self.ssh_status_shown = true;
+                self.feed_remote_bytes(format!("\r\x1b[2K\x1b[2m{text}\x1b[0m").as_bytes());
+            }
+            SshEvent::Data(bytes) => {
+                // 远端开始说话了 ⇒ 擦掉进度行，别让它和真输出混在一起。
+                if self.ssh_status_shown {
+                    self.ssh_status_shown = false;
+                    self.feed_remote_bytes(b"\r\x1b[2K");
+                }
+                self.feed_remote_bytes(&bytes);
+            }
+            // 连接可用了：文件管理器据此才敢去连远端文件系统（见 [`Self::remote_fs`]）。
+            SshEvent::Connected => {
+                self.connected = true;
+            }
+            // 首次连接某台主机：交给界面弹窗问用户（握手线程在等回答）。
+            SshEvent::HostKeyPrompt(prompt) => {
+                cx.emit(Event::HostKeyPrompt(prompt));
+                return;
+            }
+            SshEvent::Closed { exit_status, reason } => {
+                if self.ssh_status_shown {
+                    self.ssh_status_shown = false;
+                    self.feed_remote_bytes(b"\r\x1b[2K");
+                }
+                if let Some(reason) = reason {
+                    // 断开原因必须留在网格里（面板不会关，用户要能回头看）。见
+                    // [`TerminalView::handle_terminal_event`] 的 `CloseTerminal` 分支。
+                    log::warn!("SSH 会话结束:{reason}");
+                    self.feed_remote_bytes(format!("\r\n\x1b[31m{reason}\x1b[0m\r\n").as_bytes());
+                }
+                // ⚠️ 这里只能传 `None`：那个参数要的是 `std::process::ExitStatus`（不透明类型，
+                // 只能由真进程拿到），远端的退出码没有对应的本地进程。传 `None` 不会改变
+                // 「面板保留」的行为 —— `register_task_finished` 对 `None` 走同一条分支。
+                let _ = exit_status;
+                self.register_task_finished(None, cx);
+            }
+        }
+        cx.emit(Event::Wakeup);
+        cx.notify();
+    }
+
+    /// 把远端字节**原样**喂给终端模拟器。
+    ///
+    /// ⚠️ 不比照 [`Terminal::write_output`] 做 LF→CRLF 改写：那份改写是给「非 PTY 的管道
+    /// 输出」兜底的，而远端的输出来自真 PTY，换行本来就带着 CR，再改写会把画面弄乱。
+    ///
+    /// ⚠️ 另一个坑：建会话时终端还只有一个**占位尺寸**（[`TerminalBounds::default`]，见
+    /// [`TerminalBuilder::new`]），此时写进去的东西会被随后的第一次重排顶出可视区
+    /// （alacritty `Grid::grow_lines` 在没历史行时会把已有内容整体上滚）。所以先攒着，
+    /// 等第一次按真实尺寸重排时再一次性补写。
+    fn feed_remote_bytes(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        if !self.resized_once {
+            let pending = self.ssh_pending.get_or_insert_with(Vec::new);
+            if pending.len() + bytes.len() <= SSH_PENDING_LIMIT {
+                pending.extend_from_slice(bytes);
+                return;
+            }
+            // 首帧之前就攒了这么多（远端在猛吐输出）：别等了，连同攒下的一起写。
+            self.resized_once = true;
+        }
+
+        let pending = self.ssh_pending.take().unwrap_or_default();
+        let mut term = self.term.lock();
+        if !pending.is_empty() {
+            self.output_processor.advance(&mut *term, &pending);
+        }
+        self.output_processor.advance(&mut *term, bytes);
     }
 
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
@@ -1238,7 +1402,10 @@ impl Terminal {
             TerminalBackendEvent::Wakeup => {
                 cx.emit(Event::Wakeup);
 
-                self.terminal_pty.info.emit_title_changed_if_changed(cx);
+                // 远端没有本地进程可采样，标题只能靠远端自己发 OSC 0/2。
+                if let Some(info) = self.backend.local_process_info() {
+                    info.emit_title_changed_if_changed(cx);
+                }
             }
             TerminalBackendEvent::ColorRequest(index, format) => {
                 // It's important that the color request is processed here to retain relative order
@@ -1278,9 +1445,20 @@ impl Terminal {
 
                 self.last_content.terminal_bounds = new_bounds;
 
-                self.terminal_pty.pty_tx.resize(new_bounds);
+                self.backend.resize(new_bounds);
 
                 resize(term, new_bounds);
+
+                // 第一次拿到真实尺寸：把之前攒下的远端输出补写进去（见 `feed_remote_bytes`）。
+                // 放在 `resize` 之后，这样它们是写进**已重排过**的网格里，不会被顶掉。
+                self.resized_once = true;
+                if let Some(pending) = self.ssh_pending.take() {
+                    if !pending.is_empty() {
+                        self.output_processor.advance(term, &pending);
+                        cx.emit(Event::Wakeup);
+                    }
+                }
+
                 // If there are matches we need to emit a wake up event to
                 // invalidate the matches and recalculate their locations
                 // in the new terminal layout
@@ -1644,7 +1822,7 @@ impl Terminal {
         }
     }
 
-    /// Write the input payload to the PTY.
+    /// Write the input payload to the terminal backend(本地 PTY 或远端 SSH 信道)。
     fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
         let input = input.into();
         if log::log_enabled!(log::Level::Debug) {
@@ -1654,7 +1832,7 @@ impl Terminal {
                 log::debug!("Writing to PTY: {:?}", input);
             }
         }
-        self.terminal_pty.pty_tx.notify(input);
+        self.backend.write(input);
     }
 
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
@@ -2257,7 +2435,9 @@ impl Terminal {
 
     /// Normalizes the command name of the foreground process, if one is known.
     pub fn foreground_process_command_name(&self) -> Option<String> {
-        self.terminal_pty.info.current
+        self.backend
+            .local_process_info()?
+            .current
             .read()
             .as_ref()
             .and_then(|process| foreground_process_command_from_argv(&process.argv))
@@ -2270,7 +2450,9 @@ impl Terminal {
     /// This does *not* return the working directory of the shell that runs on the
     /// remote host, in case Zed is connected to a remote host.
     fn client_side_working_directory(&self) -> Option<PathBuf> {
-        self.terminal_pty.info.current
+        self.backend
+            .local_process_info()?
+            .current
             .read()
             .as_ref()
             .map(|process| process.cwd.clone())
@@ -2282,48 +2464,56 @@ impl Terminal {
             .as_ref()
             .map(|title_override| title_override.to_string())
             .unwrap_or_else(|| {
-                self.terminal_pty
-                    .info
-                    .current
-                    .read()
-                    .as_ref()
-                    .map(|fpi| {
-                        let process_file = fpi
-                            .cwd
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default();
+                self.backend
+                    .local_process_info()
+                    .and_then(|info| {
+                        info.current.read().as_ref().map(|fpi| {
+                            let process_file = fpi
+                                .cwd
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default();
 
-                        let argv = fpi.argv.as_slice();
-                        let process_name = format!(
-                            "{}{}",
-                            fpi.name,
-                            if !argv.is_empty() {
-                                format!(" {}", (argv[1..]).join(" "))
+                            let argv = fpi.argv.as_slice();
+                            let process_name = format!(
+                                "{}{}",
+                                fpi.name,
+                                if !argv.is_empty() {
+                                    format!(" {}", (argv[1..]).join(" "))
+                                } else {
+                                    "".to_string()
+                                }
+                            );
+                            let (process_file, process_name) = if truncate {
+                                (
+                                    truncate_and_trailoff(&process_file, MAX_CHARS),
+                                    truncate_and_trailoff(&process_name, MAX_CHARS),
+                                )
                             } else {
-                                "".to_string()
-                            }
-                        );
-                        let (process_file, process_name) = if truncate {
-                            (
-                                truncate_and_trailoff(&process_file, MAX_CHARS),
-                                truncate_and_trailoff(&process_name, MAX_CHARS),
-                            )
-                        } else {
-                            (process_file, process_name)
-                        };
-                        format!("{process_file} — {process_name}")
+                                (process_file, process_name)
+                            };
+                            format!("{process_file} — {process_name}")
+                        })
                     })
+                    // 远端没有本地进程可看(标题由远端 shell 自己发 OSC 0/2 来定)。
                     .unwrap_or_else(|| "Terminal".to_string())
             })
     }
 
-    pub fn pid(&self) -> Option<sysinfo::Pid> {
-        self.terminal_pty.info.pid()
+    /// 远端文件系统句柄（**只有** SSH 会话有，见 `ssh` crate 的 `fs` 模块）。
+    ///
+    /// 与 [`Terminal::working_directory`] 正好互补：本地会话给工作目录，远端会话给
+    /// 一条能浏览远端目录的 SFTP 通道 —— 文件管理器两者取其一。
+    /// 它是**懒连接**：拿到句柄不会联网，第一次列目录时才开始建。
+    /// ⚠️ 调用方要先看 [`Self::is_connected`]：连上之前，同一份连接参数还不能用于别的用途
+    /// （主机密钥可能还没确认，那条连接没有确认通道，只会失败）。
+    pub fn remote_fs(&self) -> Option<SshFs> {
+        self.backend.remote_fs()
     }
 
-    pub fn pid_getter(&self) -> Option<&ProcessIdGetter> {
-        Some(self.terminal_pty.info.pid_getter())
+    /// 这个会话是否可用了（本地会话恒为真；远端会话要等连接建立）。
+    pub fn is_connected(&self) -> bool {
+        self.connected
     }
 
     fn register_task_finished(
@@ -2353,7 +2543,7 @@ impl Terminal {
         let working_directory = self.working_directory().or_else(|| cwd);
         TerminalBuilder::new(
             working_directory,
-            self.template.shell.clone(),
+            self.template.target.clone(),
             self.template.env.clone(),
             cx,
         )
@@ -2362,10 +2552,13 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        self.terminal_pty.pty_tx.shutdown();
-        self.terminal_pty.info.terminate_child_process();
+        self.backend.shutdown();
+        // 远端没有本地子进程要收尸（`SshSession::drop` 会断开连接）。
+        let Some(info) = self.backend.local_process_info().cloned() else {
+            return;
+        };
+        info.terminate_child_process();
 
-        let info = self.terminal_pty.info.clone();
         let timer = self.background_executor.timer(Duration::from_millis(100));
         self.background_executor
             .spawn(async move {

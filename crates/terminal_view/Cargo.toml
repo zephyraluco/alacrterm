@@ -9,7 +9,6 @@ gpui = { workspace = true }
 itertools.workspace = true
 log.workspace = true
 terminal = { workspace = true }
-util = { workspace = true }
 
 [lib]
 path = "src/lib.rs"

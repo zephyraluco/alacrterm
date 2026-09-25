@@ -1,0 +1,31 @@
+[package]
+name = "ssh"
+version = "0.1.0"
+publish.workspace = true
+edition.workspace = true
+
+[dependencies]
+dirs.workspace = true
+futures.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+# russh：纯 Rust 的 SSH 客户端。默认后端是 aws-lc-rs（要 cmake + nasm），
+# 换成 ring（只要 cc / MSVC）—— Windows 上少一层工具链依赖。
+russh = { version = "0.63", default-features = false, features = ["ring"] }
+# SFTP 子系统（浏览远端目录用，见 src/fs.rs）。它**不依赖 russh**：只吃一个
+# AsyncRead + AsyncWrite，所以与 russh 的版本互不牵连。
+russh-sftp = "3.0.0"
+tokio = { version = "1", features = [
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+    "sync",
+    "macros",
+] }
+
+[dev-dependencies]
+anyhow.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
