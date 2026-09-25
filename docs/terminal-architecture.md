@@ -1,7 +1,7 @@
 # alacrterm 终端实现分析
 
-> 分析对象:`crates/` 全部源码。本文只写**结论与契约**:模块职责、数据结构、必须遵守的约束(⚠️ = 易错 / 必须这样写)。
-> §3 = 应用外壳(多会话 / 侧边栏 / 标签栏 / 弹窗 / 状态栏指标),§4 起 = 终端核心(仿真 / 渲染 / 事件循环)。
+> 分析对象:`crates/` 全部源码（含 `crates/ssh`，内建 SSH 客户端）。本文只写**结论与契约**:模块职责、数据结构、必须遵守的约束(⚠️ = 易错 / 必须这样写)。
+> §3 = 应用外壳(多会话 / 侧边栏 / 标签栏 / 弹窗 / 状态栏),§4 起 = 终端核心(仿真 / 渲染 / 事件循环),§5 起含远端会话(SSH)。
 
 ---
 
@@ -13,11 +13,11 @@
 
 - 终端核心:去掉 Zed `settings` 依赖 / 主题系统 / 搜索 UI,保留事件循环、4ms 批量事件、选择复制、vi mode、超链接、鼠标协议、进程标题检测
 - 渲染由 gpui 的 `StyledText` / `paint_quad` 逐 cell 驱动,与 Alacritty 网格通过 `Content` 快照解耦(§4.2)
-- `TerminalBuilder::new(working_directory, shell, env, cx) -> Task<Result<TerminalBuilder>>`:PTY 后台就绪后经 `subscribe(cx)` 启动事件循环
-- 多会话外壳:两侧可拖拽侧边栏(默认折叠)夹着中间 dock 会话区(自绘标签栏 + 终端),会话可全部关掉(全关显示欢迎页,**启动时也是这个状态**——不自动开终端);底部三条并列状态栏(左右两条属于对应侧边栏,中间放会话指标)
-- 远程连接:「新建会话」对话框收集 IP / 端口 / 名称 / 用户名 / 密码,**只往侧边栏的会话列表里加一条记录**(IP / 名称 / 用户名必填);双击那条记录才按它开终端(`ssh -p <端口> user@IP`,密码只收集、不参与建连)
-- 独立设置窗口 + 自绘标题栏;状态栏指标(连接 / 目标 / CPU / 内存 / 网络,每 1.5s 采样);Action 风格右键菜单
-- 会话显示名:用户填的名称优先,否则回退终端 OSC 标题;进程结束只标记「已断开」、不退出应用
+- `TerminalBuilder::new(working_directory, target, env, cx) -> Task<Result<TerminalBuilder>>`:`target` 决定本地 PTY 还是远端 russh(见 §5.2);就绪后经 `subscribe(cx)` 接上事件
+- 多会话外壳:两侧可拖拽侧边栏(默认折叠)夹着中间 dock 会话区(自绘标签栏 + 终端),会话可全部关掉(全关显示欢迎页,**启动时也是这个状态**——不自动开终端);底部三条并列状态栏(左右两条属于对应侧边栏并放该视图的按钮,**中间那条是空条**——曾放会话指标,已移除)
+- 远程连接:走**内建 SSH 客户端**(`crates/ssh`,基于 russh),不调用外部 `ssh` 命令。「新建会话」对话框收集 IP / 端口 / 名称 / 用户名 / 密码,**只往侧边栏的会话列表里加一条记录**(IP / 名称 / 用户名必填);双击那条记录才按它开终端(密码参与认证但只存在内存记录里);首次连接未知主机弹**「未知主机密钥」**对话框让用户核对指纹
+- 独立设置窗口 + 自绘标题栏;Action 风格右键菜单
+- 会话显示名:用户填的名称优先,否则回退终端 OSC 标题;进程结束只标记「已断开」(标签与内容保留)、不退出应用
 
 **依赖栈:**
 
@@ -26,8 +26,9 @@
 | `gpui`(`gpui-pre 0.3`) | UI 框架、窗口、文本布局、事件分发 |
 | `gpui-kit`(`features = ["component"]`) | 标题栏 / Sidebar / Tabs / StatusBar / Settings / Resizable、`icon_named!`、主题系统 |
 | `alacritty_terminal 0.26` | VT 解析、网格模型、PTY 封装(`tty`) |
+| `russh 0.63` + `russh-sftp 3`(`crates/ssh`) | 内建 SSH 客户端(终端通道 + SFTP 列远端目录);⚠️ **必须关掉默认的 `aws-lc-rs`** 改用 `ring`,否则 Windows 上要 NASM |
 | `portable-pty 0.9` | 经 alacritty `tty` 间接使用的跨平台 PTY |
-| `sysinfo 0.39` | 前台进程 / 工作目录 / 标题检测;状态栏指标采样 |
+| `sysinfo 0.39` | 前台进程 / 工作目录 / 标题检测(仅 `crates/terminal`,应用层已不再依赖) |
 | `rust-embed` | 内嵌 `assets/icons` |
 | `windows 0.62` | `SearchPathW`、`GetProcessId` |
 | `futures` / `parking_lot` | 事件循环 `select_biased!` 批处理、`FairMutex` Term 锁 |
@@ -40,14 +41,13 @@
 ```mermaid
 graph TB
     subgraph app层[crates/alacrterm]
-        MAIN[main.rs<br/>AppRoot:共享状态/布局装配/指标采样]
+        MAIN[main.rs<br/>AppRoot:共享状态/布局装配]
         SBAR[status_bar.rs<br/>公共状态栏]
         SIDE[sidebar_panel/<br/>左右侧边栏]
         TPANEL[terminal_panel.rs<br/>会话生命周期 + SessionPane]
         TABBAR[tab_bar.rs<br/>自绘标签栏]
-        DIALOG[dialog/connection.rs]
+        DIALOG[dialog/<br/>新建会话 / 新建文件夹 / 主机密钥]
         SETWIN[settings_window.rs]
-        METRICS[status_metrics.rs]
         ACT[actions.rs]
     end
 
@@ -61,8 +61,15 @@ graph TB
         TERM[terminal.rs<br/>Terminal 实体 + 事件循环]
         ALAC[alacritty.rs]
         PTYINFO[pty_info.rs]
+        BACKEND[backend.rs<br/>TerminalTarget + TerminalBackend]
         HYPER[alacritty/hyperlinks.rs]
         MAP[mappings/]
+    end
+
+    subgraph ssh层[ssh]
+        SESS[session.rs<br/>OS 线程 + russh 会话]
+        FSM[sftp fs.rs]
+        AUTH[auth.rs / handler.rs / params.rs]
     end
 
     subgraph util层[crates/util]
@@ -79,16 +86,21 @@ graph TB
     MAIN --> SETWIN
     MAIN -->|注册全局监听器| ACT
     MAIN -->|组件| GPUIC[gpui-kit]
-    SBAR -->|读采样值| METRICS
     TPANEL --> TABBAR
     VIEW --> TERM
     TERM --> ALAC
     TERM --> MAP
     TERM --> SHELL
+    term --> SSHBE
+    SSHBE --> SESS
+    SESS --> AUTH
+    SESS --> FSM
+    TERM -->|远端 SFTP 句柄| FSM
     ALAC --> PTYINFO
     ALAC --> HYPER
     HYPER --> PATH
     ALAC -.-> OS["OS 伪终端 / conpty<br/>tty::Pty"]
+    SESS -.-> NET["远端 sshd<br/>(TCP)"]
 ```
 
 ### 目录结构
@@ -102,36 +114,48 @@ crates/
   alacrterm/                    # 应用层(§3)
     src/
       main.rs                   # 入口 + AppRoot(根视图:跨组件共享状态 + 布局装配)
-      terminal_panel.rs         # 会话生命周期 + SessionRequest/SessionTarget + Session + SessionPane
+      terminal_panel.rs         # 会话生命周期 + SessionRequest + Session + SessionPane
       tab_bar.rs                # 自绘标签栏
-      status_bar.rs             # 公共状态栏;STATUS_BAR_HEIGHT 统一三条高度
+      status_bar.rs             # 公共状态栏(空条);STATUS_BAR_HEIGHT 统一三条高度
       sidebar_panel/            # 左右侧边栏(§3.2)
         mod.rs                  # Sidebar 实体(标签/折叠/宽度 + Render) + toggle_button + SidebarContent
         tabs.rs                 # 顶部视图标签条(点选 + 拖动换位 / 拖到另一条侧边栏)
         sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + Render)
-        files.rs                # FilesState(文件管理器:目录树 + Render;只对远端会话可见)
+        files.rs                # FilesState(文件管理器:远端 SFTP 目录树 + Render)
       dialog/                   # 对话框(§3.4)
         mod.rs                  # 共同约定(表单实体先建 / 页脚自拼 / on_ok 兜底校验)
         connection.rs           # 「新建会话」:只加一条 SSH 记录
         folder.rs               # 「新建文件夹」:会话列表分组
+        host_key.rs             # 「未知主机密钥」:首次连接让用户核对指纹
       welcome.rs                # 无会话时中间列的欢迎页
       settings_window.rs        # 独立设置窗口
-      status_metrics.rs         # sysinfo 采样 + 字节格式化
       actions.rs                # 自定义 Action + 全局监听器
       assets.rs                 # 图标资产
   terminal_view/                # 视图层
     src/
-      lib.rs                    # TerminalView:创建/订阅/输入/焦点/IME/滚动
+      lib.rs                    # TerminalView:创建(本地 / SSH)/订阅/输入/焦点/IME/滚动
       terminal_element.rs       # TerminalElement:三阶段渲染管线(约 1800 行)
       contrast.rs               # APCA 最小对比度
   terminal/                     # 核心层:仿真 + PTY + 事件循环
     src/
       terminal.rs               # Terminal 实体、事件系统、输入/鼠标/滚动(约 2600 行)
-      alacritty.rs              # alacritty_terminal 桥接层
-      alacritty/hyperlinks.rs   # OSC 8 / URL 正则 / 路径猜测
+      alacritty.rs              # alacritty_terminal 桥接层 + PtySender(往本地 PTY 写输入)
+      backend.rs                # 后端抽象:TerminalTarget(连什么) + TerminalBackend(谁搬字节)
       pty_info.rs               # sysinfo 进程查询
+      alacritty/hyperlinks.rs   # OSC 8 / URL 正则 / 路径猜测
+      pty_info.rs               # sysinfo 进程查询(Pty / None 两种 PID 来源)
       mappings/                 # keys.rs mouse.rs colors.rs
   util/                         # shell 探测、路径工具
+crates/ssh/                      # 内建 SSH 客户端(russh)
+  src/
+    lib.rs                      # 模块文档:边界、运行时、认证顺序、主机密钥
+    session.rs                  # 专属 OS 线程 + tokio 运行时;命令/事件两条通道
+    auth.rs                     # agent → 私钥文件 → 密码
+    handler.rs                  # 主机密钥校验(Ask / AcceptNew / Strict)+ 确认请求
+    params.rs                   # SshParams / SshAuth / HostKeyPolicy / SshSize
+    fs.rs                       # SshFs:SFTP 子系统(另开一条连接,懒连接)
+    error.rs                    # SshError(连不上哪个地址 / 认证 / 主机密钥变更…)
+  examples/local_server.rs      # 本机验证用的假服务端(玩具 shell + 只读 sftp 子系统)
 ```
 
 ---
@@ -213,59 +237,72 @@ fn main() {
 - **接线**(`TabGroupContext` 是只读快照):点标签 → `select_tab(ix, ..)`;拖 → `on_drag(group.drag_panel(ix, cx)?)` + 自绘 `TabDragPreview`;落点 → `drag_over::<DragPanel>(..)` + `on_drop` 调 `group.drop_panel(drag.clone(), Some(ix), true, ..)`;中键 → 关会话。
 - **关会话三条路**:标签 `×` / 中键 / 侧边栏右键菜单(按下标)。前两条走 [`AppRoot::close_panel_id`](`AppRoot::close_panel_id`)(按面板 id 找下标);不走 dock 的 `TabGroup::close_panel`(它拒绝关最后一块面板,而本应用要支持全关到欢迎页)。
 - **会话表是 dock 的镜像**:`AppRoot::terminals` 顺序 = `dock.layout(Center).panels()`,成员 = dock 里还在的面板,由 `sync_sessions_with_dock` 在 `DockEvent::LayoutChanged` 与新建 / 关闭后同步。
-- **公共状态栏**(`status_bar::render_status_bar`):只放当前会话指标(无会话时「无会话」,`.right(metrics)`)。⚠️ 侧边栏可见性**只由标题栏右端那两枚开关**改变(状态栏里没有「展开」入口)。
+- **公共状态栏**(`status_bar::empty_status_bar`):**空条**,只为与两侧边栏那条等高。⚠️ 侧边栏可见性**只由标题栏右端那两枚开关**改变(状态栏里没有「展开」入口)。
 - **三条状态栏等高**:`status_bar::STATUS_BAR_HEIGHT` = 28px;状态栏里带图标的按钮要显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把状态栏撑高——目前两侧那条已无任何内容)。
 - **分栏竖线只由拖拽条画**:侧边栏状态栏都不画 `border_*_1`,主题的 `sidebar_border` 置透明(`config::change_theme` 里设)。⚠️ 换主题必须走 `config::change_theme(mode, cx)`;⚠️ `sidebar_border` 兼作侧边栏菜单「嵌套项缩进导线」的颜色,会一起消失。
 
 #### 文件管理器(远端会话的目录树)
 
-> 状态与渲染都在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(根目录 + 目录项缓存 + 展开状态 + `TreeState` + 它自己的 `Render`);作为 `SidebarContent::Files(Entity<FilesState>)` 摆进侧边栏内容位。默认停在**右侧边栏**(左栏是「会话」),两条侧边栏共用同一个实体,**且只对远端会话可见**(见 §3.2)。
+> 状态与渲染都在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(远端句柄 + 根目录 + 目录项缓存 + 展开状态 + `TreeState` + 它自己的 `Render`);作为 `SidebarContent::Files(Entity<FilesState>)` 摆进侧边栏内容位。默认停在**右侧边栏**(左栏是「会话」),两条侧边栏共用同一个实体,**且只对远端会话可见**(见 §3.2)。
 
-- **只在远端会话下摆出来**:本地终端的目录既不跟也不显示 —— 「跟随终端目录」靠的是 Windows 的 shell 集成(PowerShell 上报 `$PWD`,见 §4.5),那道适配已整体移除;本地目录用系统自己的文件管理器打开就好。所以 `AppRoot::render` 只同步可用性(`Sidebar::set_files_enabled`),不再把 `TerminalView::working_directory(cx)` 喂给文件树。
-- **远端目录的来源还没接上**:`FilesState::sync` 是留给它的入口(当前没有调用方),因此这个视图恒为 `None` 根目录 ⇒ 只摆一个空占位(gpui-kit `Empty` 组件;目录是空的时候也用它,见 `sidebar_panel::empty_state`)。
-- **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 读**一层**目录项(慢盘 / 超大目录不卡界面),回填前核对**代次**(`generation`,换根目录时 +1 ⇒ 在途结果直接丢掉)。排序 = 目录在前、名字不区分大小写。
+- **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步两件事:可用性(`Sidebar::set_files_enabled(remote)`)与**数据源**(当前会话的 `SshFs` 句柄,来自 `TerminalView::remote_fs(cx)`)。
+- **数据源是 SFTP**(`ssh::SshFs`,见 §5.3):起始根目录 = 远端家目录(`home_dir()`);远端 shell 的 `cd` 拿不到(要改远端 prompt),所以根目录**不跟随终端**,由用户自己跳。
+- ⚠️ **必须等会话连上再给句柄**(`TerminalView::is_connected`):连上之前主机密钥可能还没确认,而 SFTP 那条连接**没有确认通道**(`ClientHandler::new` 传 `None`)⇒ 只会失败。判断放在句柄那一层,`FilesState::sync` 自己只比较 `Option<SshFs>`(`Arc::ptr_eq`)。
+- **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 调 `list_dir`(一层),回填前核对**代次**(`generation`,换根目录 / 换会话时 +1 ⇒ 在途结果直接丢掉)。排序由 `SshFs` 负责:目录在前、名字不区分大小写。
 - ⚠️ **未加载的目录必须挂一个占位子项**(label「加载中…」):gpui-kit 的 `TreeItem::is_folder()` 就是「有没有子项」,没有子项的行既没有 caret、点击也不会展开(`TreeState::toggle_expand` 对非 folder 直接 return)⇒ 子目录永远打不开。`visible_rows` 的行数算法必须与 `build_items` + `TreeState::add_entry` 的展平规则**逐条一致**(含这条占位)。
 - 行类型同样**编码在行 id 前缀**里(`dir-0-2` / `file-1` / `loading-0-2`),判类型不用 `TreeEntry::is_folder()`(空目录 / 未加载目录都会被判反——前者没有子项、后者挂着占位子项)。目录行 = caret(有子项时)+ 文件夹图标 + 名字,文件行 = 文件图标 + 名字(视图**只读**,行点击只展开 / 收起,不打开文件),占位行是灰字。
 - 展开状态存 `FilesState::expanded`(下标链),由 `cx.subscribe(&tree, ..)` 收 `TreeEvent::{Expanded,Collapsed}` 回写(与 `SessionsState` 同一套理由:`set_items` 会重建 `TreeItem`)。
-- 顶部一行是一条**路径输入框**（整行铺满），与「显示中的根目录」双向对齐：改内容就尝试跳过去（`navigate_to`，**只认确实是目录的路径**——不存在 / 不是目录 / 为空时什么都不动，否则打字中途那些不成立的中间态会把树清空）；根目录变了时把新路径写回输入框（`sync_path_input`，用 `InputState::set_value`，它内部关掉事件发射 ⇒ 不会回环触发 `navigate_to`）。⚠️ **没有目录可显示时（远端目录来源还没接上 ⇒ `root` 为 `None`）这条输入框整个不摆**，只留空占位——一条空框既没内容可编辑、也没东西可跳。⚠️ 输入框用组件**默认尺寸**（`Size::Medium`，高 32px）且关掉清除按钮（`cleanable(false)`：路径由视图自己管，一键清空只会把面板弄空）⇒ 那一行是**自己的** `PATH_ROW_HEIGHT = 36px`，**不能**复用它上面标签条的 `TAB_HEIGHT`（24px，输入框会溢出到树上）。`FilesState` 把「上一次同步进来的工作目录」(`cwd`)与「显示中的根目录」(`root`)分开存:只有 **cwd 变化**才把 `root` 拉回那个目录,手动跳转不会被后续的 `sync` 顶回去(⚠️ `cwd` 现在只服务于 `sync`,后者暂无调用方)。
+- 顶部一行是一条**路径输入框**(整行铺满)+ 一行「当前根目录」(便于看清在哪,长路径在输入框里会被截断),与「显示中的根目录」双向对齐:改内容就尝试跳过去(`navigate_to`,先 `fs.is_dir()` 问远端,**只认确实是目录的路径**——不存在 / 不是目录 / 为空时什么都不动,否则打字中途那些不成立的中间态会把树清空);根目录变了时把新路径写回输入框(`sync_path_input`,用 `InputState::set_value`,它内部关掉事件发射 ⇒ 不会回环触发 `navigate_to`)。⚠️ **还没有根目录时(没有远端会话 / 正在问家目录)这条输入框整个不摆**,只留空占位。⚠️ 输入框用组件**默认尺寸**(`Size::Medium`,高 32px)且关掉清除按钮(`cleanable(false)`)⇒ 那一行是**自己的** `PATH_ROW_HEIGHT = 36px`,**不能**复用它上面标签条的 `TAB_HEIGHT`(24px,输入框会溢出到树上)。
+- 失败要**说清原因**:连不上 SFTP(认证被拒 / 服务端没开 sftp 子系统)时把 `SshError` 的话显示在空占位上;某个目录读不到(没权限 / 连接断了)则显示成「这个目录是空的」+ 一句原因。⚠️ 连接能在下次请求时重连(`SshFs` 内部),所以这里的错误只是**当时**的结果。
 - 高度与 `SessionsState` 同样处理:`.h(行数 × TREE_ROW_HEIGHT)`(行数手算,`Tree` 是虚拟列表 + `size_full()`);`sync_tree` 也靠 `(根目录, (名字, 是否目录, 层级) 全量)` 签名挡住每帧 `set_items`(`TreeState::set_items` 会 notify,否则自激)。
 
-### 3.3 会话模型(`Session` / `SessionRequest` / `SessionTarget`)
+### 3.3 会话模型(`Session` / `SessionRequest`)
 
 ```rust
 // crates/alacrterm/src/terminal_panel.rs —— 终端实例那条线
-enum SessionTarget { Local, Ssh { user: String, host: String, port: String } }
-struct SessionRequest { name: Option<SharedString>, shell: Shell, target: SessionTarget }
+enum SessionRequest {                       // 建会话要的全部信息
+    name: Option<SharedString>,
+    target: TerminalTarget,                 // 本地 shell / 远端 SSH(见 §5.2)
+}
 struct Session { view: Entity<TerminalView>, pane: Entity<SessionPane> }
 
 // crates/alacrterm/src/sidebar_panel/sessions.rs —— 记录那条线(纯数据 + 该视图的增删改/拖放)
 enum SessionEntry { Folder(SessionFolder), Session(SessionRecord) }
 struct SessionFolder { name: SharedString, children: Vec<SessionEntry> }
-struct SessionRecord { name: SharedString, user: String, host: String, port: String }
+struct SessionRecord { name: SharedString, user: String, host: String, port: u16, password: Option<String> }
 type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3.2 会话列表)
 ```
 
-- **代码位置与归属**(没有单独的 `session.rs`):`SessionTarget` / `SessionRequest` 与运行时句柄 `Session` 同在 `terminal_panel.rs`(终端实例那条线);`SessionEntry` / `SessionFolder` / `SessionRecord` / `SessionPath` 与**视图状态 `SessionsState`** 同在 `sidebar_panel/sessions.rs`(记录那条线:数据 + 增删改 + 拖放 + 树同步);`main.rs` 只留程序入口 + 根视图 `AppRoot`(跨组件共享状态 + 装配)。
-- `Session::title(cx)` / `Session::target(cx)` 都转调 `pane`(`SessionPane` 持有显示名 + 连接目标:标签栏读名字、状态栏读目标)。标题取自终端 **OSC 标题**(`breadcrumb_text`),不是 `Shell::WithArguments` 的 `title_override` ⇒ 自定义名称必须自己存。
-- 新建统一走 `AppRoot::spawn_session(SessionRequest { .. })`:`spawn_terminal`(本地系统 shell)与 `open_session_record`(按记录连 SSH)都经由它:建好 `TerminalView` 后包成 `SessionPane` 挂进 dock,再 `move_panel` 到该进的标签组(§3.2)。
+- **代码位置与归属**(没有单独的 `session.rs`):`SessionRequest` 与运行时句柄 `Session` 同在 `terminal_panel.rs`(终端实例那条线);`SessionEntry` / `SessionFolder` / `SessionRecord` / `SessionPath` 与**视图状态 `SessionsState`** 同在 `sidebar_panel/sessions.rs`(记录那条线:数据 + 增删改 + 拖放 + 树同步);`main.rs` 只留程序入口 + 根视图 `AppRoot`(跨组件共享状态 + 装配)。
+- **连接目标直接复用 `TerminalTarget`**(`terminal::TerminalTarget`):`SessionRequest` 只需 `name` + `target`,不必再自己造一个枚举。会话表里只留一个 `is_remote` 布尔(`SessionPane`),因为「文件管理器只服务远端会话」只需要这一位。
+- `Session::target(cx)` 转调 `pane`(`SessionPane` 持有显示名 + 连接目标:文件管理器据此判断远端 / 本地)。标题取自终端 **OSC 标题**(`breadcrumb_text`),不是 shell 的 `title_override` ⇒ 自定义名称必须自己存。
+- 新建统一走 `AppRoot::spawn_session(SessionRequest)`:`TerminalView::new(None, target, host_key, settings, ..)` 是**唯一入口**(本地 / 远端只差 `target`,见 §3.8);之后包成 `SessionPane` 挂进 dock,再 `move_panel` 到该进的标签组(§3.2)。
 - ⚠️ **两条线不要混**:`SessionsState::entries`(会话记录:配置,§3.2 会话列表)与 `AppRoot::terminals`(终端实例:dock 面板)彼此独立 —— 记录可以 0 个终端,终端也可以不属于任何记录(标签栏 `+` 开的本地终端)。
 - 生命周期:`close_terminal`(→ `DockArea::remove_panel`)、`close_panel_id`(标签 `×` / 中键)、`sync_sessions_with_dock`;下标访问一律先 `get()`(允许会话为空)。dock 点标签会回调面板的 `set_active`,它用 `AppRoot::defer_after_update` 回写 `active`。
-- 进程结束:只标记 `exited` 并 `notify`,状态栏显示「已断开」,标签与终端内容保留(§5)。
+- 进程结束(本地 shell 退出 / SSH 断开):只标记 `exited` 并 `notify`,标签与终端内容保留(断开原因写在网格里,见 §5.2),用户自己决定关掉还是重开(§5)。
 
-### 3.4 对话框(`dialog/connection.rs` / `dialog/folder.rs`)
+### 3.4 对话框(`dialog/connection.rs` / `dialog/folder.rs` / `dialog/host_key.rs`)
 
 **「新建会话」**(`dialog/connection.rs`)
 
 - 触发:侧边栏状态栏右下角 `+`(`NewSession{folder: None}`)、文件夹行右键「在这里新建会话」(`NewSession{folder: Some(path)}`)→ 全局监听器 → `AppRoot::open_new_session_dialog(folder, ..)`
-- 表单 5 字段:IP / 端口(默认 22) / 名称 / 用户名 / 密码(`.masked(true)` 只影响渲染,`value()` 返回明文)
+- 表单 5 字段:IP / 端口(默认 22,**必须能解析成 `u16`**,否则「添加」禁用并提示) / 名称 / 用户名 / 密码(`.masked(true)` 只影响渲染,`value()` 返回明文)
 - ⚠️ **只支持 SSH**:IP、名称、用户名三项必填(`ConnectionForm::is_valid` 同时驱动「添加」的禁用态与下方的红字提示,`on_ok` 里再兜一次校验,缺项不关对话框);**IP 留空不再是「本地终端」**(本地终端请用标签栏 `+` / 欢迎页)
-- **「添加」只往列表加一条记录,不开终端**:`record()` → `add_session_record(record, folder)`;密码只收集不参与建连(系统 `ssh` 不接受命令行传密码),也**不随记录保存**
+- **「添加」只往列表加一条记录,不开终端**:`build()` → `add_record(record, folder)`;密码**进内存里的记录**(不落盘),双击那条记录时才交给 `SshAuth::Password`(§5.1)
 - ⚠️ 输入框实体必须在打开对话框**之前**创建(构建闭包是 `Fn`,每帧调用);页脚用 `DialogFooter` + `DialogClose` / `DialogAction`(`Dialog` 不会自动生成确定 / 取消按钮)
 
 **「新建文件夹」**(`dialog/folder.rs`)
 
 - 触发:侧边栏状态栏左下角文件夹图标(`NewFolder{parent: None}`)、文件夹行右键「新建子文件夹」(`NewFolder{parent: Some(path)}`)
 - 只有一个「名称」输入框:空名字禁用「创建」,`on_ok` 里再兜一次;创建后追加到目标目录末尾并展开它
+
+**「未知主机密钥」**(`dialog/host_key.rs`)
+
+- 触发链:SSH 握手 → `ssh::HostKeyPrompt` → `terminal::Event::HostKeyPrompt` → `terminal_view::HostKeyPromptHandler` → `AppRoot::defer_after_update` → `window.open_dialog`
+- 正文:端点(`user@host:port`)、密钥算法、**独占一行**的指纹(长串横排会被对话框裁掉)、一句说明。按钮 = 「不信任」(`DialogClose`) / 「信任并继续」(primary)
+- ⚠️ **握手线程在等回答**(最多 `ssh::HOST_KEY_TIMEOUT` = 120s),所以回调里必须**尽快弹出来**,不能阻塞;关闭 / 取消都算**不信任**(`HostKeyPrompt::respond` 只认第一次回答)
+- ⚠️ 回调发生在终端事件处理过程中(窗口仍在更新栈上)⇒ 必须经 `AppRoot::defer_after_update`,直接 `open_dialog` 拿不到窗口
+- 只处理「没见过的主机」;**密钥变了**(与 `known_hosts` 记录不一致)一律直接拒绝,不走这里(要用户自己清理 `known_hosts`)
 
 ### 3.5 设置窗口(`settings_window.rs`)
 
@@ -299,14 +336,11 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 
 ⚠️ **必须用 git main 的 gpui-kit**:crates.io 的 `0.6.0` 里 `NumberField` 的 `step` 不生效(点一次只 ±1)。`Cargo.toml` 指向 git main,由 `Cargo.lock` 锁定。
 
-### 3.6 状态栏指标(`status_metrics.rs` 采样 / `status_bar.rs` 渲染)
+### 3.6 状态栏(`status_bar.rs`)
 
-- `SystemMonitor`(sysinfo `System` + `Networks`)每 1.5s 采样一次;`SessionMetrics` 是渲染只读快照
-- 驱动:`AppRoot::start_metrics_sampling` 的 `cx.spawn` 循环(用 `update`,不需要窗口)
-- 渲染在公共状态栏右端(`status_bar::render_status_bar`);无会话时显示「无会话」
-- CPU / 内存 = 当前会话进程(`TerminalView::pid()`);存活状态三态(`None` 未采样 / `Some(true)` 运行中 / `Some(false)` 已结束)
-- 网络 = 系统整体速率(`Networks` 累计值差分);按进程统计流量需平台 API,sysinfo 不提供
-- 每轮采样都 `cx.notify()`
+- 三条等高(`status_bar::STATUS_BAR_HEIGHT` = 28px):左右两条属于各自侧边栏(「会话」视图那条两端放新建文件夹 / 新建会话按钮,其余情况空条),**中间那条是空条**。
+- ⚠️ **中间那条曾放会话指标**(连接状态 / 连接目标 / 进程 CPU / 内存 / 系统网络速率,每 1.5s 采样),整块已按需求移除,连同 `status_metrics.rs` 采样任务(`start_metrics_sampling` / `SystemMonitor` / `SessionMetrics`)与 `alacrterm` 的 `sysinfo` 依赖。⇒ 不要为了「再加一个指标」把它装回来;真要加,注意那次每 1.5s 的 `cx.notify()` 会让**整棵树**重建(§9 的优化清单)。
+- ⚠️ 状态栏里带图标的按钮要显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把状态栏撑高)。
 
 ### 3.7 右键菜单与 Action(`actions.rs`)
 
@@ -322,12 +356,12 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 采用**后台任务 + 异步事件订阅**模式:
 
 ```rust
-let builder = TerminalBuilder::new(working_directory, shell, env, cx);   // 后台任务
+let builder = TerminalBuilder::new(working_directory, target, env, cx); // 后台任务
 cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
     let mut cx = cx.clone();
     async move {
-        let builder = match builder.await { ... };                       // 等待 PTY 就绪
-        let terminal = cx.new(|cx| builder.subscribe(cx));               // 启动事件循环
+        let builder = match builder.await { ... };                       // 等待后端就绪
+        let terminal = cx.new(|cx| builder.subscribe(cx));               // 接上事件
         let subscription = cx.subscribe(&terminal, |_t, event, cx| ...); // 订阅 Event
         cx.update(|app| { ... });                                        // 写回视图
     }
@@ -339,18 +373,20 @@ cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
 1. 移除 `SHLVL`(让子 shell 自己初始化为 1)
 2. `LANG` 缺失时兜底 `en_US.UTF-8`
 3. 注入 `TERM=xterm-256color`、`COLORTERM=truecolor`(`insert_zed_terminal_env`)
-4. `Shell::System` 在 Windows 下解析为 `get_windows_system_shell()`(见 §7);Unix 下为 `None`(直接用用户登录 shell)
-5. 计算 `shell_kind`(决定 `tty_escape_args`),`pty_options` 传入前台线程的信号掩码(保证后台创建 PTY 时 Ctrl-C 等信号仍正常)
-6. `open_pty` 打开 PTY(滚动历史 `DEFAULT_SCROLL_HISTORY_LINES = 10_000`)→ `new_term` 创建 `Term<ZedListener>` → `spawn_event_loop` 启动 IO 线程(返回 `pty_tx`)
-7. 组装 `Terminal` 结构(含 `TerminalPty`、`PtyProcessInfo`、`CopyTemplate` 等),返回 `TerminalBuilder { terminal, events_rx }`
+4. 建 `term_config`、事件通道、`Term<ZedListener>`（两条路都一样）
+5. `match &target` 分派（这是唯一分叉点，见 §5.2）:
+   - `TerminalTarget::Ssh(params)`：拉一条 `SshSession`（不等待连上），得 `TerminalBackend::Ssh`
+   - `TerminalTarget::Local(shell)`：`Shell::System` 在 Windows 下解析为 `get_windows_system_shell()`(见 §7)；然后算 `shell_kind` / `pty_options` → `open_pty`(滚动历史 `DEFAULT_SCROLL_HISTORY_LINES = 10_000`) → `spawn_event_loop` 启动 IO 线程，得 `TerminalBackend::Pty { pty_tx, info }`
+6. 组装 `Terminal`(含 `backend` / `ssh_events` / `ssh_pending` / `connected` / `CopyTemplate { target, env }`)，返回 `TerminalBuilder { terminal, events_rx }`
 
 ### 3.9 关键异步约定与 gpui 坑
 
 - `cx.spawn` 里必须先在闭包内 `clone` 再进 `async` 块(否则 lifetime 报错)
 - `builder.await` 失败时通过 `this.update` 写回 `error` 并 `cx.notify()`,UI 显示红色错误文本
-- `subscribe(cx)` 启动事件循环后返回 `Terminal` 实体,事件循环 task 存在 `event_loop_task` 字段
+  - ⚠️ **远端会话不会走到这条**:SSH 分支只把会话线程拉起来(失败都从事件流里报,见 §5.1)⇒ `TerminalView::new` 里 `builder.await` 对远端恒为 `Ok`
+- `subscribe(cx)` 返回 `Terminal` 实体,事件 task 存在 `event_loop_task` 字段；**两条路各一个泵**:本地是 alacritty 事件的 4ms 批处理循环,远端是 `SshEvent` 循环(调 `Terminal::process_ssh_event`，见 §5.2)
 - ⚠️ 回调里不要直接 `update_in`(目标窗口仍在更新栈上,会返回 `Err("entity has no current window")`;同帧的 `window.defer` 也一样)⇒ 统一用 `AppRoot::defer_after_update`(`App::spawn` + 1ms 定时器 + `update_in`)
-- 不需要窗口的定时任务(`sample_metrics`)用 `update` 即可
+- 不需要窗口的定时任务用 `update` 即可
 - gpui-kit 的 `h_flex()` 默认交叉轴居中:放在里面的满高列要显式 `.h_full()`
 
 ### 3.10 渲染配置(`config/terminal.json`,启动时解析一次)
@@ -556,13 +592,14 @@ graph LR
 ### 4.5 标题 / 进程信息(`pty_info.rs`)
 
 - `ProcessIdGetter`:Unix 用 `tcgetpgrp` 取前台进程组;Windows 用 `GetProcessId(handle)`,为 0 时回落 `fallback_pid`
+- **本地进程信息的缺失是「后端」表达的**:只有 `TerminalBackend::Pty` 变体里才有 `PtyProcessInfo` ⇒ `Terminal::pid` / `title` / `working_directory` 等一律走 `self.backend.local_process_info()?`。⚠️ 不要给远端会话造一个「假 PTY」:unix 的 `tcgetpgrp(0)` / `killpg(0, ..)` 操作的是**本进程的进程组**(会杀到自己),`Drop` 里的 `terminate_child_process` 会直接拿它开刀 —— 后端枚举从源头就不会走到那儿(见 §5.2)。
 - `emit_title_changed_if_changed`(每次 `Wakeup` 触发):后台用 `sysinfo` 刷新进程信息,比较 `cwd` / `name` 变化后才发 `Event::TitleChanged`
 - Windows 特判:`shell_program == title` 时忽略 shell 自身的 OSC 标题事件(否则 breadcrumb 会显示 `pwsh.exe` 路径)
 - **已移除的 shell 集成**(曾占一整个 `platform.rs`,文件整体 `#![cfg(windows)]`):PowerShell 的 `cd`(`Set-Location`)只改 `$PWD`、**不动进程的当前目录**,所以曾靠启动 PowerShell(`pwsh` / `powershell`,且用户没自带参数)时追加 `-NoExit -EncodedCommand <base64(UTF-16LE 脚本)>` 注入一段 prompt 包装:画提示符前发一条 `ESC ] 2 ; alacrterm-cwd:<路径> BEL`,再由 `Terminal` 从标题里解析出来。**整段已删除**(文件管理器不再跟随本地终端目录):`Terminal::working_directory()` 只剩 PTY 前台进程 cwd 一个来源(`client_side_working_directory`),`Event::PwshPathChanged` 与 `Terminal::shell_reported_cwd` 都不再有;`ShellParams::new` 也不再给 PowerShell 追加参数。留在 `#[cfg(windows)]` 里的只有「忽略 shell 自身的 OSC 标题」与 `resolve_path`(`SearchPathW`,判 `shell_program`)。
 
 ---
 
-## 5. 事件系统
+## 5. 事件系统与远端会话(SSH)
 
 **向下事件**(`InternalEvent`,排入 `self.events` 队列,`sync()` 时消费):
 
@@ -570,11 +607,15 @@ graph LR
 
 **向上事件**(`Event`,`cx.emit` 给视图):
 
-`TitleChanged` / `BreadcrumbsChanged` / `CloseTerminal` / `Bell` / `Wakeup` / `BlinkChanged` / `SelectionsChanged` / `NewNavigationTarget` / `Open`
+`TitleChanged` / `BreadcrumbsChanged` / `CloseTerminal` / `Bell` / `Wakeup` / `BlinkChanged` / `SelectionsChanged` / `NewNavigationTarget` / `Open` / `HostKeyPrompt`
 
-**后端事件**(`TerminalBackendEvent`,alacritty 回调 → channel):
+**后端事件**(`TerminalBackendEvent`,**只**来自本地 PTY 的 alacritty 回调):
 
 `MouseCursorDirty` / `Title` / `ResetTitle` / `ClipboardStore` / `ClipboardLoad` / `ColorRequest` / `PtyWrite` / `TextAreaSizeRequest` / `CursorBlinkingChange` / `Wakeup` / `Bell` / `Exit` / `ChildExit`
+
+**SSH 事件**(`SshEvent`,只来自远端会话,由 `Terminal::process_ssh_event` 处理,见 §5.2):
+
+`Status`(进度行) / `Data`(远端字节) / `Connected` / `HostKeyPrompt` / `Closed { exit_status, reason }`
 
 > **顺序敏感**:`ColorRequest`(OSC 4/10/11 颜色查询)必须在事件循环里处理,不能放到 `sync()`。
 
@@ -584,7 +625,42 @@ graph LR
 |---|---|
 | `Wakeup` / `SelectionsChanged` | 仅 `cx.notify()` 触发重绘 |
 | `TitleChanged` / `BreadcrumbsChanged` | 读 `terminal.breadcrumb_text`(空则 `"终端"`)写入 `self.title` 并 `notify` |
-| `CloseTerminal` | 标记 `exited = true` 并 `notify()`(不退出应用),状态栏显示「已断开」 |
+| `CloseTerminal` | 标记 `exited = true` 并 `notify()`(不退出应用);标签与网格内容保留,断开原因就在屏幕上 |
+| `HostKeyPrompt` | 交给应用层的 `HostKeyPromptHandler`(弹「未知主机密钥」对话框,§3.4) |
+
+### 5.1 远端会话的连接与认证(`crates/ssh`)
+
+- **独立 crate、独立线程**:`crates/ssh` 自带一个 OS 线程(线程内跑 current-thread tokio 运行时),跨边界只有两条**执行器无关**的通道(命令 `tokio::mpsc`、事件 `futures::mpsc`)⇒ 宿主不需要 tokio,`ssh` 也不需要知道 gpui。
+- **认证顺序**(照 OpenSSH):ssh-agent → 私钥文件(`~/.ssh/id_{ed25519,ecdsa,rsa}`,RSA 要 `best_supported_rsa_hash`)→ **密码**(仅当 `SshAuth::Password` 给了密码)。全都失败才报 `SshError::Auth{tried, reason}`(`reason` 是排查的唯一线索)。密码来源就是「新建会话」对话框填的那一个(**只在内存记录里,不落盘**)。
+- **连接参数**:`SshParams`(host / port / user / auth / host_key / term / key_files / known_hosts);`SshAuth` **手写 `Debug`** 不打印密码。
+- **失败不让建终端失败**:连不上 / 认证失败 / 主机密钥被拒都只从事件流里报出来,会话以「已断开」留在标签页(网格里写着原因)。
+
+### 5.2 连什么(`TerminalTarget`)与谁搬字节(`TerminalBackend`)
+
+两条路的差别不只是「数据从哪来」,还是**谁在驱动模拟器**（`crates/terminal/src/backend.rs`）:
+
+| | 本地 PTY | 远端 SSH |
+|---|---|---|
+| 谁写 `term` | alacritty 的 `EventLoop` 自己读 PTY 并写入 | **没人** ⇒ `Terminal::process_ssh_event` 亲手 `advance` |
+| 本地进程信息 | `Arc<PtyProcessInfo>`（pid / 前台进程 / cwd） | 没有 ⇒ `local_process_info()` 返回 `None` |
+| 写输入 / 改尺寸 / 关连接 | `PtySender`（alacritty notifier） | `SshSession::{write, resize, disconnect}` |
+| 远端目录 | 无（走 `working_directory()`） | `SshFs`（SFTP，见 §5.3） |
+
+- `TerminalBackend` 枚举就是抽象本身：`write` / `resize` / `shutdown` / `local_process_info() -> Option<..>` / `remote_fs() -> Option<SshFs>`。⚠️ **不要**为「统一输入口」再抽一层 trait + `Box<dyn>`——枚举分派已经够，而且 `local_process_info` 的 `Option` 正是「远端没有本地进程」的准确表达。
+- **远端字节的坑（两个）**：
+  1. **进度行**：建连 + 认证要好几秒，期间远端没有任何输出。进度写成屏幕上的一行（`\r\x1b[2K` + 暗色），远端一开口就擦掉；断开原因用红字留在屏幕上。
+  2. ⚠️ **首次真实尺寸之前要攒字节**（`feed_remote_bytes` + `ssh_pending` / `resized_once` / `SSH_PENDING_LIMIT = 256 KiB`）：建会话时网格还是 `TerminalBounds::default()` 的占位尺寸（100×6），此时写进去的内容会被第一次重排顶出可视区（alacritty `Grid::grow_lines` 在没历史行时整体上滚）。所以先攒着，等第一次 `Resize` 处理完再补写。申请 PTY 的**初值**也因此固定为 `INITIAL_PTY_SIZE = 80×24`（不是 100×6：远端 readline 看到 6 行会重排甚至清屏）。
+- **`Connected` 事件**：握手 / 认证 / 申请 PTY 与 shell 全部成功后由 `ssh` crate 发出 ⇒ `Terminal::is_connected()` 变真。**这是使用同一份参数的其它连接（如 SFTP）的前置条件**（§3.2 文件管理器）——`HostKeyPolicy::Ask` 下否则会撞上「没有确认通道」。
+- ⚠️ `HostKeyPolicy::Ask` 的确认请求也走这条流：`SshEvent::HostKeyPrompt` → `Event::HostKeyPrompt` → 界面弹窗；握手线程在等回答（超时 120s 就放弃）。
+- ⚠️ **主机密钥是 Windows 之外唯一要注意的坑**：`crates/ssh` 必须用 `ring` 后端（`default-features = false, features = ["ring", ...]`），默认的 `aws-lc-rs` 在 Windows 上要 NASM。
+
+### 5.3 远端文件系统(`crates/ssh/src/fs.rs`)
+
+- **另开一条连接走 sftp 子系统**(不复用终端那条):russh 开新通道要 `&mut Handle`,而终端那条连接一直在自己的线程里 `select!` 搬字节 —— 塞进去要么让列目录卡住键盘输入,要么加一层互斥与任务调度。代价是多一次认证(密码在加密信道里再送一遍),所以连接是**懒的**:第一次真正列目录时才建。
+- 线程模型与 `session.rs` 同一套(自带 OS 线程 + current-thread 运行时 + `tokio::mpsc` 请求 / `futures::oneshot` 应答);发送失败(线程已退出)会**清掉句柄重试一次**。
+- API:`home_dir()`(远端家目录)/ `list_dir(path)`(一层,排序 = 目录在前、名字不区分大小写)/ `is_dir(path)`;错误统一翻成一句中文(`远端没有这个路径` / `拒绝访问` / `响应超时` / …)。
+- ⚠️ **状态错误不丢连接**(没有这个路径 / 没权限只是那一条路径的事),只有 IO / 超时 / 协议错误才丢连接让下次重连。
+- ⚠️ 未知主机 + 这条连接**没有确认通道** ⇒ 直接失败并提示「请先打开这台主机的终端会话,在那里信任它的主机密钥」(不能干等)。
 
 ---
 
@@ -678,7 +754,7 @@ flowchart TD
 - **保留**:事件循环 + 4ms 批处理、选择 / 复制、vi mode、超链接、鼠标协议、滚动、进程标题检测、OSC 52 剪贴板、颜色查询
 - **砍掉**:Zed 的 `settings` 依赖、主题系统、搜索 UI
 - **替换**:本地 `TerminalColors` + 手写 Windows shell 探测;editor 依赖用本地 `paint_quad` 实现
-- **新增**:应用外壳(§3)——标题栏、侧边栏 / 分栏、dock 会话区与自绘标签栏、`ssh` 对话框、设置窗口、状态栏指标、右键菜单
+- **新增**:应用外壳(§3)——标题栏、侧边栏 / 分栏、dock 会话区与自绘标签栏、`dialog` 三个对话框、设置窗口、右键菜单;远端会话(§5.1-5.3)——内建 SSH 客户端 + SFTP 文件管理器
 
 **架构核心**:`Term` 网格与 UI 通过 `Content` 快照解耦——UI 线程每次 render 只做一次 `make_content` 快照,`sync()` 中消费 `InternalEvent` 队列,IO 线程与 UI 线程用 unbounded channel + 4ms 批处理通信。
 
@@ -691,12 +767,19 @@ cargo run -p alacrterm        # 运行终端
 cargo test -p alacrterm       # 单元测试(格式化等纯函数)
 cargo check --workspace       # 编译检查
 cargo build -p alacrterm      # 构建
+
+# 内建 SSH 客户端(本地假服务端,含只读 sftp 子系统)
+cargo test -p ssh --test roundtrip
+# 手工验收:起假服务端(用户 tester / 密码 alacrterm-test),再在界面里建一条指向 127.0.0.1:2299 的会话
+cargo run -p ssh --example local_server -- 2299
 ```
 
 ## 附录:仓库记忆要点(易踩的几处)
 
 - `window.handle_input` 只能在 paint 阶段调用 ⇒ 自定义 Element 在 `paint()` 里注册 InputHandler
 - `terminal.input` 参数是 `impl Into<Cow<'static, [u8]>>`,`String` 需 `.into_bytes()`
-- 依赖来源:`gpui` / `gpui-kit` 都是 **git 依赖**(gpui-kit 需要 main 上的数字字段修复,§3.5)
+- 依赖来源:`gpui` / `gpui-kit` 都是 **git 依赖**(gpui-kit 需要 main 上的数字字段修复,§3.5);`ssh` crate 的 russh **必须关掉 `aws-lc-rs` 换 `ring`**(§5.2)
 - 标题栏集成三要素:`gpui_kit::init` → `Theme::change(ThemeMode::Dark)` → `WindowOptions` 用 `TitleBar::window_options()`
 - 窗口标题双轨:`window.set_window_title`(原生)+ 标签栏 / 侧边栏显示 `Session::title()`;自绘 `TitleBar` 固定 `Alacrterm`
+- SSH 的「已连上」(`Terminal::is_connected`)是**使用同一份参数做别的连接**(SFTP 文件管理器)的前置条件(§3.2 / §5.2)
+- 假 SSH 服务端(`ssh/examples/local_server.rs`)里 **`data` 回调要按通道过滤**:russh 会把**所有**通道的数据都送到 `Handler::data`,不限住的话 sftp 那条通道的协议包会被玩具 shell 当成键盘输入回显回去

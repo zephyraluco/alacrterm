@@ -20,54 +20,27 @@ use gpui_kit::component::{
         panel_handle,
     },
 };
+use terminal::TerminalTarget;
 use terminal_view::{RenderSettings, TerminalView};
-use util::shell::Shell;
 
 use crate::actions::NewLocalTerminal;
 use crate::assets::IconName;
 use crate::config;
+use crate::dialog::host_key;
 use crate::AppRoot;
 
-/// 会话的连接目标：决定状态栏「连接状态」一栏显示什么。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SessionTarget {
-    /// 本地系统 shell。
-    Local,
-    /// 通过 ssh 连接的远端主机。
-    Ssh {
-        user: String,
-        host: String,
-        port: String,
-    },
-}
-
-impl SessionTarget {
-    /// 状态栏显示用的简短描述。
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Local => "本地".to_string(),
-            Self::Ssh { user, host, port } => {
-                if user.is_empty() {
-                    format!("SSH {host}:{port}")
-                } else {
-                    format!("SSH {user}@{host}:{port}")
-                }
-            }
-        }
-    }
-}
-
-/// 新建会话所需的参数（显示名 + 要启动的 shell + 连接目标）。
+/// 新建会话所需的参数：显示名 + 要连接到哪儿（见 [`TerminalTarget`]）。
+///
+/// `Clone`：对话框的构建闭包是 `Fn`、每帧都会被调用，里面的请求得能复制。
+#[derive(Clone)]
 pub(crate) struct SessionRequest {
     /// 用户填写的显示名；`None` 表示回退到终端自身标题。
     pub(crate) name: Option<SharedString>,
-    /// 要启动的 shell（本地系统 shell，或 `ssh` 等外部命令）。
-    pub(crate) shell: Shell,
-    /// 连接目标（用于状态栏展示）。
-    pub(crate) target: SessionTarget,
+    /// 要连接的目标：本地 shell 走 PTY，SSH 走 russh（见 [`TerminalTarget`]）。
+    pub(crate) target: TerminalTarget,
 }
 
-/// 一个终端会话：终端视图 + 它在 dock 里的面板（显示名与连接目标都在面板上）。
+/// 一个终端会话：终端视图 + 它在 dock 里的面板（显示名与「是不是远端」都在面板上）。
 ///
 /// 与侧边栏的会话**记录**（[`crate::sidebar_panel::sessions::SessionRecord`]）无关：
 /// 同一条记录可以开任意多个会话。
@@ -77,9 +50,9 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// 连接目标（状态栏「连接」一栏用）。
-    pub(crate) fn target<'a>(&self, cx: &'a App) -> &'a SessionTarget {
-        self.pane.read(cx).target()
+    /// 是不是远端（SSH）会话 —— 「文件管理器」只服务远端会话。
+    pub(crate) fn is_remote(&self, cx: &App) -> bool {
+        self.pane.read(cx).is_remote()
     }
 }
 
@@ -89,8 +62,7 @@ impl AppRoot {
         self.spawn_session(
             SessionRequest {
                 name: None,
-                shell: Shell::System,
-                target: SessionTarget::Local,
+                target: TerminalTarget::system_shell(),
             },
             window,
             cx,
@@ -127,18 +99,18 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let SessionRequest {
-            name,
-            shell,
-            target,
-        } = request;
         let settings = Arc::new(config::settings(cx).render.clone());
-        let view = cx.new(|cx| TerminalView::new(None, shell, settings, window, cx));
-        // 标题 / 连接状态变化都要刷新界面（标签名、侧边栏、状态栏）。
+        let SessionRequest { name, target } = request;
+        let remote = target.is_ssh();
+        let root = cx.weak_entity();
+        // 主机密钥确认（首次连接）由应用弹窗；本地会话用不到（见 [`host_key`]）。
+        let handler = remote.then(|| host_key::host_key_prompt_handler(root.clone()));
+        let view = cx
+            .new(|cx| TerminalView::new(None, target, handler, settings, window, cx));
+        // 标题 / 连接状态变化都要刷新界面（标签名、侧边栏、文件管理器）。
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
 
-        let root = cx.weak_entity();
-        let pane = cx.new(|_| SessionPane::new(view.clone(), name, target, root));
+        let pane = cx.new(|_| SessionPane::new(view.clone(), name, remote, root));
         let handle = panel_handle(pane.clone());
         self.dock.update(cx, |area, cx| {
             area.add_panel_view(handle, DockPlacement::Center, None, window, cx);
@@ -275,13 +247,14 @@ impl AppRoot {
     }
 }
 
-/// 一个终端会话对应的 dock 面板：展示信息（名字 / 连接目标）+ 终端视图。
+/// 一个终端会话对应的 dock 面板：展示信息（名字 / 是不是远端）+ 终端视图。
 pub(crate) struct SessionPane {
     view: Entity<TerminalView>,
     root: WeakEntity<AppRoot>,
     /// 新建会话时用户填的名字；`None` = 回退到终端自己上报的标题。
     name: Option<SharedString>,
-    target: SessionTarget,
+    /// 是不是远端（SSH）会话 —— 「文件管理器」只服务远端会话（见 [`crate::sidebar_panel::files`]）。
+    remote: bool,
     /// 本面板所在的标签组（`on_added_to` 告知）：「新建终端」靠它判断新会话进哪一组。
     group: Option<WeakEntity<TabGroup>>,
 }
@@ -290,14 +263,14 @@ impl SessionPane {
     pub(crate) fn new(
         view: Entity<TerminalView>,
         name: Option<SharedString>,
-        target: SessionTarget,
+        remote: bool,
         root: WeakEntity<AppRoot>,
     ) -> Self {
         Self {
             view,
             root,
             name,
-            target,
+            remote,
             group: None,
         }
     }
@@ -314,9 +287,9 @@ impl SessionPane {
             .unwrap_or_else(|| self.view.read(cx).title())
     }
 
-    /// 连接目标（状态栏「连接」一栏用）。
-    pub(crate) fn target(&self) -> &SessionTarget {
-        &self.target
+    /// 是不是远端（SSH）会话。
+    pub(crate) fn is_remote(&self) -> bool {
+        self.remote
     }
 }
 

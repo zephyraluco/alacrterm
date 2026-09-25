@@ -39,7 +39,7 @@ use super::{TAB_HEIGHT, empty_state};
 use crate::actions::{MoveEntry, NewFolder, NewSession, OpenSession, RemoveEntry};
 use crate::assets::IconName;
 use crate::terminal_panel::SessionRequest;
-use util::shell::Shell;
+use terminal::{SshParams, TerminalTarget};
 
 // ---------------------------------------------------------------- 记录模型
 
@@ -100,29 +100,26 @@ pub(crate) struct SessionRecord {
     /// 主机地址（IP / 域名）。
     pub(crate) host: String,
     /// SSH 端口。
-    pub(crate) port: String,
+    pub(crate) port: u16,
+    /// 登录密码（**只在内存里**，不落盘）；`None` = 只用 ssh-agent 与 `~/.ssh` 里的私钥。
+    pub(crate) password: Option<String>,
 }
 
 impl SessionRecord {
     /// 打开这条记录要用的会话参数（见 [`crate::terminal_panel::SessionRequest`]）。
+    ///
+    /// 连接由**内建 SSH 客户端**完成（不再拉起外部 `ssh` 命令），主机密钥默认按
+    /// `ask` 处理：首次连接会弹窗让用户核对指纹。
     pub(crate) fn request(&self) -> SessionRequest {
+        let params = SshParams::new(self.host.clone(), self.port, self.user.clone());
+        // 公钥(agent / 私钥文件)永远先试,密码只在它失败后兜底 —— 与 OpenSSH 一致。
+        let params = match &self.password {
+            Some(password) => params.with_password(password.clone()),
+            None => params,
+        };
         SessionRequest {
             name: Some(self.name.clone()),
-            shell: Shell::WithArguments {
-                program: "ssh".to_string(),
-                args: vec![
-                    "-p".to_string(),
-                    self.port.clone(),
-                    format!("{}@{}", self.user, self.host),
-                ],
-                // 显示名由回传的 `name` 统一管理，这里不再重复指定。
-                title_override: None,
-            },
-            target: crate::terminal_panel::SessionTarget::Ssh {
-                user: self.user.clone(),
-                host: self.host.clone(),
-                port: self.port.clone(),
-            },
+            target: TerminalTarget::Ssh(params),
         }
     }
 }

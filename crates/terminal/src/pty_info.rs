@@ -99,10 +99,6 @@ impl PtyProcessInfo {
         }
     }
 
-    pub(crate) fn pid_getter(&self) -> &ProcessIdGetter {
-        &self.pid_getter
-    }
-
     fn refresh(&self) -> Option<MappedRwLockReadGuard<'_, Process>> {
         let pid = self.pid_getter.pid()?;
         if self.system.write().refresh_processes_specifics(
@@ -203,9 +199,5 @@ impl PtyProcessInfo {
                 this.task.lock().take();
             }
         }));
-    }
-
-    pub(crate) fn pid(&self) -> Option<Pid> {
-        self.pid_getter.pid()
     }
 }

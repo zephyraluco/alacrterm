@@ -20,6 +20,7 @@ parking_lot.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
 serde.workspace = true
+ssh.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
 url.workspace = true

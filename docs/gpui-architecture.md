@@ -219,7 +219,7 @@ flowchart TD
 | 机制 | 用途 | 注意 |
 |---|---|---|
 | `cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| async move { .. })` | 前台异步任务，可安全 `this.update(cx, ..)` | 闭包里要先 clone `cx` 再进 `async` 块（借用问题） |
-| `background_executor().timer(..)` | 定时器（光标闪烁、指标采样） | 定时回调里用 `this.update`，不要 `update_in`（拿不到窗口） |
+| `background_executor().timer(..)` | 定时器（光标闪烁等） | 定时回调里用 `this.update`，不要 `update_in`（拿不到窗口） |
 | `cx.observe(&entity, f)` | **通知**订阅：`notify()` 时回调 | 返回的 `Subscription` 是 RAII，必须存字段或 `.detach()` |
 | `cx.subscribe(&entity, f)` | **事件**订阅：`cx.emit(ev)` 时回调 | 与 observe 是两条独立通道 —— 只 subscribe 收不到 notify（本仓库拖选 bug 的根因） |
 | `cx.on_action(f)` | 全局动作监听（不依赖焦点路径） | 回调只有 `&mut App`，要窗口得配合 `defer` 让出一拍 |

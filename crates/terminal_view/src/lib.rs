@@ -24,12 +24,20 @@ use gpui::{
     KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, NoAction, ParentElement, Render,
     ScrollWheelEvent, SharedString, Styled, Subscription, WeakEntity, Window, div, rgb,
 };
-use terminal::{Event as TerminalEvent, Modes, Terminal, TerminalBounds, TerminalBuilder};
-use util::shell::Shell;
+use terminal::{
+    Event as TerminalEvent, HostKeyPrompt, Modes, SshFs, Terminal, TerminalBounds,
+    TerminalBuilder, TerminalTarget,
+};
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
 
 pub use crate::terminal_element::TerminalRenderSettings as RenderSettings;
+
+/// 主机密钥确认的回调：应用层据此弹窗，用户选完调 [`HostKeyPrompt::respond`]。
+///
+/// 握手线程在等回答（最多 `ssh::HOST_KEY_TIMEOUT`），所以回调必须**尽快**把窗口弹出来，
+/// 不能在这里阻塞等待；也不能直接放弃 —— 不回答的话连接要等超时。
+pub type HostKeyPromptHandler = Arc<dyn Fn(&HostKeyPrompt, &mut App) + Send + Sync + 'static>;
 
 /// 实现 [`gpui::Focusable`]：让应用层能直接聚焦 / 判断某个会话的焦点状态
 /// （焦点策略由应用层掌握，见 `AppRoot::on_background_mouse_down`）。
@@ -75,19 +83,27 @@ pub struct TerminalView {
     pub(crate) ime_state: Option<ImeState>,
     /// 光标闪烁相位。
     cursor_phase: bool,
+    /// 主机密钥确认的回调（仅远端会话有）。
+    host_key_prompt: Option<HostKeyPromptHandler>,
 }
 
 impl TerminalView {
-    /// 创建终端视图并异步启动终端（PTY + 事件循环）。
+    /// 创建终端视图并异步启动终端（本地 = PTY + 事件循环；远端 = russh 会话）。
     ///
-    /// `settings` 由应用层提供（渲染参数，应用层负责从配置文件解析后传入）。
+    /// `target` 决定连哪儿（见 [`TerminalTarget`]）；`settings` 由应用层提供（渲染参数，
+    /// 应用层负责从配置文件解析后传入）；`host_key` 用来问用户「首次连接，信任这台主机吗」
+    /// （见 [`HostKeyPromptHandler`]）—— 只有远端会话 + `HostKeyPolicy::Ask` 用得到，
+    /// 本地会话传 `None` 即可。
     pub fn new(
         working_directory: Option<PathBuf>,
-        shell: Shell,
+        target: TerminalTarget,
+        host_key: Option<HostKeyPromptHandler>,
         settings: Arc<TerminalRenderSettings>,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
+        let env = std::env::vars().collect();
+        let builder = TerminalBuilder::new(working_directory, target, env, cx);
         let focus_handle = cx.focus_handle();
 
         // 焦点在终端时让 tab / shift-tab 归终端（见 [`TERMINAL_KEY_CONTEXT`]）。
@@ -122,9 +138,6 @@ impl TerminalView {
             }
         })
         .detach();
-
-        let env = std::env::vars().collect();
-        let builder = TerminalBuilder::new(working_directory, shell, env, cx);
 
         cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
@@ -178,6 +191,7 @@ impl TerminalView {
             title: "终端".into(),
             ime_state: None,
             cursor_phase: true,
+            host_key_prompt: host_key,
         }
     }
 
@@ -249,6 +263,12 @@ impl TerminalView {
                 // 这样 ssh 报的断开原因不会被丢掉。
                 self.exited = true;
                 cx.notify();
+            }
+            TerminalEvent::HostKeyPrompt(prompt) => {
+                // 首次连接某台主机：交给应用弹窗（握手线程在等回答）。
+                if let Some(handler) = &self.host_key_prompt {
+                    handler(prompt, cx);
+                }
             }
             _ => {}
         }
@@ -382,25 +402,32 @@ impl TerminalView {
         self.title.clone()
     }
 
-    /// 当前终端进程（PTY 里的 shell / ssh 等）的 PID。
-    ///
-    /// 供状态栏采样该会话的 CPU / 内存使用；PTY 尚未就绪或终端已退出时为 `None`。
-    /// 这里刻意返回裸 `u32` 而不是 `sysinfo::Pid`，避免让本 crate 依赖 sysinfo。
-    pub fn pid(&self, cx: &App) -> Option<u32> {
-        self.terminal
-            .as_ref()
-            .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.pid()))
-            .map(|pid| pid.as_u32())
-    }
-
     /// 终端当前的工作目录。
     ///
     /// 取 PTY 前台进程的 cwd（`PtyProcessInfo` 采样，读的是缓存）；远端会话拿不到远端
-    /// 路径，因此返回 `None`。
+    /// 路径，因此返回 `None`（远端目录走 [`Self::remote_fs`]）。
     pub fn working_directory(&self, cx: &App) -> Option<PathBuf> {
         self.terminal
             .as_ref()
             .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.working_directory()))
+    }
+
+    /// 远端会话的 SFTP 句柄（本地会话为 `None`），供「文件管理器」列远端目录。
+    ///
+    /// 句柄是懒连接的：拿它不会联网，第一次列目录时才建（见 `ssh::SshFs`）。
+    /// ⚠️ 先看 [`Self::is_connected`]：连上之前这份参数还不能用于别的连接
+    /// （主机密钥可能还没确认）。
+    pub fn remote_fs(&self, cx: &App) -> Option<SshFs> {
+        self.terminal
+            .as_ref()
+            .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.remote_fs()))
+    }
+
+    /// 会话是否已经连上（本地会话恒为真；远端会话要等 SSH 握手 / 认证完成）。
+    pub fn is_connected(&self, cx: &App) -> bool {
+        self.terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.read_with(cx, |terminal, _| terminal.is_connected()))
     }
 
     /// 会话进程是否已结束（本地 shell 退出 / ssh 连接断开等）。

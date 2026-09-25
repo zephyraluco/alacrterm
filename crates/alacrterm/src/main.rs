@@ -13,7 +13,6 @@
 //! - [`status_bar`]     —— **全程序共用的唯一状态栏**（常驻窗口底部，见下）
 //! - [`dialog`]         —— 对话框：「新建会话」（SSH 参数）/「新建文件夹」
 //! - [`settings_window`]  —— 主窗口的从属设置子窗口（非对话框）
-//! - [`status_metrics`]   —— 状态栏指标采样（连接状态 / CPU / 内存 / 网络）
 //!
 //! 本文件只保留程序入口、根视图 [`AppRoot`]（共享状态 + 布局装配 + 设置弹窗）。
 //! 窗内只有三级结构：标题栏 / 主体 / 状态栏。主体是两级嵌套的可拖拽分栏组
@@ -48,7 +47,6 @@ mod dialog;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
-mod status_metrics;
 mod tab_bar;
 mod terminal_panel;
 mod welcome;
@@ -75,9 +73,8 @@ use sidebar_panel::{
 };
 use sidebar_panel::files::FilesState;
 use sidebar_panel::sessions::SessionsState;
-use status_metrics::{SAMPLE_INTERVAL, SystemMonitor};
 use tab_bar::TerminalDockSkin;
-use terminal_panel::{Session, SessionTarget};
+use terminal_panel::Session;
 
 fn main() {
     // 必须在建第一个 PTY 之前执行（决定 conpty.dll 能否命中）。
@@ -128,6 +125,8 @@ struct AppRoot {
     right_sidebar: Entity<Sidebar>,
     /// 侧边栏「会话」视图的状态（两条侧边栏共用；记录与 [`AppRoot::terminals`] 无关）。
     sessions: Entity<SessionsState>,
+    /// 侧边栏「文件管理器」视图的状态（两条侧边栏共用；数据源 = 当前远端会话的 SFTP）。
+    files: Entity<FilesState>,
     /// 终端会话的 dock（一个会话 = center 里的一块面板；没有会话时整块换成欢迎页）。
     dock: Entity<DockArea>,
     /// dock 布局变化的订阅：会话表顺序 / 成员跟着 dock 走。
@@ -136,8 +135,6 @@ struct AppRoot {
     pending_session_group: Option<WeakEntity<TabGroup>>,
     /// 设置窗口的句柄（重复点击只激活已有窗口；窗口关掉后句柄失效、下次重新开）。
     settings_window: Option<WindowHandle<Root>>,
-    /// 状态栏指标采样器（CPU / 内存 / 网络），由后台定时任务驱动。
-    pub(crate) monitor: SystemMonitor,
     /// 「背景」焦点：点击终端之外时接管焦点（用真实句柄而非 `Window::blur`，否则 Tab 会失效）。
     background_focus: FocusHandle,
 }
@@ -181,11 +178,11 @@ impl AppRoot {
             left_sidebar,
             right_sidebar,
             sessions,
+            files,
             dock,
             dock_layout_sub: None,
             pending_session_group: None,
             settings_window: None,
-            monitor: SystemMonitor::new(),
             background_focus: cx.focus_handle(),
         };
         // 会话表跟着 dock 的布局走：拖标签换位 / 拖出分屏 / 从面板菜单关掉面板，
@@ -200,8 +197,6 @@ impl AppRoot {
             },
         ));
         // 启动时不建会话：中间列显示欢迎页，终端由用户从欢迎页 / 标签栏 `+` 自己开。
-        // 启动状态栏指标采样（CPU / 内存 / 网络），窗口存活期间持续运行。
-        Self::start_metrics_sampling(cx);
         this
     }
 
@@ -250,39 +245,6 @@ impl AppRoot {
         })
         .detach();
     }
-
-    /// 启动状态栏指标采样任务：每 [`SAMPLE_INTERVAL`](status_metrics::SAMPLE_INTERVAL)
-    /// 采样一次并刷新界面，根视图销毁后自动结束。
-    fn start_metrics_sampling(cx: &mut Context<Self>) {
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            loop {
-                cx.background_executor().timer(SAMPLE_INTERVAL).await;
-                // update 返回 Err 说明根视图已销毁，退出循环即可。
-                if this
-                    .update(cx, |this, cx| this.sample_metrics(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// 采样当前会话的进程指标；仅在**显示内容变化**时重绘界面。
-    ///
-    /// 这里用 `this.update`（不需要窗口）而不是 `update_in`：定时任务运行在
-    /// 窗口更新之外，无需借用窗口。
-    pub(crate) fn sample_metrics(&mut self, cx: &mut Context<Self>) {
-        // 无会话（标签页全部关闭）时传 None，CPU / 内存显示为未知。
-        let pid = self
-            .terminals
-            .get(self.active)
-            .and_then(|session| session.view.read(cx).pid(cx));
-        // 每轮采样都刷新界面：状态栏里的网络速率本就是实时值，每次采样都会变。
-        self.monitor.sample(pid);
-        cx.notify();
-    }
 }
 
 impl Render for AppRoot {
@@ -294,12 +256,21 @@ impl Render for AppRoot {
 
         // 「文件管理器」只服务**远端**会话：本地目录用系统自己的文件管理器打开就好，
         // 应用里再摆一份既多余、又只能看到本机目录。所以本地终端（以及没有会话时）
-        // 既不摆这个视图，也不去读终端的工作目录 —— 跟随本地 shell 的 `cd` 靠的是
-        // Windows 的 shell 集成（PowerShell 上报 `$PWD`），那道适配已经移除。
-        let remote = self
-            .terminals
-            .get(self.active)
-            .is_some_and(|session| !matches!(session.target(cx), SessionTarget::Local));
+        // 既不摆这个视图，也不去连远端文件系统。
+        let active = self.terminals.get(self.active);
+        let remote = active.is_some_and(|session| session.is_remote(cx));
+        // 数据源 = 当前会话的 SFTP 句柄（懒连接，拿到它不会联网）。**必须等会话连上**
+        // 再给：连上之前主机密钥可能还没确认，这条连接会因为没有确认通道而失败。
+        // 终端实体是异步建的，刚开完会话的头几帧可能还没有 ⇒ 视图先摆空占位。
+        let fs = if remote {
+            active
+                .filter(|session| session.view.read(cx).is_connected(cx))
+                .and_then(|session| session.view.read(cx).remote_fs(cx))
+        } else {
+            None
+        };
+        self.files
+            .update(cx, |files, cx| files.sync(fs, window, cx));
         self.left_sidebar
             .update(cx, |sidebar, cx| sidebar.set_files_enabled(remote, cx));
         self.right_sidebar
@@ -330,7 +301,7 @@ impl Render for AppRoot {
                     .overflow_hidden()
                     .child(terminal_area),
             )
-            .child(self.render_status_bar(cx))
+            .child(status_bar::empty_status_bar())
             .into_any_element();
 
         // 两级嵌套分栏（两组面板各自持有宽度，互不干扰）：

@@ -79,6 +79,7 @@ impl From<&AlacrittyPty> for ProcessIdGetter {
     }
 }
 
+/// 往本地 PTY 写输入 / 改尺寸 / 关掉事件循环的句柄（远端那条见 `backend`）。
 pub(super) struct PtySender {
     notifier: Notifier,
 }
