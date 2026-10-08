@@ -5,6 +5,7 @@
 //! 文件夹行右键可再建会话 / 子文件夹,右键删除(文件夹连带内容),**双击记录行开终端**
 //! ([`OpenSession`]);记录与文件夹都能**拖动**,落点合法性由 [`SessionsState::move_entry`]
 //! 把关。
+//! 会话树、文件夹展开状态与 SSH 登录密码持久化到 `config/sessions.json`。
 //!
 //! ⚠️ 虚拟化、摊平缓存与行骨架都走 [`super::shared`](与「文件管理器」共用);本模块只管
 //! 记录模型 + 展开状态 + 摊平([`SessionsItem`] 一行一项,动机见 `files` 模块文档)。
@@ -19,6 +20,7 @@ use gpui::{
     Window, div, px,
 };
 use gpui_kit::component::{ActiveTheme as _, menu::ContextMenuExt as _};
+use serde::{Deserialize, Serialize};
 
 use super::empty_state;
 use super::shared::{DragPreview, RowCache, row_content, row_shell};
@@ -88,7 +90,7 @@ impl SessionFolder {
     }
 }
 
-/// 会话列表里的一条**会话记录**：只保存连接参数（只在内存里，重启不保留）。
+/// 会话列表里的一条**会话记录**：连接参数持久化到 `config/sessions.json`。
 pub(crate) struct SessionRecord {
     /// 稳定 id（由 [`SessionsState::add_record`] 分配；构造时先填 0）。
     pub(crate) id: u64,
@@ -100,7 +102,7 @@ pub(crate) struct SessionRecord {
     pub(crate) host: String,
     /// SSH 端口。
     pub(crate) port: u16,
-    /// 登录密码（**只在内存里**，不落盘）；`None` = 只用 ssh-agent 与 `~/.ssh` 里的私钥。
+    /// 登录密码，会以明文保存在 `config/sessions.json`。
     pub(crate) password: Option<String>,
 }
 
@@ -119,6 +121,88 @@ impl SessionRecord {
         SessionRequest {
             name: Some(self.name.clone()),
             target: TerminalTarget::Ssh(params),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PersistedEntry {
+    Folder {
+        id: u64,
+        name: String,
+        children: Vec<PersistedEntry>,
+    },
+    Session {
+        id: u64,
+        name: String,
+        user: String,
+        host: String,
+        port: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedSessions {
+    entries: Vec<PersistedEntry>,
+    expanded: Vec<u64>,
+}
+
+impl Default for PersistedSessions {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            expanded: Vec::new(),
+        }
+    }
+}
+
+impl From<&SessionEntry> for PersistedEntry {
+    fn from(entry: &SessionEntry) -> Self {
+        match entry {
+            SessionEntry::Folder(folder) => Self::Folder {
+                id: folder.id,
+                name: folder.name.to_string(),
+                children: folder.children.iter().map(Self::from).collect(),
+            },
+            SessionEntry::Session(record) => Self::Session {
+                id: record.id,
+                name: record.name.to_string(),
+                user: record.user.clone(),
+                host: record.host.clone(),
+                port: record.port,
+                password: record.password.clone(),
+            },
+        }
+    }
+}
+
+impl From<PersistedEntry> for SessionEntry {
+    fn from(entry: PersistedEntry) -> Self {
+        match entry {
+            PersistedEntry::Folder { id, name, children } => Self::Folder(SessionFolder {
+                id,
+                name: name.into(),
+                children: children.into_iter().map(Self::from).collect(),
+            }),
+            PersistedEntry::Session {
+                id,
+                name,
+                user,
+                host,
+                port,
+                password,
+            } => Self::Session(SessionRecord {
+                id,
+                name: name.into(),
+                user,
+                host,
+                port,
+                password,
+            }),
         }
     }
 }
@@ -159,12 +243,71 @@ pub(crate) struct SessionsState {
 
 impl SessionsState {
     pub(crate) fn new() -> Self {
+        let (entries, expanded) = Self::load();
+        let next_id = Self::max_id(&entries);
         Self {
-            entries: Vec::new(),
-            expanded: Vec::new(),
+            entries,
+            expanded,
             selected: None,
             rows: RowCache::default(),
-            next_id: 0,
+            next_id,
+        }
+    }
+
+    fn load() -> (Vec<SessionEntry>, Vec<u64>) {
+        let path = crate::config::sessions_config_path();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return (Vec::new(), Vec::new());
+            }
+            Err(error) => {
+                eprintln!("[sessions] 读取会话记录 {} 失败：{error}", path.display());
+                return (Vec::new(), Vec::new());
+            }
+        };
+
+        match serde_json::from_str::<PersistedSessions>(&text) {
+            Ok(stored) => (
+                stored.entries.into_iter().map(Into::into).collect(),
+                stored.expanded,
+            ),
+            Err(error) => {
+                eprintln!("[sessions] 解析会话记录 {} 失败：{error}", path.display());
+                (Vec::new(), Vec::new())
+            }
+        }
+    }
+
+    fn max_id(entries: &[SessionEntry]) -> u64 {
+        entries
+            .iter()
+            .map(|entry| match entry {
+                SessionEntry::Folder(folder) => folder.id.max(Self::max_id(&folder.children)),
+                SessionEntry::Session(record) => record.id,
+            })
+            .max()
+            .unwrap_or_default()
+    }
+
+    fn persist(&self) {
+        let path = crate::config::sessions_config_path();
+        let stored = PersistedSessions {
+            entries: self.entries.iter().map(PersistedEntry::from).collect(),
+            expanded: self.expanded.clone(),
+        };
+
+        let result = serde_json::to_string_pretty(&stored)
+            .map_err(std::io::Error::other)
+            .and_then(|mut text| {
+                text.push('\n');
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, text)
+            });
+        if let Err(error) = result {
+            eprintln!("[sessions] 保存会话记录 {} 失败：{error}", path.display());
         }
     }
 
@@ -252,6 +395,7 @@ impl SessionsState {
                 self.expanded.push(id);
             }
             self.rows.bump();
+            self.persist();
         }
         cx.notify();
     }
@@ -299,6 +443,7 @@ impl SessionsState {
             children.push(SessionEntry::Session(record));
             // 落进文件夹时顺手展开它，否则新条目看不见。
             self.expand_folder(&target);
+            self.persist();
         }
         self.rows.bump();
         cx.notify();
@@ -316,6 +461,7 @@ impl SessionsState {
         if let Some(children) = Self::children_mut(&mut self.entries, &target) {
             children.push(SessionEntry::Folder(SessionFolder::new(id, name)));
             self.expand_folder(&target);
+            self.persist();
         }
         self.rows.bump();
         cx.notify();
@@ -328,11 +474,16 @@ impl SessionsState {
         let Some((ix, parent)) = path.split_last() else {
             return;
         };
+        let mut removed = false;
         if let Some(children) = Self::children_mut(&mut self.entries, parent)
             && *ix < children.len()
         {
             // 展开标记按条目 id 记 ⇒ 删掉一项后不用担心下标串位（残留的 id 只会被忽略）。
             children.remove(*ix);
+            removed = true;
+        }
+        if removed {
+            self.persist();
         }
         self.rows.bump();
         cx.notify();
@@ -362,6 +513,7 @@ impl SessionsState {
         // 目标目录本身也展开，否则刚拖进去的条目看不见。
         self.expand_folder(&removed);
         self.rows.bump();
+        self.persist();
         cx.notify();
     }
 
@@ -609,4 +761,43 @@ fn session_row_element(
             }
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PersistedEntry, SessionEntry, SessionFolder, SessionRecord};
+
+    #[test]
+    fn persisted_ssh_session_round_trips_with_password() {
+        let entry = SessionEntry::Folder(SessionFolder {
+            id: 4,
+            name: "Production".into(),
+            children: vec![SessionEntry::Session(SessionRecord {
+                id: 5,
+                name: "Database".into(),
+                user: "admin".into(),
+                host: "db.example.com".into(),
+                port: 2222,
+                password: Some("saved password".into()),
+            })],
+        });
+
+        let json = serde_json::to_string(&PersistedEntry::from(&entry))
+            .expect("session record should serialize");
+        assert!(json.contains("saved password"));
+
+        let restored: PersistedEntry =
+            serde_json::from_str(&json).expect("session record should deserialize");
+        let SessionEntry::Folder(folder) = SessionEntry::from(restored) else {
+            panic!("folder should be restored");
+        };
+        let SessionEntry::Session(record) = &folder.children[0] else {
+            panic!("SSH session should be restored");
+        };
+
+        assert_eq!(folder.name, "Production");
+        assert_eq!(record.host, "db.example.com");
+        assert_eq!(record.port, 2222);
+        assert_eq!(record.password.as_deref(), Some("saved password"));
+    }
 }

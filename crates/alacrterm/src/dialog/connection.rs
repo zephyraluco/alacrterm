@@ -2,8 +2,8 @@
 //! **只往会话列表里加一条记录、不开终端**（见 [`crate::sidebar_panel::sessions::SessionRecord`]）。
 //!
 //! `folder` = 记录落在哪个文件夹下（`None` = 顶层）。IP、名称、用户名必填，端口留空用 22；
-//! 密码只进内存里的记录（不落盘），打开会话时交给内建 SSH 客户端认证 ——
-//! 留空则走 ssh-agent 与 `~/.ssh` 里的私钥。
+//! 连接信息（包括密码）会持久化到 `config/sessions.json`；打开会话时，密码交给内建
+//! SSH 客户端认证 —— 留空则走 ssh-agent 与 `~/.ssh` 里的私钥。
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _,
@@ -77,7 +77,7 @@ impl ConnectionForm {
 
     /// 依据表单内容生成一条会话记录；必填项缺失时返回 `None`。
     ///
-    /// 密码只进**内存里的记录**（不落盘），打开这条记录时才交给 `SshAuth::Password`。
+    /// 密码保存在会话记录中，打开这条记录时交给 `SshAuth::Password`。
     pub(crate) fn build(&self, cx: &App) -> Option<SessionRecord> {
         if !self.is_valid(cx) {
             return None;
@@ -138,7 +138,7 @@ fn field_hint(form: &ConnectionForm, cx: &App) -> AnyElement {
         }
     } else {
         (
-            "密码只留在内存里；留空则用 ssh-agent 与 ~/.ssh 里的私钥认证",
+            "密码会以明文保存在会话文件中；留空则用 ssh-agent 与 ~/.ssh 里的私钥认证",
             cx.theme().muted_foreground,
         )
     };

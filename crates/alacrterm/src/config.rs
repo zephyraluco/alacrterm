@@ -39,6 +39,9 @@ const APP_CONFIG_RELATIVE_PATH: &str = "config/app.json";
 /// 界面主题目录，同上。
 const THEMES_DIR: &str = "themes";
 
+/// SSH 会话记录文件，相对「可执行文件目录」与「仓库根」的路径。
+const SESSIONS_CONFIG_RELATIVE_PATH: &str = "config/sessions.json";
+
 /// 候选路径：可执行文件同级 → 仓库根（发行 / 开发两种形态）。
 fn candidates(relative: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -78,6 +81,11 @@ fn write_target(relative: &str) -> PathBuf {
         .or_else(|| paths.last())
         .cloned()
         .expect("candidates() 至少给一条路径")
+}
+
+/// SSH 会话记录的读写路径，与其它应用配置使用相同的候选目录规则。
+pub(crate) fn sessions_config_path() -> PathBuf {
+    write_target(SESSIONS_CONFIG_RELATIVE_PATH)
 }
 
 /// 打印用路径：规范化后去掉 Windows 的 `\\?\` 前缀（开发形态的候选路径还带 `../..`）。
