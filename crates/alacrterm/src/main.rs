@@ -5,19 +5,19 @@
 //! - `crates/terminal_view` —— 终端视图（自定义 gpui Element 逐 cell 渲染）
 //! - `crates/util`          —— Shell 探测 / 路径工具（来自 Zed）
 //!
-//! 应用外壳按「活动栏 + 左右两条侧边栏 + 中间列底部一条状态栏」拆分为独立文件：
+//! 应用外壳按「活动栏 + 左右两条侧边栏 + 一条整窗底部状态栏」拆分为独立文件：
 //! - [`sidebar_panel`]  —— 最左的 **VS Code 式活动栏**（视图入口 + 底部「设置」），左 / 右侧边栏
 //!   （各带顶部面板标题栏、视图清单与折叠状态），
 //!   以及侧边栏「会话」列表的记录模型与渲染（[`sidebar_panel::sessions`]）
 //! - [`terminal_panel`] —— 中间容器：标签栏 + 终端，以及运行时句柄 [`terminal_panel::Session`]
 //! - [`welcome`]        —— 终端容器关闭后中间列的欢迎页（默认背景板）
-//! - [`status_bar`]     —— **中间列底部**的状态栏（目前是空条；左右两条侧边栏贯穿到底部，
-//!   它们没有自己的状态栏）
+//! - [`status_bar`]     —— **整窗底部**的状态栏（空条、独占窗口最后一行，横跨活动栏 + 全部列）
 //! - [`dialog`]         —— 对话框：「新建会话」（SSH 参数）/「新建文件夹」
 //! - [`settings_window`]  —— 主窗口的从属设置子窗口（非对话框）
 //!
 //! 本文件只保留程序入口、根视图 [`AppRoot`]（共享状态 + 布局装配 + 设置弹窗）。
-//! 窗内只有三级结构：标题栏 / 主体 / 状态栏。主体 = **活动栏（常驻最左一列，48px）** +
+//! 窗内只有三级结构：标题栏 / 主体 / 状态栏 —— **状态栏独占窗口最后一行**（横跨活动栏 +
+//! 全部列）。主体 = **活动栏（常驻最左一列，48px）** +
 //! 两级嵌套的可拖拽分栏组（官方 resizable 面板组）：内层 `main-split` = 左侧边栏 | 中间列，
 //! 外层 `right-split` = 内层 | 右侧边栏；弹窗层也在此装配。活动栏**不进分栏组**，
 //! 所以侧边栏折叠 / 展开时它始终在 —— 左侧边栏的显示与它显示哪个视图都由活动栏的图标点选。
@@ -39,7 +39,7 @@
 //! **终端标签页全部关闭**时中间容器消失，中间列改显示欢迎页（[`welcome`]，
 //! 见 [`AppRoot::render_welcome`]；**启动时同样是这个状态**——不自动开会话；
 //! 之后可从欢迎页的「新建终端」或标签栏的 `+` 重新开一个本地终端，或双击侧边栏里的会话记录连远端）。
-//! 这些情况都**不影响**中间列底部那条空状态栏（它常驻），而「设置」入口在**活动栏底部**、
+//! 这些情况都**不影响**窗口底部那条空状态栏（它常驻），而「设置」入口在**活动栏底部**、
 //! 右侧边栏的折叠开关在**标题栏右端**：两处都常驻，因此不会出现「窗口全空、没有任何恢复入口」的死角。
 
 mod actions;
@@ -297,26 +297,18 @@ impl Render for AppRoot {
         self.right_sidebar
             .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
 
-        // 中间列 = 终端 dock + 状态栏（空条、常驻）；状态栏在 dock 外面，
-        // 没有会话时整块 dock 换成欢迎页。
+        // 中间列 = 终端区（有会话 = dock，没有 = 欢迎页）。**状态栏不在这一列** ——
+        // 它独占窗口最后一行，横跨活动栏 + 全部列（见 `AppRoot::render` 的尾部）。
         let terminal_area = if self.terminals.is_empty() {
             self.render_welcome(cx)
         } else {
             self.dock.clone().into_any_element()
         };
-        let mid_column = v_flex()
+        let mid_column = div()
             .h_full()
             .w_full()
             .overflow_hidden()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(terminal_area),
-            )
-            .child(status_bar::empty_status_bar())
+            .child(terminal_area)
             .into_any_element();
 
         // 两级嵌套分栏（两组面板各自持有宽度，互不干扰）：
@@ -434,9 +426,7 @@ impl Render for AppRoot {
                         .child(toggle_button(&self.right_sidebar, cx)),
                 ),
             )
-            // —— 中部：主体（左侧边栏 | 中间列 | 右侧边栏）——
-            // 底部没有整窗状态栏：只有**中间列**有自己的状态栏（在 `mid_column` 里）；
-            // 左右两条侧边栏贯穿到底部，它们没有状态栏。
+            // —— 中部：主体（活动栏 | 左侧边栏 | 中间列 | 右侧边栏）——
             // 分栏组内部使用 size_full，需要这层 flex_1 容器提供「剩余宽度」，
             // 否则其 100% 宽会溢出错位。
             .child(
@@ -447,6 +437,10 @@ impl Render for AppRoot {
                     .overflow_hidden()
                     .child(body),
             )
+            // —— 底部：整窗状态栏（空条、常驻）——
+            // 它**独占最后一行**、横跨活动栏与全部列 ⇒ 窗口是「标题栏 / 主体 / 状态栏」三级结构；
+            // 侧边栏与终端区都在它上面结束（侧边栏的描边也到它上沿为止）。
+            .child(status_bar::empty_status_bar())
             // 覆盖层（Dialog / Sheet / 通知 / Tooltip / 原生菜单）由 gpui-kit 的 `Root` 自己按
             // 「插件」渲染（`gpui_kit::init` 注册，见 `crates/base/src/root.rs`），
             // 所以这里**不要再**挂 `Root::render_dialog_layer`（那个 API 已经没有了）。
