@@ -316,7 +316,7 @@ fn update_render(
 }
 
 impl Render for SettingsWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
@@ -349,8 +349,8 @@ impl Render for SettingsWindow {
                             .page(self.terminal_page()),
                     ),
             )
-            // gpui-kit 的 `Root` 不会自动渲染 Dialog 层，需在渲染树里显式挂载。
-            .children(Root::render_dialog_layer(window, cx))
+            // 覆盖层（Dialog / Sheet / 通知 / Tooltip）由 gpui-kit 的 `Root` 按「插件」自己渲染
+            //（`gpui_kit::init` 注册），这里**不要再**挂 `Root::render_dialog_layer`。
     }
 }
 

@@ -1,29 +1,33 @@
-//! 侧边栏(左侧 / 右侧):顶部可拖动的视图标签 + 视图内容 + 底部状态栏。
+//! 侧边栏(左侧 / 右侧):顶部面板标题栏 + 视图内容(**一直铺到底部**,本栏没有状态栏)。
 //!
-//! **一条侧边栏 = 一个实体**([`Sidebar`],左右各一个):自带标签、折叠状态、期望宽度、
+//! **一条侧边栏 = 一个实体**([`Sidebar`],左右各一个):自带视图清单、折叠状态、期望宽度、
 //! 那一组分栏面板状态与自己的渲染;根视图只把它 `.child(..)` 摆进分栏面板。
 //!
 //! 视图内容是两个共享实体:[`sessions::SessionsState`](「会话」)与
-//! [`files::FilesState`](「文件管理器」)——标签落在哪一侧,就由哪一侧把它摆出来。
+//! [`files::FilesState`](「文件管理器」)——视图落在哪一侧,就由哪一侧把它摆出来。
 //! 后者**只对远端会话可见**(本地目录用系统自己的文件管理器即可),可用性由根视图每帧
 //! 按当前会话同步进来([`Sidebar::set_files_enabled`])。
 //!
-//! 其余分工:
-//! - **视图标签条**([`tabs`]):挂在 `Sidebar::header` 上(固定顶部、不随内容滚动);
-//!   标签可在两条侧边栏之间拖动:同栏内换位是本实体自己的事,跨栏经 `sibling` 弱引用
-//!   从另一条实体取视图。
-//! - **折叠开关**([`toggle_button`]):渲染在**标题栏右端**(由根视图摆放),折叠后仍点得到。
-//! - **两枚状态栏按钮**(显示「会话」视图的那条才有):左下 = 新建文件夹([`NewFolder`])、
-//!   右下 = 新建会话([`NewSession`]),都只加列表条目、不开终端(见 [`crate::dialog`])。
+//! 其余分工(**当前是哪个视图不再靠一排标签**,照 VS Code 的侧边栏):
+//! - **活动栏**([`activity_bar`]):最左一列的图标(每个视图一枚 + 底部「设置」),常驻不折叠;
+//!   点一枚 = 让左侧边栏显示这个视图(本侧没有就从另一侧搬过来),再点当前那枚 = 折叠侧边栏。
+//! - **面板标题栏**([`header`]):挂在 `Sidebar::header` 上(固定顶部、不随内容滚动),摆当前
+//!   视图的标题 + 右端「…」菜单(列出各视图、勾选当前那个)。标题本身可拖动:拖到另一条
+//!   侧边栏 = 把这个视图搬过去(跨栏经 `sibling` 弱引用从另一条实体取视图)。
+//! - **折叠开关**([`toggle_button`]):右侧边栏没有活动栏,它的折叠开关渲染在**标题栏右端**
+//!   (由根视图摆放),折叠后仍点得到。
+//! - **「会话」视图的右键菜单**(右键落在空白处 / 面板标题上):顶层「新建会话」([`NewSession`])、
+//!   「新建文件夹」([`NewFolder`])—— 原来是那一栏状态栏两端的两枚按钮;两个都只加列表条目、
+//!   不开终端(见 [`crate::dialog`])。⚠️ 条目自己的右键菜单挂在条目身上(见 [`sessions`])。
 //! - **空内容占位**([`empty_state`]):视图自己没内容(会话列表 0 条、目录读不出 / 是空的)时
-//!   统一摆 gpui-kit 的 `Empty`。⚠️ 内容位**一个可见标签都没有**时(标签全被拖走,或只剩
-//!   本地会话下不摆的「文件管理器」)什么都不摆 —— 只留侧边栏背景。
+//!   统一摆 gpui-kit 的 `Empty`。⚠️ 内容位**一个可用视图都没有**时(视图全被搬到另一条,或
+//!   只剩本地会话下不摆的「文件管理器」)什么都不摆 —— 只留侧边栏背景。
 //!
 //! 两侧边栏用**两组嵌套的分栏面板**装配(内层 `main-split`、外层 `right-split`):面板宽度
 //! 按下标存在 `ResizableState` 里,三块面板挤在同一组会互相影响下标。[`Sidebar::pin_width`]
 //! 每帧把宽度钉回期望值。
 //!
-//! 「设置」入口在标题栏左侧的文字按钮上(见 [`crate::AppRoot::render`]),不在本模块。
+//! 「设置」入口在**活动栏底部**(见 [`activity_bar`]),不再占标题栏左端的位置。
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
@@ -34,27 +38,29 @@ use gpui_kit::component::{
     Collapsible, Icon, Side, Sizable as _,
     button::{Button, ButtonVariants as _},
     empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
+    menu::ContextMenuExt as _,
     resizable::ResizableState,
     sidebar::{Sidebar as SidebarWidget, SidebarItem},
-    status_bar::StatusBar,
     v_flex,
 };
 
 use crate::AppRoot;
 use crate::actions::{NewFolder, NewSession};
 use crate::assets::IconName;
-use crate::status_bar::STATUS_BAR_HEIGHT;
 
 pub(crate) mod files;
 pub(crate) mod sessions;
+mod activity_bar;
+mod header;
 mod shared;
-mod tabs;
+
+pub(crate) use activity_bar::activity_bar;
 
 use files::FilesState;
 use sessions::SessionsState;
 
-/// 顶部视图标签条的高度(标签本身与拖拽预览卡片共用)。
-pub(super) const TAB_HEIGHT: Pixels = px(24.);
+/// 面板标题栏的高度(标题那一行;VS Code 的侧边栏标题栏约 35px,这里与树行 / 状态栏取齐)。
+pub(super) const PANEL_HEADER_HEIGHT: Pixels = px(28.);
 /// 左侧边栏默认宽度（分栏面板首次布局时的初始宽度）。
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: Pixels = px(220.);
 /// 侧边栏拖拽时的最小宽度（须大于组件内部的 `PANEL_MIN_SIZE` = 100px）。
@@ -125,7 +131,7 @@ pub(super) fn empty_state(
     Empty::new().flex_none().p_3().header(header)
 }
 
-/// 可以停放在任一侧边栏的视图（[`SidebarTabs`] 里的元素）。
+/// 可以停放在任一侧边栏的视图（[`SidebarViews`] 里的元素）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarView {
     /// 终端会话列表（记录树）。
@@ -135,11 +141,14 @@ pub(crate) enum SidebarView {
 }
 
 impl SidebarView {
+    /// 全部视图(活动栏的图标与「…」菜单都按这个顺序摆)。
+    pub(super) const ALL: [SidebarView; 2] = [Self::Sessions, Self::Files];
+
     /// 这个视图在当前会话下是否该摆出来。
     ///
     /// 「文件管理器」只服务**远端（SSH）会话**：本地目录用系统自己的文件管理器打开就好，
     /// 应用里再摆一份既多余、又只能看到本机目录；所以本地会话（以及没有会话）时这个视图
-    /// 连同它的标签一起不摆。可用性由根视图每帧同步（`files_enabled`）。
+    /// 连同它的图标一起不摆。可用性由根视图每帧同步（`files_enabled`）。
     fn visible_with(self, files_enabled: bool) -> bool {
         match self {
             Self::Sessions => true,
@@ -147,7 +156,15 @@ impl SidebarView {
         }
     }
 
-    /// 标签文字。
+    /// 视图的图标(活动栏那枚按钮)。
+    fn icon(self) -> IconName {
+        match self {
+            Self::Sessions => IconName::SquareTerminal,
+            Self::Files => IconName::Folder,
+        }
+    }
+
+    /// 标签文字(面板标题栏的标题、「…」菜单项)。
     fn label(self) -> &'static str {
         match self {
             Self::Sessions => "会话",
@@ -172,52 +189,67 @@ impl SidebarView {
     }
 }
 
-/// 一条侧边栏上的标签：**顺序 + 当前选中**（标签可以拖到另一条侧边栏，见 [`tabs`]）。
+/// 一条侧边栏持有的**视图清单 + 当前选中**(顺序 = 活动栏图标与「…」菜单里的顺序)。
+///
+/// ⚠️ 一个视图**同一时刻只属于一条侧边栏**:跨栏是「搬」(另一条用 [`SidebarViews::take_view`]
+/// 取走),不是复制 —— 与 VS Code 里视图容器的归属一致。
 #[derive(Clone)]
-pub(crate) struct SidebarTabs {
-    views: Vec<SidebarView>,
-    /// 选中项下标；标签条为空时无意义。
+struct SidebarViews {
+    /// 本栏持有的视图(初始:左栏「会话」、右栏「文件管理器」)。
+    held: Vec<SidebarView>,
+    /// 选中项下标;清单为空时无意义。
     active: usize,
 }
 
-impl SidebarTabs {
-    pub(crate) fn new(views: Vec<SidebarView>) -> Self {
-        Self { views, active: 0 }
+impl SidebarViews {
+    fn new(held: Vec<SidebarView>) -> Self {
+        Self { held, active: 0 }
     }
 
-    /// 当前选中的视图（标签条为空时 `None`）。
+    /// 当前选中的视图（清单为空时 `None`）。
     fn active_view(&self) -> Option<SidebarView> {
-        self.views.get(self.active).copied()
+        self.held.get(self.active).copied()
     }
 
-    /// 点击第 `ix` 个标签：选中它。返回是否发生了改变（没改变就不用重绘）。
+    /// 某个视图在本栏的下标。
+    fn index_of(&self, view: SidebarView) -> Option<usize> {
+        self.held.iter().position(|held| *held == view)
+    }
+
+    /// 选中第 `ix` 个视图：返回是否发生了改变（没改变就不用重绘）。
     fn select(&mut self, ix: usize) -> bool {
-        if ix >= self.views.len() || ix == self.active {
+        if ix >= self.held.len() || ix == self.active {
             return false;
         }
         self.active = ix;
         true
     }
 
-    /// 取出第 `ix` 个标签的视图（拖走时用），选中项跟着挪到仍存在的标签上。
+    /// 取出第 `ix` 个视图（拖走 / 被另一栏搬走时用），选中项跟着挪到仍存在的视图上。
     fn take(&mut self, ix: usize) -> Option<SidebarView> {
-        if ix >= self.views.len() {
+        if ix >= self.held.len() {
             return None;
         }
-        let view = self.views.remove(ix);
+        let view = self.held.remove(ix);
         // 抽走的是选中项之前的 ⇒ 下标前移；抽走的就是选中项 ⇒ 顺延到后一个
         // （已是末尾则回到前一个，空列表归 0）。
         if ix < self.active {
             self.active -= 1;
         }
-        self.active = self.active.min(self.views.len().saturating_sub(1));
+        self.active = self.active.min(self.held.len().saturating_sub(1));
         Some(view)
+    }
+
+    /// 取出某个视图（[`SidebarViews::take`] 的按视图版本：另一条侧边栏把它搬走时用）。
+    fn take_view(&mut self, view: SidebarView) -> Option<SidebarView> {
+        let ix = self.index_of(view)?;
+        self.take(ix)
     }
 
     /// 在第 `ix` 个位置插入并**选中**它（`ix` 越界则追加到末尾）。
     fn insert_active(&mut self, ix: usize, view: SidebarView) {
-        let ix = ix.min(self.views.len());
-        self.views.insert(ix, view);
+        let ix = ix.min(self.held.len());
+        self.held.insert(ix, view);
         self.active = ix;
     }
 }
@@ -226,14 +258,15 @@ impl SidebarTabs {
 
 /// 一条侧边栏（左 / 右各一个实体）。
 ///
-/// **状态与渲染都在这里**：本实体实现 [`Render`]，整列 = 视图标签条 + 当前视图内容 +
+/// **状态与渲染都在这里**:本实体实现 [`Render`],整列 = 面板标题栏 + 当前视图内容 +
 /// 底部状态栏；根视图只负责把它摆进分栏面板、把 [`toggle_button`] 摆进标题栏。
 pub(crate) struct Sidebar {
     /// 我是哪一条（决定 `Side::Right`、分栏面板下标、元素 id）。
     side: SidebarSide,
-    tabs: SidebarTabs,
+    /// 本栏持有的视图清单 + 当前选中(见 [`SidebarViews`])。
+    views: SidebarViews,
     /// 「文件管理器」是否摆出来（只对远端会话可见，根视图每帧同步，见
-    /// [`Sidebar::set_files_enabled`]）。不影响标签数据本身：会话换回远端时它自己回来。
+    /// [`Sidebar::set_files_enabled`]）。不影响视图清单本身：会话换回远端时它自己回来。
     files_enabled: bool,
     visible: bool,
     /// 本栏的「期望宽度」（逻辑像素）：用户拖拽分隔条后的宽度记在这里。
@@ -269,10 +302,10 @@ impl Sidebar {
     ) -> Self {
         Self {
             side,
-            // 默认：左栏是「会话」，右栏是「文件管理器」（都可以拖动改变）。
-            tabs: match side {
-                SidebarSide::Left => SidebarTabs::new(vec![SidebarView::Sessions]),
-                SidebarSide::Right => SidebarTabs::new(vec![SidebarView::Files]),
+            // 默认：左栏是「会话」，右栏是「文件管理器」（都能被拖到另一栏 / 经活动栏搬走）。
+            views: match side {
+                SidebarSide::Left => SidebarViews::new(vec![SidebarView::Sessions]),
+                SidebarSide::Right => SidebarViews::new(vec![SidebarView::Files]),
             },
             // 先按「不可见」起步：根视图在首次渲染前就会按当前会话同步一次。
             files_enabled: false,
@@ -373,81 +406,88 @@ impl Sidebar {
         }
     }
 
-    /// 让本栏可见（拖放落地时意味着「用户在看它」）。
+    /// 让本栏可见（打开视图 / 拖放落地都意味着「用户在看它」）。
     fn show(&mut self) {
         self.visible = true;
     }
 
     /// 当前该摆出来的视图。
     ///
-    /// 选中的那个不可用（本地会话下的「文件管理器」）就退到第一个可用的标签；一个可用的
+    /// 选中的那个不可用（本地会话下的「文件管理器」）就退到第一个可用的视图；一个可用的
     /// 都没有则 `None`（内容位摆空占位）。**选中的下标不动**——会话换回远端时它自己回来。
     fn active_view(&self) -> Option<SidebarView> {
-        match self.tabs.active_view() {
+        match self.views.active_view() {
             Some(view) if view.visible_with(self.files_enabled) => Some(view),
             _ => self
-                .tabs
                 .views
+                .held
                 .iter()
                 .copied()
                 .find(|view| view.visible_with(self.files_enabled)),
         }
     }
 
-    /// 点击标签：切到它代表的视图。
-    ///
-    /// **只切视图，不改可见性**——折叠 / 展开只由标题栏那枚开关负责。
-    /// 因此点击**当前**标签是空操作。
-    fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if !self.tabs.select(index) {
+    /// 活动栏点选：让本栏显示这个视图（本栏没有就从另一条侧边栏搬过来）；
+    /// 再点**正在显示**的那一枚 = 折叠本栏 —— 照 VS Code，折叠不另设开关。
+    pub(crate) fn toggle_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+        if self.visible && self.active_view() == Some(view) {
+            self.set_visible(false, cx);
             return;
         }
-        // 标签只在侧边栏可见时渲染，所以这里其实必然是 true；
-        // 保留赋值是为了让「切视图 ⇒ 侧边栏可见」这个不变量不依赖渲染条件。
-        self.show();
-        cx.notify();
+        self.open_view(view, cx);
     }
 
-    /// 把拖动的标签放到本栏的第 `index` 个标签处（占它的位置）。
+    /// 打开某个视图：本栏已有就切到它，否则从另一条侧边栏**搬**过来
+    /// （一个视图同一时刻只属于一条侧边栏，见 [`SidebarViews`]），并让本栏可见。
+    pub(crate) fn open_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+        let was_visible = self.visible;
+        let changed = match self.views.index_of(view) {
+            Some(index) => self.views.select(index),
+            None => match self.take_from_sibling(|views| views.take_view(view), cx) {
+                Some(view) => {
+                    self.views.insert_active(usize::MAX, view);
+                    true
+                }
+                None => false,
+            },
+        };
+        // 视图只在侧边栏可见时渲染，所以这里其实必然是 true；
+        // 保留赋值是为了让「打开视图 ⇒ 侧边栏可见」这个不变量不依赖渲染条件。
+        self.show();
+        if changed || !was_visible {
+            cx.notify();
+        }
+    }
+
+    /// 把拖动的视图落到本栏（落点 = 本栏的标题栏）：搬过来并选中它。
     ///
-    /// `index` 是**拖动前**本栏里的下标：先插入、再选中它，所以「拖到第 i 个标签上」的结果
-    /// 就是「这个视图落在第 i 个位置、其余顺延」。同一栏内拖动也是同一套语义（先抽走再按
-    /// 原下标插入），因此「把 A 拖到 B 上」在 `[A, B]` 这种只有两项时也能得到 `[B, A]`。
-    ///
-    /// 来源是**另一条**侧边栏时，经 `sibling` 把视图从那条实体取出来（它自己会重绘）。
-    fn drop_tab(&mut self, drag: &tabs::DragSidebarTab, index: usize, cx: &mut Context<Self>) {
-        let Some(view) = self.take_dragged(drag, cx) else {
+    /// 来源是本栏时 = 把它挪到清单末尾（清单里只剩一两个视图时与「换位」等价）。
+    fn append_view(&mut self, drag: &header::DragSidebarView, cx: &mut Context<Self>) {
+        let header::DragSidebarView { side, index } = *drag;
+        let view = if side == self.side {
+            self.views.take(index)
+        } else {
+            self.take_from_sibling(|views| views.take(index), cx)
+        };
+        let Some(view) = view else {
             return;
         };
-        self.tabs.insert_active(index, view);
+        self.views.insert_active(usize::MAX, view);
         self.show();
         cx.notify();
     }
 
-    /// 追加到本栏末尾（拖到标签条空白处，或本栏为空时的兑现落点）。
-    fn append_tab(&mut self, drag: &tabs::DragSidebarTab, cx: &mut Context<Self>) {
-        let Some(view) = self.take_dragged(drag, cx) else {
-            return;
-        };
-        self.tabs.insert_active(usize::MAX, view);
-        self.show();
-        cx.notify();
-    }
-
-    /// 从拖动来源取出那个视图：来源是本栏就本地取，是另一条侧边栏就更新那条实体。
-    fn take_dragged(
+    /// 让**另一条**侧边栏交出一个视图：跨栏搬运的唯一入口（活动栏点选、「…」菜单、
+    /// 拖标题都走这里）。`pick` 在那条侧边栏的视图清单上取走一个视图，取不到 ⇒ `None`。
+    fn take_from_sibling(
         &mut self,
-        drag: &tabs::DragSidebarTab,
+        pick: impl FnOnce(&mut SidebarViews) -> Option<SidebarView>,
         cx: &mut Context<Self>,
     ) -> Option<SidebarView> {
-        if drag.side == self.side {
-            return self.tabs.take(drag.index);
-        }
         let sibling = self.other()?;
-        let index = drag.index;
         sibling
             .update(cx, |sibling, cx| {
-                let view = sibling.tabs.take(index);
+                let view = pick(&mut sibling.views);
                 if view.is_some() {
                     cx.notify();
                 }
@@ -482,16 +522,15 @@ impl Render for Sidebar {
         };
 
         // 宽度由外层分栏面板决定：必须 w_full，否则会回落到组件内置默认宽度。
-        // flex_1 + min_h_0：与下方**本栏自己的状态栏**同处一列，需能收缩。
-        // 空白区域**不挂**右键菜单，只有会话条目有自己的右键菜单。
+        // flex_1 + min_h_0：纵向要能被压（本栏一直铺到底部，下面没有自己的状态栏）。
         let widget = SidebarWidget::new(SharedString::from(format!(
             "sidebar-{}-{}",
             self.side.id(),
             active.map_or("empty", SidebarView::id)
         )))
         .w_full()
-        // 顶部固定的标签条（不随下方内容滚动）。
-        .header(self.render_tabs(cx))
+        // 顶部固定的面板标题栏（不随下方内容滚动）。
+        .header(self.render_header(cx))
         // 一组内容项：会话视图 1 项；文件管理器一行一项（组件内部虚拟列表只渲染可见行）。
         .children(contents)
         .flex_1()
@@ -502,49 +541,43 @@ impl Render for Sidebar {
             SidebarSide::Right => widget.side(Side::Right),
         };
 
-        // 这一栏自己的状态栏：默认是空条，只为与中间那条状态栏等高对齐。
-        // 这一栏正在显示「会话」视图时，两端各放一枚按钮：
-        // - 左下角 = 新建**文件夹**（[`NewFolder`]，落顶层）；
-        // - 右下角 = 新建**会话**（[`NewSession`]，落顶层，只加记录不开终端）。
-        // 标签栏的 `+` 是「直接开一个本地终端」，分工见 [`crate::main`] 模块文档。
-        // 同样**不画分界边框**：列分界的那条竖线统一由分栏拖拽条来画
-        // （它 `h_full` 贯穿整列，也盖住这一行；见 `crate::config::change_theme` 的说明）。
-        let status_bar = StatusBar::new().h(STATUS_BAR_HEIGHT).w_full();
-        let status_bar = match active {
-            Some(SidebarView::Sessions) => status_bar
-                .left(
-                    Button::new(format!("new-folder-{}", self.side.id()))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::FolderPlus)
-                        .tooltip("新建文件夹")
-                        .on_click(cx.listener(|_, _, window, cx| {
-                            window.dispatch_action(Box::new(NewFolder { parent: None }), cx);
-                        })),
-                )
-                .right(
-                    Button::new(format!("new-session-{}", self.side.id()))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Plus)
-                        .tooltip("新建会话")
-                        .on_click(cx.listener(|_, _, window, cx| {
-                            window.dispatch_action(Box::new(NewSession { folder: None }), cx);
-                        })),
-                ),
-            _ => status_bar,
+        // 「会话」视图：整块内容的右键菜单 = 顶层「新建会话 / 新建文件夹」——
+        // 原来是本栏状态栏两端那两枚按钮（状态栏去掉后搬到这里）。⚠️ 条目自己的右键菜单挂在
+        // 条目身上（见 [`sessions`]），所以右键落在空白处 / 面板标题上才是这一套。
+        let body = match active {
+            Some(SidebarView::Sessions) => div()
+                .flex_1()
+                .min_h_0()
+                .context_menu(move |menu, _window, _cx| {
+                    menu.menu_with_icon(
+                        "新建会话",
+                        IconName::Plus,
+                        Box::new(NewSession { folder: None }),
+                    )
+                    .menu_with_icon(
+                        "新建文件夹",
+                        IconName::FolderPlus,
+                        Box::new(NewFolder { parent: None }),
+                    )
+                })
+                .child(widget)
+                .into_any_element(),
+            _ => widget.into_any_element(),
         };
 
+        // 侧边栏**贯穿到底部**：这一栏没有自己的状态栏（原来那两枚新建按钮已进上面的右键菜单）。
         v_flex()
             .h_full()
             .w_full()
             .overflow_hidden()
-            .child(widget)
-            .child(status_bar)
+            .child(body)
     }
 }
 
 /// 某一侧边栏的折叠 / 展开开关（根视图把它摆进**标题栏右端**）。
+///
+/// 只有**右侧边栏**用得上：左侧边栏的折叠 / 展开由最左那条活动栏的图标负责
+/// （[`activity_bar`]，再点当前图标即折叠）。右栏没有活动栏，所以开关留在标题栏。
 ///
 /// 图标与提示随折叠状态变化；放在标题栏（常驻顶部，折叠后仍点得到）。
 ///

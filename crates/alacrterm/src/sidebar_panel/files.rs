@@ -31,7 +31,7 @@ use crate::assets::IconName;
 
 /// 顶部路径输入框那一行的高度(输入框 @ `Size::Medium` = 32px,上下各留 2px)。
 ///
-/// ⚠️ 不能复用顶部标签条的 [`TAB_HEIGHT`](super::TAB_HEIGHT)(24px):装不下 32px 的输入框,
+/// ⚠️ 不能复用顶部面板标题栏的 [`PANEL_HEADER_HEIGHT`](super::PANEL_HEADER_HEIGHT)(28px):装不下 32px 的输入框,
 /// 超出部分会**溢到下面的树上**(不会被裁掉)。
 const PATH_ROW_HEIGHT: Pixels = px(36.);
 

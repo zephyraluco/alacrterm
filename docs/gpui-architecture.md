@@ -210,7 +210,7 @@ flowchart TD
 
 - **键盘是"动作优先"**：`keymap` 先按 key context 派发 `Action`，命中动作后**默认在 bubble 阶段停止传播**（`window.rs` ≈6138 的注释），然后才轮到 key listener。本仓库的 Tab 键就是被 `Root` context 的绑定抢走的，解决办法是在更深的 `"Terminal"` context 用 `NoAction` 压掉绑定。
 - **鼠标命中用"上一帧"的 hitbox 集合**（`window.mouse_hit_test`），所以元素的命中区域滞后一帧；拖拽/悬停的状态判断都基于它。
-- **`occlude()` 会阻断命中链**（`HitboxBehavior::BlockMouse`），这是"标题栏拖拽区吃掉子元素点击"的解法（本仓库标题栏「设置」按钮必须包 `div().occlude()`）。
+- **`occlude()` 会阻断命中链**（`HitboxBehavior::BlockMouse`），这是"标题栏拖拽区吃掉子元素点击"的解法（本仓库标题栏右端那枚侧边栏开关必须包 `div().occlude()`）。
 - **`window.on_mouse_event`** 是窗口级监听（所有元素都能收到，带 `DispatchPhase`），适合"需要全局状态"的交互（终端拖选就用了它 + 元素级 `interactivity` 监听混合）。
 - **焦点**：`FocusHandle` + focus path + tab stops；`window.focus(handle)` 内部会 `refresh()`；不要用 `window.blur()`（tab 遍历会失去起点）。
 
@@ -264,7 +264,7 @@ flowchart TD
 | `.cached(..)` | dock 面板 `panel.cached(..)`（`crates/alacrterm/src/tab_bar.rs`） | 它让终端不再"顺便"重绘，暴露了上面的缺陷 |
 | `Global` | 主题 / 配置（`crates/alacrterm/src/config.rs`） | 改完要 `refresh_windows()` |
 | key context / `NoAction` | `"Terminal"` context 压掉 Tab 绑定 | 动作优先于 key listener |
-| `occlude()` | 标题栏「设置」按钮 | 否则被拖拽区吞点击 |
+| `occlude()` | 标题栏右端的侧边栏开关 | 否则被拖拽区吞点击 |
 | `h_flex()` / `flex()` | 侧边栏、状态栏、标签栏 | 只写 `flex_row()` 会让居中失效 |
 | gpui-kit dock | `DockArea` + `SessionPane` + 自绘标签栏 | `PanelStyle::TabBar`、`panel_handle`、`set_locked` 的语义 |
 

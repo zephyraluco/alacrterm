@@ -5,19 +5,22 @@
 //! - `crates/terminal_view` —— 终端视图（自定义 gpui Element 逐 cell 渲染）
 //! - `crates/util`          —— Shell 探测 / 路径工具（来自 Zed）
 //!
-//! 应用外壳按「左右两条侧边栏 + 一条共用状态栏」拆分为独立文件：
-//! - [`sidebar_panel`]  —— 左 / 右侧边栏（+ 顶部可拖动的视图标签与两枚折叠开关），
+//! 应用外壳按「活动栏 + 左右两条侧边栏 + 中间列底部一条状态栏」拆分为独立文件：
+//! - [`sidebar_panel`]  —— 最左的 **VS Code 式活动栏**（视图入口 + 底部「设置」），左 / 右侧边栏
+//!   （各带顶部面板标题栏、视图清单与折叠状态），
 //!   以及侧边栏「会话」列表的记录模型与渲染（[`sidebar_panel::sessions`]）
 //! - [`terminal_panel`] —— 中间容器：标签栏 + 终端，以及运行时句柄 [`terminal_panel::Session`]
 //! - [`welcome`]        —— 终端容器关闭后中间列的欢迎页（默认背景板）
-//! - [`status_bar`]     —— **全程序共用的唯一状态栏**（常驻窗口底部，见下）
+//! - [`status_bar`]     —— **中间列底部**的状态栏（目前是空条；左右两条侧边栏贯穿到底部，
+//!   它们没有自己的状态栏）
 //! - [`dialog`]         —— 对话框：「新建会话」（SSH 参数）/「新建文件夹」
 //! - [`settings_window`]  —— 主窗口的从属设置子窗口（非对话框）
 //!
 //! 本文件只保留程序入口、根视图 [`AppRoot`]（共享状态 + 布局装配 + 设置弹窗）。
-//! 窗内只有三级结构：标题栏 / 主体 / 状态栏。主体是两级嵌套的可拖拽分栏组
-//! （官方 resizable 面板组）：内层 `main-split` = 左侧边栏 | 中间列，
-//! 外层 `right-split` = 内层 | 右侧边栏；弹窗层也在此装配。
+//! 窗内只有三级结构：标题栏 / 主体 / 状态栏。主体 = **活动栏（常驻最左一列，48px）** +
+//! 两级嵌套的可拖拽分栏组（官方 resizable 面板组）：内层 `main-split` = 左侧边栏 | 中间列，
+//! 外层 `right-split` = 内层 | 右侧边栏；弹窗层也在此装配。活动栏**不进分栏组**，
+//! 所以侧边栏折叠 / 展开时它始终在 —— 左侧边栏的显示与它显示哪个视图都由活动栏的图标点选。
 //! 中间列里的**终端区**额外包了一层 dock（[`terminal_panel`]，gpui-kit `DockArea`
 //! 的 center）——侧边栏不进 dock，仍由上面的分栏面板管宽度与折叠。
 //!
@@ -25,18 +28,19 @@
 //! - **会话记录**（[`SessionEntry`]，侧边栏「会话」列表）：只是连接参数与分组结构
 //!   （文件夹可以嵌套，行上不显示「里面有几条」）。列表形态参考 MobaXterm：
 //!   顶层直接是用户自己建的文件夹与记录（**没有自动生成的根文件夹**）；
-//!   状态栏左下角 `+` 建文件夹、右下角 `+` 新建会话（**总是落在顶层**），
+//!   在「会话」视图的空白处 / 面板标题上右键 = 顶层「新建会话 / 新建文件夹」（**总是落在顶层**），
 //!   文件夹行右键可以「在这里新建会话」；双击记录才开终端。
 //! - **终端会话**（[`AppRoot::terminals`]，dock 里的标签页）：真正在跑的终端，
 //!   由标签栏的 `+`（本地终端）或双击某条记录创建，关掉标签只影响终端。
 //!
-//! 折叠规则：**左侧边栏折叠**时，它连同顶部的视图标签一起让位给终端；**右侧边栏折叠**时整块让位给终端。
-//! 两条侧边栏**默认折叠**（启动即折叠态），因此首屏只有标题栏 + 中间列 + 状态栏。
+//! 折叠规则：**左侧边栏折叠**时它整块让位给终端（最左那条活动栏还在，点图标即可恢复）；
+//! **右侧边栏折叠**时同样整块让位给终端。
+//! 两条侧边栏**默认折叠**（启动即折叠态），因此首屏只有标题栏 + 活动栏 + 中间列。
 //! **终端标签页全部关闭**时中间容器消失，中间列改显示欢迎页（[`welcome`]，
 //! 见 [`AppRoot::render_welcome`]；**启动时同样是这个状态**——不自动开会话；
 //! 之后可从欢迎页的「新建终端」或标签栏的 `+` 重新开一个本地终端，或双击侧边栏里的会话记录连远端）。
-//! 这些情况都**不影响底部状态栏**（三条状态栏常驻），而侧边栏的「折叠 / 展开」开关与「设置」入口
-//! 都在**标题栏**（右端 / 左端）：标题栏永远在，因此不会出现「窗口全空、没有任何恢复入口」的死角。
+//! 这些情况都**不影响**中间列底部那条空状态栏（它常驻），而「设置」入口在**活动栏底部**、
+//! 右侧边栏的折叠开关在**标题栏右端**：两处都常驻，因此不会出现「窗口全空、没有任何恢复入口」的死角。
 
 mod actions;
 mod assets;
@@ -51,6 +55,8 @@ mod tab_bar;
 mod terminal_panel;
 mod welcome;
 
+use std::rc::Rc;
+
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement as _, Render, Styled as _,
@@ -58,9 +64,9 @@ use gpui::{
 };
 use gpui_kit::{
     QuitMode,
+    base::ResizeHandleRenderer,
     component::{
-        ActiveTheme as _, Root, Sizable as _, ThemeMode, TitleBar,
-        button::{Button, ButtonVariants as _},
+        ActiveTheme as _, Root, ThemeMode, TitleBar,
         dock::{DockArea, DockEvent, TabGroup},
         h_flex,
         resizable::{h_resizable, resizable_panel},
@@ -69,7 +75,7 @@ use gpui_kit::{
 };
 use sidebar_panel::{
     RIGHT_SIDEBAR_MAX_WIDTH, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
-    Sidebar, SidebarSide, toggle_button,
+    Sidebar, SidebarSide, activity_bar, toggle_button,
 };
 use sidebar_panel::files::FilesState;
 use sidebar_panel::sessions::SessionsState;
@@ -247,6 +253,18 @@ impl AppRoot {
     }
 }
 
+/// 分栏拖拽条的外观：**什么都不画**。
+///
+/// 列分界那条竖线由侧边栏自己画（gpui-kit `Sidebar` 按侧给 `border_r_1` / `border_l_1`），
+/// 拖拽条再画一条就是并排两根线。⚠️ 必须返回 `Some(空元素)`：`ResizeHandleRenderer` 的约定是
+/// 「返回 `None` = 不覆盖」，那时 `gpui_base` 会照旧画它内置的那条线。
+///
+/// 拖拽条本身不受影响 —— 热区、`cursor_col_resize` 光标、拖动改宽都归 `gpui_base` 的
+/// `ResizeHandle` 管（见 `crates/base/src/resizable/resize_handle.rs`），这里只换「画什么」。
+fn invisible_resize_handle() -> ResizeHandleRenderer {
+    Rc::new(|_, _, _| Some(div().into_any_element()))
+}
+
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 主体：侧边栏与终端由各自的模块渲染，中间是可拖拽分隔条（视图标签在侧边栏顶部）。
@@ -279,7 +297,7 @@ impl Render for AppRoot {
         self.right_sidebar
             .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
 
-        // 中间列 = 终端 dock + 公共状态栏（常驻）；状态栏在 dock 外面，
+        // 中间列 = 终端 dock + 状态栏（空条、常驻）；状态栏在 dock 外面，
         // 没有会话时整块 dock 换成欢迎页。
         let terminal_area = if self.terminals.is_empty() {
             self.render_welcome(cx)
@@ -312,6 +330,8 @@ impl Render for AppRoot {
         let left_panel = self.left_sidebar.clone();
         let center = if left_visible {
             h_resizable("main-split")
+                // 拖拽条不画线（见 [`invisible_resize_handle`]），热区与拖动照旧。
+                .with_handle_appearance(invisible_resize_handle())
                 // 绑定侧边栏实体持有的状态：折叠再展开后宽度不会丢失。
                 .with_state(&left_resize)
                 // 拖拽结束后记下新宽度，作为窗口尺寸变化时的「期望宽度」。
@@ -341,8 +361,10 @@ impl Render for AppRoot {
         let right_resize = self.right_sidebar.read(cx).resize_state().clone();
         let right_state = self.right_sidebar.downgrade();
         let right_panel = self.right_sidebar.clone();
-        let body = if right_visible {
+        let split = if right_visible {
             h_resizable("right-split")
+                // 拖拽条不画线（见 [`invisible_resize_handle`]），热区与拖动照旧。
+                .with_handle_appearance(invisible_resize_handle())
                 .with_state(&right_resize)
                 // 拖拽结束后记下新宽度（右侧边栏是本组的最后一个面板，下标 1）。
                 .on_resize(move |state, _window, cx| {
@@ -364,13 +386,32 @@ impl Render for AppRoot {
             center
         };
 
+        // 主体 = **活动栏**（常驻最左一列，不进分栏组）+ 上面那两组分栏。
+        // 活动栏不进分栏组是为了：折叠 / 展开侧边栏时它始终在，点图标就能把侧边栏叫回来；
+        // 它同时决定左侧边栏显示哪个视图（见 `sidebar_panel::activity_bar`）。
+        let body = h_flex()
+            .h_full()
+            .w_full()
+            .child(activity_bar(&self.left_sidebar, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(split),
+            )
+            .into_any_element();
+
         v_flex()
             .id("app-root")
             .size_full()
             .track_focus(&self.background_focus)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_background_mouse_down))
             .bg(cx.theme().background)
-            // ── 顶部：自绘标题栏（左：设置入口 / 中：标题 / 右：侧边栏开关 + 窗口控制）——
+            // ── 顶部：自绘标题栏（左：应用名 / 右：右侧边栏开关 + 窗口控制）——
+            // 设置入口在**活动栏底部**（见 `sidebar_panel::activity_bar`），左侧边栏的折叠 / 展开
+            // 是活动栏的那两枚图标，所以标题栏里只剩右侧边栏那一枚开关（它没有活动栏）。
             // 标题栏内容区本身就是窗口拖拽区，但其中的按钮仍有自己的 hitbox，
             // 点击会被正常派发（与窗口控制按钮同理），因此这些按钮可以放在这里。
             .child(
@@ -381,26 +422,6 @@ impl Render for AppRoot {
                         .gap(px(8.))
                         .items_center()
                         .child(
-                            // 设置入口：文字态按钮（无边框无底色，hover 提亮），放在最左端。
-                            //
-                            // 必须 `div().occlude()` 包一层：标题栏内容区整体是窗口拖拽区
-                            // （`WindowControlArea::Drag`），gpui 在 WM_NCHITTEST 里一旦命中
-                            // 拖拽区就返回 HTCAPTION，点击会被系统当作「拖标题栏」而收不到
-                            // （表现为点了没反应）。occlude 阻断它下方拖拽区的命中，
-                            // 这块区域于是按普通客户区处理，点击正常派发给按钮。
-                            div().occlude().child(
-                                Button::new("open-settings")
-                                    .text()
-                                    .small()
-                                    .label("设置")
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.open_settings_window(window, cx)
-                                        }),
-                                    ),
-                            ),
-                        )
-                        .child(
                             div()
                                 .flex_1()
                                 .overflow_hidden()
@@ -408,20 +429,14 @@ impl Render for AppRoot {
                                 .text_color(cx.theme().secondary_foreground)
                                 .child("Alacrterm"),
                         )
-                        // 侧边栏折叠开关（左 / 右各一枚），靠 flex_1 的标题顶到
-                        // 内容区最右端、窗口控制按钮左侧（按钮本身由侧边栏模块给出）。
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_1()
-                                .child(toggle_button(&self.left_sidebar, cx))
-                                .child(toggle_button(&self.right_sidebar, cx)),
-                        ),
+                        // 右侧边栏的折叠开关：靠 flex_1 的标题顶到内容区最右端、
+                        // 窗口控制按钮左侧（按钮本身由侧边栏模块给出）。
+                        .child(toggle_button(&self.right_sidebar, cx)),
                 ),
             )
             // —— 中部：主体（左侧边栏 | 中间列 | 右侧边栏）——
-            // 底部不再有整窗状态栏：三列的底边分别是各自的宽度区块
-            // （左/右栏的状态栏在 `sidebar_panel` 里，中间那条公共的在 `mid_column` 里）。
+            // 底部没有整窗状态栏：只有**中间列**有自己的状态栏（在 `mid_column` 里）；
+            // 左右两条侧边栏贯穿到底部，它们没有状态栏。
             // 分栏组内部使用 size_full，需要这层 flex_1 容器提供「剩余宽度」，
             // 否则其 100% 宽会溢出错位。
             .child(
@@ -432,8 +447,8 @@ impl Render for AppRoot {
                     .overflow_hidden()
                     .child(body),
             )
-            // —— 覆盖层：gpui-kit 0.6 的 Root 不会自动渲染 Dialog 层，
-            //    必须在渲染树中显式挂载（参考官方 ai_recipes 示例），否则弹窗不显示。——
-            .children(Root::render_dialog_layer(window, cx))
+            // 覆盖层（Dialog / Sheet / 通知 / Tooltip / 原生菜单）由 gpui-kit 的 `Root` 自己按
+            // 「插件」渲染（`gpui_kit::init` 注册，见 `crates/base/src/root.rs`），
+            // 所以这里**不要再**挂 `Root::render_dialog_layer`（那个 API 已经没有了）。
     }
 }

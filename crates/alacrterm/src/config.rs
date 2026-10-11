@@ -456,9 +456,7 @@ pub(crate) fn theme_options(cx: &App, mode: ThemeMode) -> Vec<(SharedString, Sha
     options
 }
 
-/// 应用（或切换）界面主题，并压上两处覆盖：
-/// - `sidebar_border` 置透明 —— 分栏边界那条竖线统一交给拖拽条画，免得两条线错位；
-///   代价是侧边栏菜单的「嵌套项缩进导线」（同一个 token）也一起消失。
+/// 应用（或切换）界面主题，并压上一处覆盖：
 /// - 关掉 `list.active_highlight` —— `ListItem` 默认的 `list_active` 选中底色太淡，
 ///   关掉后改用主题的 `accent`。
 ///
@@ -468,9 +466,7 @@ pub(crate) fn theme_options(cx: &App, mode: ThemeMode) -> Vec<(SharedString, Sha
 /// 窗口参数传 `None`：调用方自行 `cx.refresh_windows()`。
 pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
-    let theme = Theme::global_mut(cx);
-    theme.sidebar_border = Hsla::transparent_black();
-    theme.list.active_highlight = false;
+    Theme::global_mut(cx).list.active_highlight = false;
 }
 
 /// 选定某个模式（深 / 浅）用哪套主题，`None` = 跟随 gpui-kit 内置主题。
