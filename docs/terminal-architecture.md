@@ -14,7 +14,7 @@
 - 终端核心:去掉 Zed `settings` 依赖 / 主题系统 / 搜索 UI,保留事件循环、4ms 批量事件、选择复制、vi mode、超链接、鼠标协议、进程标题检测
 - 渲染由 gpui 的 `StyledText` / `paint_quad` 逐 cell 驱动,与 Alacritty 网格通过 `Content` 快照解耦(§4.2)
 - `TerminalBuilder::new(working_directory, target, env, cx) -> Task<Result<TerminalBuilder>>`:`target` 决定本地 PTY 还是远端 russh(见 §5.2);就绪后经 `subscribe(cx)` 接上事件
-- 多会话外壳:**最左一条 VS Code 式活动栏**(每枚图标 = 一个视图,底部「设置」;点图标切换 / 折叠侧边栏)+ 一条侧边栏(默认折叠)与中间 dock 会话区(自绘标签栏 + 终端),会话可全部关掉(全关显示欢迎页,**启动时也是这个状态**——不自动开终端);底部一条**空状态栏**,独占窗口最后一行(横跨活动栏与全部列;侧边栏到它上沿为止——那两枚新建按钮已进「会话」视图的右键菜单)
+- 多会话外壳:**最左一条整列** = 48px 图标栏(VS Code 式活动栏:每枚图标 = 一个视图,底部「设置」;点图标切换 / 折叠侧边栏)+ 侧边栏面板(默认折叠),再往右是中间 dock 会话区(自绘标签栏 + 终端),会话可全部关掉(全关显示欢迎页,**启动时也是这个状态**——不自动开终端);底部一条**空状态栏**,独占窗口最后一行(横跨全部列;侧边栏到它上沿为止——那两枚新建按钮已进「会话」视图的右键菜单)
 - 远程连接:走**内建 SSH 客户端**(`crates/ssh`,基于 russh),不调用外部 `ssh` 命令。「新建会话」对话框收集 IP / 端口 / 名称 / 用户名 / 密码,**只往侧边栏的会话列表里加一条记录**(IP / 名称 / 用户名必填);双击那条记录才按它开终端(密码参与认证但只存在内存记录里);首次连接未知主机弹**「未知主机密钥」**对话框让用户核对指纹
 - 独立设置窗口 + 自绘标题栏;Action 风格右键菜单
 - 会话显示名:用户填的名称优先,否则回退终端 OSC 标题;进程结束只标记「已断开」(标签与内容保留)、不退出应用
@@ -43,7 +43,8 @@ graph TB
     subgraph app层[crates/alacrterm]
         MAIN[main.rs<br/>AppRoot:共享状态/布局装配]
         SBAR[status_bar.rs<br/>底部状态栏(空条)]
-        SIDE[sidebar_panel/<br/>活动栏 + 侧边栏]
+        SIDE[sidebar_panel/<br/>最左整列:图标栏 + 侧边栏]
+        COMP[components/<br/>活动栏 / 侧边栏(自绘)]
         TPANEL[terminal_panel.rs<br/>会话生命周期 + SessionPane]
         TABBAR[tab_bar.rs<br/>自绘标签栏]
         DIALOG[dialog/<br/>新建会话 / 新建文件夹 / 主机密钥]
@@ -79,6 +80,7 @@ graph TB
 
     MAIN --> VIEW
     MAIN --> SIDE
+    SIDE -->|组件| COMP
     MAIN --> TPANEL
     MAIN --> TABBAR
     MAIN --> SBAR
@@ -117,13 +119,17 @@ crates/
       terminal_panel.rs         # 会话生命周期 + SessionRequest + Session + SessionPane
       tab_bar.rs                # 自绘标签栏
       status_bar.rs             # 整窗底部的状态栏(空条);STATUS_BAR_HEIGHT
-      sidebar_panel/            # 活动栏 + 侧边栏(§3.2)
+      sidebar_panel/            # 最左整列:图标栏 + 侧边栏(§3.2)
         mod.rs                  # Sidebar 实体(当前视图/折叠/宽度 + Render) + SidebarView + SidebarContent
-        activity_bar.rs         # 最左的 VS Code 式活动栏(gpui-kit Sidebar 的图标折叠态:每个视图一枚 SidebarMenuItem + footer 槽的「设置」)
+        activity_bar.rs         # 把整列装配到本应用:每个视图一枚图标 + 底部「设置」 + 当前视图的面板(§3.2)
         header.rs               # 面板标题栏(当前视图的标题 + 「…」菜单)
         shared.rs               # 两棵树共用:行骨架 / 缩进 / 省略号标签 / RowCache / 拖拽预览卡片
         sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + 摊平成 SessionsItem)
         files.rs                # FilesState(文件管理器:远端 SFTP 目录树 + 摊平成 FilesItem)
+      components/               # 应用自有的可复用组件(base + 自绘)
+        mod.rs                  # 组件模块出口
+        activitybar.rs           # VS Code 式**整列**(ActivityBar / ActivityBarItem:48px 图标列 + sidebar 成员)
+        sidebar.rs              # 侧边栏面板外壳(Sidebar / SidebarRow:标题栏槽 + 懒渲染的行列表 + 滚动条)
       dialog/                   # 对话框(§3.4)
         mod.rs                  # 共同约定(表单实体先建 / 页脚自拼 / on_ok 兜底校验)
         connection.rs           # 「新建会话」:只加一条 SSH 记录
@@ -196,18 +202,21 @@ fn main() {
 ```
 
 - 窗口 1100×700;`Assets` 来自 `assets.rs` 的 `icon_named!(IconName, "../../assets/icons")`(扫描图标目录生成枚举,并实现 `From<IconName> for AnyElement` / `RenderOnce`)
-- **启动形态**:不建任何会话,侧边栏默认折叠(`Sidebar::new` 里 `visible: false`)⇒ 首屏 = 标题栏 + 活动栏 + 中间列的欢迎页 + 状态栏,终端由用户自己开(欢迎页「新建终端」/ 标签栏 `+` / 双击会话记录)
+- **启动形态**:不建任何会话,侧边栏默认折叠(`Sidebar::new` 里 `visible: false`)⇒ 首屏 = 标题栏 + 48px 图标栏 + 中间列的欢迎页 + 状态栏,终端由用户自己开(欢迎页「新建终端」/ 标签栏 `+` / 双击会话记录)
 - `Root` 是弹窗 / 通知 / 焦点恢复的宿主:Dialog / Sheet / 通知 / Tooltip / 原生菜单都由**插件**自己渲染(`crates/base/src/root.rs` 的 `RootPlugin`,`gpui_kit::init` 里注册)⇒ 渲染树里**不需要**再挂 `Root::render_dialog_layer`(该 API 已随 gpui-kit 新版移除)
 - `TitleBar::window_options()` 内部为 `appears_transparent` + `app_owns_titlebar_drag`
-- 标题栏内容区(`TitleBar::new().child(..)`,见 §3.5):只有 `flex_1` 的标题「Alacrterm」(窗口控制按钮由 `TitleBar` 自己给)——侧边栏的显示 / 折叠与「设置」入口都在**活动栏**(见 §3.2),标题栏里不放按钮。⚠️ 内容区整体是窗口拖拽区(`WindowControlArea::Drag`),以后要往这里放按钮,都得包 `div().occlude()`,否则点击被当成「拖标题栏」而收不到
+- 标题栏内容区(`TitleBar::new().child(..)`,见 §3.5):只有 `flex_1` 的标题「Alacrterm」(窗口控制按钮由 `TitleBar` 自己给)——整列的显示 / 折叠与「设置」入口都在最左的**图标栏**(见 §3.2),标题栏里不放按钮。⚠️ 内容区整体是窗口拖拽区(`WindowControlArea::Drag`),以后要往这里放按钮,都得包 `div().occlude()`,否则点击被当成「拖标题栏」而收不到
 
-### 3.2 布局装配(标题栏 / 活动栏 + 侧边栏 / 分栏 / dock 会话面板 / 底部状态栏)
+### 3.2 布局装配(标题栏 / 最左整列 / 分栏 / dock 会话面板 / 底部状态栏)
 
-`AppRoot::render` 只负责装配:`h_flex[活动栏, h_resizable("main-split")[侧边栏, 中间列]]` —— 活动栏**不进分栏组**(常驻最左一列,48px,侧边栏折叠也还在);容器渲染方法统一返回 `AnyElement`(edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,同一渲染树里连续 `&mut cx` 会借用冲突)。
+`AppRoot::render` 只负责装配:`h_resizable("main-split")[最左整列, 中间列]` —— 第 0 个面板就是**最左整列**(48px 图标栏 + 侧边栏面板,面板宽 = 二者之和,`SIDEBAR_PANEL_INDEX`);**折叠时整列只剩那 48px 图标栏**,没有可拖的缝,这时不摆分栏组,直接 `h_flex[图标栏, 中间列]`(图标栏因此**始终在**);容器渲染方法统一返回 `AnyElement`(edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,同一渲染树里连续 `&mut cx` 会借用冲突)。
 
-**状态与渲染都归子组件**:侧边栏 = 一个实体(`Entity<Sidebar>`,全应用一个,见 `sidebar_panel/mod.rs`),它自带当前视图 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 面板标题栏 + 当前视图内容,内容一直铺到窗口底部那条状态栏的上沿);根视图只把它 `.child(..)` 摆进分栏面板、把 `sidebar_panel::activity_bar` 摆好。两个视图是两个实体:「会话」`Entity<SessionsState>` 与文件管理器 `Entity<FilesState>` —— 两者都**不实现 `Render`**:各自把「要摆哪些项」摊成**一行一项**(`SessionsItem` / `FilesItem`)交给侧边栏内容区(它才是虚拟列表);同一时刻只摆其中一个(另一个仍活着、状态不丢)。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
+**状态与渲染都归子组件**:最左整列 = 一个实体(`Entity<Sidebar>`,全应用一个,见 `sidebar_panel/mod.rs`),它自带当前视图 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 48px 图标栏 + 侧边栏面板,面板一直铺到窗口底部那条状态栏的上沿);根视图只把它 `.child(..)` 摆进第 0 个分栏面板。两个视图是两个实体:「会话」`Entity<SessionsState>` 与文件管理器 `Entity<FilesState>` —— 两者都**不实现 `Render`**:各自把「要摆哪些行」摊成**一行一项**(`SessionsItem` / `FilesItem`)交给侧边栏面板的行列表(它才按可见区间懒渲染);同一时刻只摆其中一个(另一个仍活着、状态不丢)。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
 
-- **侧边栏**(`sidebar_panel`):**顶部是面板标题栏**(`Sidebar::header` 里的 `render_header`,见 `sidebar_panel/header.rs`):当前视图的标题 + 右端「…」菜单(`Button` + `DropdownMenu`,菜单 = 每个可用视图一项、勾选当前那个,点一下就切过去),固定不滚动、随侧边栏折叠一起隐藏;⚠️ 标题行必须显式 `.h(PANEL_HEADER_HEIGHT)`(28px),否则空 flex 容器会塌成 0。面板里**不再有一排视图标签**:显示哪个视图由最左的**活动栏**(`sidebar_panel/activity_bar.rs`)点选 —— 它本身就是 gpui-kit `Sidebar` 的**图标折叠态**(`collapsed(true)` + 默认的 `SidebarCollapsible::Icon`,宽 `ACTIVITY_BAR_WIDTH` = 48px,正是组件内部的 `COLLAPSED_WIDTH`):内容区被组件收成 `p_2`、`SidebarMenuItem` 只摆图标并居中,悬停底色 / `active` 底色 / 折叠态鼠标悬停的右侧 tooltip 全由组件给;每个视图一枚 `SidebarMenuItem`(图标 24px),底部「设置」进组件的 `footer` 槽(`Button`,24px 图标;⚠️ `SidebarMenuItem` 只实现 `SidebarItem`、没有 `IntoElement`,而 `SidebarFooter` 会再加一层 `p_2`(48px 栏里只剩 16px),所以这一行自己摆、居中)。点某一枚 = 让侧边栏显示这个视图,再点**正在显示**的那枚 = 折叠侧边栏(`Sidebar::toggle_view`),侧边栏折叠时一枚都不亮;「设置」按钮 = `AppRoot::open_settings_window`。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,同一时刻只摆一个;⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按当前会话是不是远端调 `Sidebar::set_files_enabled`,为假时该视图的**图标与内容一起不摆**(当前选中的视图不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
+- **最左整列**(`sidebar_panel` + `components`):**图标栏在左(48px)、侧边栏面板在右** —— 侧边栏是活动栏的一个成员(`ActivityBar::sidebar`),两块都由 `components/` 里自有的组件画(见下一条)。整列的装配在 `sidebar_panel/activity_bar.rs` 的 `left_column`:每个可用视图一枚 `ActivityBarItem`(图标 24px,由「名义尺寸 32px × 0.75」得出)、底部一枚「设置」(贴底,派发全局 `OpenSettings`),折叠时**一枚都不亮**且不挂侧边栏面板。点某一枚 = 让侧边栏显示这个视图,再点**正在显示**的那枚 = 折叠侧边栏(`Sidebar::toggle_view`),照 VS Code 折叠不另设开关。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,同一时刻只摆一个;⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按当前会话是不是远端调 `Sidebar::set_files_enabled`,为假时该视图的**图标与内容一起不摆**(当前选中的视图不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
+- **活动栏**(`components/activitybar.rs` 的 `ActivityBar` / `ActivityBarItem`):一列 48px 见方的图标按钮,顶部一组、底部一组贴着列沿,列底色取 `title_bar`(与标题栏同色),**右缘一条 `sidebar_border` 竖线**(与侧边栏面板 / 中间列的分界)。⚠️ 结构用 gpui-kit **base** 的 `h_flex` / `v_flex` / `div` + gpui `Styled` 搭,只有两件 base 没有的小东西复用 `component`:图标用 `Icon`(尺寸要显式给,`svg()` 不吃父元素颜色)、悬停提示用按钮自带的 `.tooltip()`(base 的 tooltip 只给弹层内容、触发器要自己接线)。每枚活动项:图标**一律同色**(不按选中 / 未选中压暗或提亮),当前项只靠一条 2px 左端指示条(`primary`)区分;悬停 / 按下有底色(`secondary_hover` / `secondary_active`)。
+- **侧边栏面板**(`components/sidebar.rs` 的 `Sidebar` / `SidebarRow`):自绘的侧边栏外壳 —— 顶部固定标题栏 + 下方可滚动的行列表。外观照 `component::sidebar`(底色 `tokens.sidebar`、`sidebar_border` 画在右侧、标题栏 `pt_3` + `px_3`、内容 `px_3` + `gap_y_3`、列表首尾各留呼吸空间),实现**优先用 base**:`v_flex` / `div` + gpui 的 `list`(`ListState`,按可见区间要行)+ base 的 `Scrollbar`(`ListState` 自己就实现了 base 的 `ScrollbarHandle`),不依赖 `component::Sidebar`。⚠️ 行会被列表反复取用 ⇒ 行类型要实现 `SidebarRow`(`Clone` + `render(&mut App)`);本应用的行类型是 `SidebarContent`(`SessionsItem` / `FilesItem` 两个枚举)。⚠️ 标题行必须显式 `.h(PANEL_HEADER_HEIGHT)`(28px),否则空 flex 容器会塌成 0。
+- **面板标题栏**(`Sidebar::render_header`,见 `sidebar_panel/header.rs`):挂在侧边栏面板的 `header` 槽(固定、不随内容滚动),摆当前视图的标题 + 右端「…」菜单(`Button` + `DropdownMenu`,菜单 = 每个可用视图一项、勾选当前那个,点一下就切过去)。
 
 #### 会话列表(文件夹树:记录 + 拖放)
 
@@ -222,14 +231,14 @@ fn main() {
 - **拖放**:记录行与文件夹行都能拖(载荷 `DragSessionEntry{path,label}` + 共用预览卡片 `shared::DragPreview`);落在**文件夹行**上 = 放进该文件夹,落在**会话行**上 = 放进它所在的那个目录,落在列表下方那条 16px 空白落点(`#session-tree-top-level-drop`)上 = **提到顶层**;`drag_over` 用 `tokens.accent` 高亮落点。合法性由 `SessionsState::move_entry` 把关:目标必须存在、且不能是**自己或自己的子孙**(否则会把子树拖成环)。⚠️ 取出源条目会让同目录里排在它后面的下标前移一位,所以目标路径要按「取出后」算(`shift_path_after_removal`)。
 - **行**(`session_row_element`,返回 `AnyElement` 因为它把右键菜单包在外面):**同一目录下文件夹与会话同级**——两行都从 `pl(8px + depth × 16px)` 开始(不给会话行多加一个 caret 宽度的缩进,否则会话看上去低一级)。文件夹行 = 有子项时才画的 caret + 文件夹图标 + 名字;会话行 = 地球图标 + 名字(记录目前只有 SSH 一种)。caret 只看「有没有子项」(`SessionRow::has_children`):空文件夹没有 caret、点了也只选中。
 - **展开状态存在 `SessionsState::expanded`**(`Vec<u64>`,存的是条目 **id**),由行点击经 `SessionsState::activate_row` 改;改完 `RowCache::bump` 让摊平缓存失效。⚠️ 用**稳定 id** 而不是下标链:增删 / 拖动搬家都不会让展开状态串到邻居身上(早先按路径存时,删除后同目录里排在后面的标记都得跟着挪。那套 `shift_paths_after_removal` 已经删掉)。
-- ⚠️ **虚拟化靠外层侧边栏的列表**:与「文件管理器」同一套(机制见下节 §3.2「文件管理器」)—— 把条目树**摊平成一行一项**(`SessionsState::sidebar_items` → `SessionsItem`),交给侧边栏自己的虚拟列表,自己**不再嵌套** gpui-kit 的 `Tree`。摊平结果与行骨架走共用模块 `sidebar_panel/shared.rs`(`RowCache` 缓存 + `row_shell` / `row_content`),只在增删改 / 展收后重建。列表末尾固定一条 `SessionsItem::TopLevelDrop`(《拖到顶层》的那条 16px 空白落点)。
+- ⚠️ **虚拟化靠外层侧边栏的列表**:与「文件管理器」同一套(机制见下节 §3.2「文件管理器」)—— 把条目树**摊平成一行一项**(`SessionsState::sidebar_items` → `SessionsItem`),交给侧边栏面板自己的行列表(按可见区间懒渲染),自己**不再嵌套** gpui-kit 的 `Tree`。摊平结果与行骨架走共用模块 `sidebar_panel/shared.rs`(`RowCache` 缓存 + `row_shell` / `row_content`),只在增删改 / 展收后重建。列表末尾固定一条 `SessionsItem::TopLevelDrop`(《拖到顶层》的那条 16px 空白落点)。
 - ⚠️ 与文件树相同:`SessionsState` **不再自己实现 `Render`** ⇒ 它的 `cx.notify()` 落不到窗口上,靠 `Sidebar::new` 里的 `cx.observe(&sessions, ..)` 转发重绘。
 - **选中**:`SessionsState::selected`(行点击设置),不跟当前终端挂钩(「当前会话」由标签栏体现)。⚠️ `ListItem` 默认的 `list_active` 选中底色太淡(主题把它压到 6% 不透明度),分不出悬停 ⇒ [`config::change_theme`] 里关掉 `list.active_highlight`,改用 `accent`(与侧边栏里选中的条目同色),配 `font_medium` + `sidebar_accent_foreground` 文字色。
 - **右键菜单**挂在**行元素自己**身上(`ContextMenuExt::context_menu`,⚠️ 必须放链尾;记录行 / 文件夹行各一套);**列表为空**时改摆 `SessionsItem::Empty`(gpui-kit `Empty` 组件,`sidebar_panel::empty_state`)。
-- `Sidebar::children` 只吃单一类型 ⇒ 两个视图的项用 `SidebarContent` 枚举统一(`Collapsible + SidebarItem` 转发,`render` 直接转调 `SessionsItem` / `FilesItem::render`)。两层都不套 `SidebarGroup`(它会固定渲染一行 `h_8()` 段标题,标题已在顶部标签上)。`Sidebar` 的 id 带侧与当前视图名。
-- **侧边栏没有自己的状态栏**(内容一直铺到窗口底部那条状态栏的上沿):原来那两枚新建按钮已进「会话」视图的右键菜单(见上)。宽度与那一组 `ResizableState` 都在 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 钉回期望宽度)。**侧边栏默认折叠**(`visible: false`):展开 / 折叠都靠**活动栏的图标** —— 点某枚即显示那个视图,再点当前那枚即折叠(`sidebar_panel::activity_bar`)。
+- `Sidebar::children` 只吃单一类型 ⇒ 两个视图的行用 `SidebarContent` 枚举统一,实现 `SidebarRow`(`render` 直接转调 `SessionsItem` / `FilesItem::render`);行列表按索引懒渲染,行类型必须 `Clone`。`Sidebar` 面板的 id 带当前视图名(列表状态按 id 缓存)。
+- **侧边栏没有自己的状态栏**(面板一直铺到窗口底部那条状态栏的上沿):原来那两枚新建按钮已进「会话」视图的右键菜单(见上)。侧边栏宽度与那一组 `ResizableState` 都在 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 把第 0 个面板钉回「图标栏 + 侧边栏宽度」;拖拽后的整列宽度由 `Sidebar::set_panel_width` 折算回侧边栏宽度)。⚠️ **侧边栏没有最小 / 最大宽度**:分栏面板的 `size_range` 是 `图标栏宽(48px)..Pixels::MAX`;拖到贴着图标栏(宽度 ≤ `SIDEBAR_COLLAPSE_WIDTH` = 24px,再窄连一行图标都放不下)时**直接收起侧边栏**,且**保留收起前那一档宽度**(下次展开回到它,不是一条几像素的缝)。**侧边栏默认折叠**(`visible: false`):展开 / 折叠都靠**图标栏的图标** —— 点某枚即显示那个视图,再点当前那枚即折叠(`sidebar_panel::activity_bar`)。⚠️ 折叠 / 展开会让分栏组整块进出渲染树,而面板尺寸存在共享的 `ResizableState` 里 —— 所以 `Sidebar::show` / `set_visible` 会清掉 `split_width`,让下一帧的 `pin_width` 重新把面板钉回期望宽度(否则收起时那次拖拽留下的窄尺寸会在展开时留在面板状态里)。
 - **中间列** = 终端区(有会话 = dock,没有 = 欢迎页);**状态栏不在这一列**(它独占窗口最后一行,见下)。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」(直接开一个本地终端)/「打开设置」两行操作)——**启动时就是这个状态**(不自动开会话)。
-- **一组分栏**:`main-split` = 侧边栏 | 中间列(面板宽度按下标存在 `ResizableState`;侧边栏是第 0 个面板 `SIDEBAR_PANEL_INDEX`)。
+- **一组分栏**:`main-split` = **最左整列** | 中间列(面板宽度按下标存在 `ResizableState`;整列是第 0 个面板 `SIDEBAR_PANEL_INDEX`,宽度 = 48px 图标栏 + 侧边栏宽度;它的 `size_range` = `48px..Pixels::MAX`,即**侧边栏本身不限宽**,能拖多宽由窗口宽度与中间列自己的下限决定)。折叠时不摆分栏组(整列只剩图标栏,没有可拖的缝)。
 - **终端区 = dock,只用 center**(侧边栏不进 dock):每个会话一块 `SessionPane`,`add_panel_view(.., DockPlacement::Center, ..)` 挂入;`AppRoot::build_dock` 里 `set_locked(false)`。面板覆写 `title_bar(false)` / `inner_padding(false)` / `zoomable(false)` / `zoom_control() -> None`,`closable` 为真。⚠️ 注册必须走 `panel_handle`(裸 `Entity<P>` 时 skin 取不到表现层 trait,标签会退化成只写 `panel_name` 的标题栏)。
 - **拖动**:组内横向拖 = 换位;拖到终端区边缘 = 把 center 分成两个标签组(各带一条标签栏与自己的 `+`)。dock 里最后一块面板拖不动 ⇒ 只有一个会话时拖不起来;面板拖不出 center。
 - ⚠️ 分屏后 `add_panel_view` 只塞进 center 的**第一个**标签组:标签栏 `+` 先 `AppRoot::set_pending_session_group`,由 `spawn_session` 取用后 `move_panel` 过去。
@@ -239,13 +248,15 @@ fn main() {
 - **接线**(`TabGroupContext` 是只读快照):点标签 → `select_tab(ix, ..)`;拖 → `on_drag(group.drag_panel(ix, cx)?)` + 自绘 `TabDragPreview`;落点 → `drag_over::<DragPanel>(..)` + `on_drop` 调 `group.drop_panel(drag.clone(), Some(ix), true, ..)`;中键 → 关会话。
 - **关会话三条路**:标签 `×` / 中键 / 侧边栏右键菜单(按下标)。前两条走 [`AppRoot::close_panel_id`](`AppRoot::close_panel_id`)(按面板 id 找下标);不走 dock 的 `TabGroup::close_panel`(它拒绝关最后一块面板,而本应用要支持全关到欢迎页)。
 - **会话表是 dock 的镜像**:`AppRoot::terminals` 顺序 = `dock.layout(Center).panels()`,成员 = dock 里还在的面板,由 `sync_sessions_with_dock` 在 `DockEvent::LayoutChanged` 与新建 / 关闭后同步。
-- **底部状态栏**(`status_bar::empty_status_bar`):**空条**、常驻、**独占窗口最后一行**(横跨活动栏 + 全部列)⇒ 窗口是「标题栏 / 主体 / 状态栏」三级结构。⚠️ 侧边栏可见性**只由活动栏的图标**改变(状态栏里没有「展开」入口)。
+- **底部状态栏**(`status_bar::empty_status_bar`):**空条**、常驻、**独占窗口最后一行**(横跨全部列)⇒ 窗口是「标题栏 / 主体 / 状态栏」三级结构。⚠️ 侧边栏可见性**只由图标栏的图标**改变(状态栏里没有「展开」入口)。
 - **状态栏高度**(`status_bar::STATUS_BAR_HEIGHT` = 28px):现在只剩**中间列**这一条,它是空条(没有任何按钮)。
-- **分栏竖线只有侧边栏自己那条**:侧边栏按 `Side::Left` / `Side::Right` 画 `border_r_1` / `border_l_1`(颜色 = 主题 `sidebar_border`);**分栏拖拽条什么都不画**(`h_resizable(..).with_handle_appearance(crate::invisible_resize_handle())`;⚠️ 外观返回 `None` 等于「不覆盖」,会退回组件内置的那条线,所以要给 `Some(空元素)`)—— 它自己的热区 / `cursor_col_resize` 光标 / 拖动改宽都还在。⚠️ 换主题必须走 `config::change_theme(mode, cx)`;早期为避免两条线错位曾把 `sidebar_border` 置成全透明(连带侧边栏菜单「嵌套项缩进导线」的颜色一起没了),现已恢复成主题原色。
+- **主体里两条竖线**(分工不同,别再各画一条):
+  1. **图标列右缘那条**(`components/activitybar.rs`):`border_r_1` + 主题 `sidebar_border`,即图标列与侧边栏面板的分界(照 VS Code 的 `activityBar.border`);折叠态只有图标列在,它同时也是图标列与中间列的分界。
+  2. **侧边栏面板与中间列之间那条 = 分栏拖拽条自己画的**:**不再覆盖外观**(删掉了早期的 `with_handle_appearance(crate::invisible_resize_handle())`),用 gpui-kit 组件的默认外观(`component::resizable::render_resize_handle`):静止是一条 `border` 色的 hairline,指针移上来会长成一条 `radius_full` 的**胶囊条**(颜色 `muted_foreground`,长度 / 不透明度随 Idle→Hovered→Pressed→Dragging 递进:0→20px/35%→28px/60%→44px/90%)—— 与 dock 里的分隔条同一套。⚠️ 因此**侧边栏面板自己不要再画 `border_r_1`**(会与 hairline 并排成两根线);热区 / `cursor_col_resize` 光标 / 拖动改宽都仍归 `gpui_base` 的 `ResizeHandle` 管。⚠️ 换主题必须走 `config::change_theme(mode, cx)`。
 
 #### 文件管理器(远端会话的目录树)
 
-> 状态在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(远端句柄 + 根目录 + 目录项缓存 + 展开状态 + 摊平后的行清单);渲染交给 `SidebarContent::Files(FilesItem)` —— **一行一项**摆进侧边栏内容位(它自己的虚拟列表)。侧边栏起来是「会话」,点活动栏那枚图标切过来,**且只对远端会话可见**(见 §3.2)。
+> 状态在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(远端句柄 + 根目录 + 目录项缓存 + 展开状态 + 摊平后的行清单);渲染交给 `SidebarContent::Files(FilesItem)` —— **一行一项**摆进侧边栏面板的行列表。侧边栏起来是「会话」,点图标栏那枚图标切过来,**且只对远端会话可见**(见 §3.2)。
 
 - **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步两件事:可用性(`Sidebar::set_files_enabled(remote)`)与**数据源**(当前会话的 `SshFs` 句柄,来自 `TerminalView::remote_fs(cx)`)。
 - **数据源是 SFTP**(`ssh::SshFs`,见 §5.3):起始根目录 = 远端家目录(`home_dir()`);远端 shell 的 `cd` 拿不到(要改远端 prompt),所以根目录**不跟随终端**,由用户自己跳。
@@ -256,7 +267,7 @@ fn main() {
 - 展开状态存 `FilesState::expanded`(下标链),由 `FilesState::activate_row` 自己改;改完 `RowCache::bump` 让摊平缓存失效。
 - 顶部一行是一条**路径输入框**(整行铺满),**根目录就显示在它里面**(唯一的显示处,⚠️ 不要再另加一行「当前根目录」——那是重复且白占一行高度),与「显示中的根目录」双向对齐:改内容就尝试跳过去(`navigate_to`,先 `fs.is_dir()` 问远端,**只认确实是目录的路径**——不存在 / 不是目录 / 为空时什么都不动,否则打字中途那些不成立的中间态会把树清空);根目录变了时把新路径写回输入框(`sync_path_input`,用 `InputState::set_value`,它内部关掉事件发射 ⇒ 不会回环触发 `navigate_to`)。⚠️ **根目录还没问到、或根目录的列表还没读回来时整个内容位什么都不摆**(既没有路径输入框,也没有空占位),免得先闪一句占位再刷成树;问家目录失败时摆空占位,这时也**连这条输入框都不摆**(空框既没内容可编辑、也没东西可跳)。⚠️ 输入框用组件**默认尺寸**(`Size::Medium`,高 32px)且关掉清除按钮(`cleanable(false)`)⇒ 那一行是**自己的** `PATH_ROW_HEIGHT = 36px`,**不能**复用它上面面板标题栏的 `PANEL_HEADER_HEIGHT`(28px,输入框会溢出到树上)。两条容易踩的机制:**(a) 写回要推迟到下一帧**(`path_input_pending`,由 `FilesState::sync` 每帧补一次):根目录是后台异步问回来的(`home_dir`),那条回调里没有窗口、写不进输入框;⚠️ 但不能每帧无条件写,否则会把用户正在敲的内容顶掉。**(b) 跳转请求带序号**(`nav_seq`):输入框每敲一个字符就发一次 `is_dir` 查询,只有**最新**那次的回答算数,否则先发的短路径后回来会把树拽回上级目录。
 - 失败要**说清原因**:连不上 SFTP(认证被拒 / 服务端没开 sftp 子系统)时把 `SshError` 的话显示在空占位上;某个目录读不到(没权限 / 连接断了)则显示成「这个目录是空的」+ 一句原因。⚠️ 连接能在下次请求时重连(`SshFs` 内部),所以这里的错误只是**当时**的结果。
-- ⚠️⚠️ **虚拟化靠外层的侧边栏列表,不要再嵌内层虚拟列表**。侧边栏内容区是 gpui-kit `Sidebar` 自己的虚拟列表(`#inner` 里 `list(list_state).size_full()`,高度确定 ⇒ 只渲染可见项 + overdraw),所以文件树是把整棵树**摊平成一行一项**(`FilesState::sidebar_items` → `FilesItem`)交给它。早先的做法是把整棵树(`gpui-kit` 的 `Tree`)塞成**一项**、并按行数给它 `.h(行数 × 28)`,于是内层 `uniform_list` 的「视口」= 那一项的高度 = 整棵树 ⇒ 它的可见区间按**自身 bounds 高度**算(`last_visible_element_ix = ceil((-scroll_offset.y + bounds.height) / item_height)`,**不看 `content_mask`**)⇒ 每帧构建 / 布局**所有**行元素,目录一大就卡,且卡顿与条目数成正比。
+- ⚠️⚠️ **虚拟化靠外层侧边栏的行列表,不要再嵌内层虚拟列表**。侧边栏面板(`components/sidebar.rs`)的内容区就是 gpui 的 `list(list_state)`(`size_full()`,高度确定 ⇒ 只渲染可见项 + overdraw),所以文件树是把整棵树**摊平成一行一项**(`FilesState::sidebar_items` → `FilesItem`)交给它。早先的做法是把整棵树(`gpui-kit` 的 `Tree`)塞成**一项**、并按行数给它 `.h(行数 × 28)`,于是内层 `uniform_list` 的「视口」= 那一项的高度 = 整棵树 ⇒ 它的可见区间按**自身 bounds 高度**算(`last_visible_element_ix = ceil((-scroll_offset.y + bounds.height) / item_height)`,**不看 `content_mask`**)⇒ 每帧构建 / 布局**所有**行元素,目录一大就卡,且卡顿与条目数成正比。
 - 摊平结果与行骨架走共用模块 `sidebar_panel/shared.rs`(`RowCache` 缓存 + `row_shell` / `row_content` / `ellipsis_label` / `indent`):侧边栏每帧都会来要一次行清单,不缓存就会每帧 `O(总节点数)`。
 - ⚠️ 文件树**不再自己实现 `Render`** ⇒ 它的 `cx.notify()` 落不到窗口上(`App::notify` 只失效「正在渲染该实体」的窗口),所以 `Sidebar::new` 用 `cx.observe(&files, ..)` 把变化转成侧边栏自己的重绘。
 
@@ -310,7 +321,7 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 
 ### 3.5 设置窗口(`settings_window.rs`)
 
-- **入口两个**:主窗口最左**活动栏底部**的「设置」图标(`sidebar_panel::activity_bar`,原来在标题栏左端)、快捷键 `Ctrl+,`(`actions::OpenSettings`,绑在 `None` context);窗口句柄存 `AppRoot::settings_window`,重复点击只 `activate_window`。
+- **入口两个**:主窗口最左**图标栏底部**的「设置」图标(`sidebar_panel::activity_bar`,原来在标题栏左端)、快捷键 `Ctrl+,`(`actions::OpenSettings`,绑在 `None` context);窗口句柄存 `AppRoot::settings_window`,重复点击只 `activate_window`。
 - ⚠️ 标题栏里的按钮要包一层 `div().occlude()`:`TitleBar` 内容区带 `WindowControlArea::Drag`,否则点击会被当成「拖标题栏」。
 - 独立顶层窗口(`WindowKind::Normal`):任务栏有独立条目、不模态、可单独最小化。⚠️ 不要用 `WindowKind::Dialog`(owner + `EnableWindow(parent,false)`,会锁住主窗口)。
 - ⚠️ 主程序退出要一并关掉设置窗口:`SettingsWindow::new` 记下主窗口句柄,`App::on_window_closed` 里 `App::quit()`(`Subscription` 必须存为视图字段)。
@@ -342,7 +353,7 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 
 ### 3.6 状态栏(`status_bar.rs`)
 
-- **独占窗口最后一行**(`status_bar::STATUS_BAR_HEIGHT` = 28px,常驻,横跨活动栏 + 全部列),是**空条**;侧边栏铺到它的上沿为止(它的入口按钮已进「会话」视图的右键菜单,见 §3.2)。
+- **独占窗口最后一行**(`status_bar::STATUS_BAR_HEIGHT` = 28px,常驻,横跨全部列),是**空条**;侧边栏铺到它的上沿为止(它的入口按钮已进「会话」视图的右键菜单,见 §3.2)。
 - ⚠️ **中间那条曾放会话指标**(连接状态 / 连接目标 / 进程 CPU / 内存 / 系统网络速率,每 1.5s 采样),整块已按需求移除,连同 `status_metrics.rs` 采样任务(`start_metrics_sampling` / `SystemMonitor` / `SessionMetrics`)与 `alacrterm` 的 `sysinfo` 依赖。⇒ 不要为了「再加一个指标」把它装回来;真要加,注意那次每 1.5s 的 `cx.notify()` 会让**整棵树**重建(§9 的优化清单)。
 - ⚠️ 状态栏高度是钉死的(`StatusBar` 自身按内容撑高):以后要往这条空条里放东西,带图标的按钮得显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把条撑高)。
 
