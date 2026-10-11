@@ -5,9 +5,9 @@
 //! - `crates/terminal_view` —— 终端视图（自定义 gpui Element 逐 cell 渲染）
 //! - `crates/util`          —— Shell 探测 / 路径工具（来自 Zed）
 //!
-//! 应用外壳按「活动栏 + 左右两条侧边栏 + 一条整窗底部状态栏」拆分为独立文件：
-//! - [`sidebar_panel`]  —— 最左的 **VS Code 式活动栏**（视图入口 + 底部「设置」），左 / 右侧边栏
-//!   （各带顶部面板标题栏、视图清单与折叠状态），
+//! 应用外壳按「活动栏 + 侧边栏 + 一条整窗底部状态栏」拆分为独立文件：
+//! - [`sidebar_panel`]  —— 最左的 **VS Code 式活动栏**（视图入口 + 底部「设置」）与它右侧的
+//!   侧边栏（顶部面板标题栏 + 当前视图内容 + 折叠状态），
 //!   以及侧边栏「会话」列表的记录模型与渲染（[`sidebar_panel::sessions`]）
 //! - [`terminal_panel`] —— 中间容器：标签栏 + 终端，以及运行时句柄 [`terminal_panel::Session`]
 //! - [`welcome`]        —— 终端容器关闭后中间列的欢迎页（默认背景板）
@@ -18,9 +18,9 @@
 //! 本文件只保留程序入口、根视图 [`AppRoot`]（共享状态 + 布局装配 + 设置弹窗）。
 //! 窗内只有三级结构：标题栏 / 主体 / 状态栏 —— **状态栏独占窗口最后一行**（横跨活动栏 +
 //! 全部列）。主体 = **活动栏（常驻最左一列，48px）** +
-//! 两级嵌套的可拖拽分栏组（官方 resizable 面板组）：内层 `main-split` = 左侧边栏 | 中间列，
-//! 外层 `right-split` = 内层 | 右侧边栏；弹窗层也在此装配。活动栏**不进分栏组**，
-//! 所以侧边栏折叠 / 展开时它始终在 —— 左侧边栏的显示与它显示哪个视图都由活动栏的图标点选。
+//! 可拖拽分栏组（官方 resizable 面板组，`main-split`）= 侧边栏 | 中间列；弹窗层也在此装配。
+//! 活动栏**不进分栏组**，所以侧边栏折叠 / 展开时它始终在 —— 显示 / 折叠侧边栏与它显示哪个
+//! 视图，全由活动栏的图标点选（见 `sidebar_panel::activity_bar`）。
 //! 中间列里的**终端区**额外包了一层 dock（[`terminal_panel`]，gpui-kit `DockArea`
 //! 的 center）——侧边栏不进 dock，仍由上面的分栏面板管宽度与折叠。
 //!
@@ -33,14 +33,13 @@
 //! - **终端会话**（[`AppRoot::terminals`]，dock 里的标签页）：真正在跑的终端，
 //!   由标签栏的 `+`（本地终端）或双击某条记录创建，关掉标签只影响终端。
 //!
-//! 折叠规则：**左侧边栏折叠**时它整块让位给终端（最左那条活动栏还在，点图标即可恢复）；
-//! **右侧边栏折叠**时同样整块让位给终端。
-//! 两条侧边栏**默认折叠**（启动即折叠态），因此首屏只有标题栏 + 活动栏 + 中间列。
+//! 折叠规则：**侧边栏折叠**时它整块让位给终端（最左那条活动栏还在，点图标即可恢复）。
+//! 侧边栏**默认折叠**（启动即折叠态），因此首屏只有标题栏 + 活动栏 + 中间列。
 //! **终端标签页全部关闭**时中间容器消失，中间列改显示欢迎页（[`welcome`]，
 //! 见 [`AppRoot::render_welcome`]；**启动时同样是这个状态**——不自动开会话；
 //! 之后可从欢迎页的「新建终端」或标签栏的 `+` 重新开一个本地终端，或双击侧边栏里的会话记录连远端）。
-//! 这些情况都**不影响**窗口底部那条空状态栏（它常驻），而「设置」入口在**活动栏底部**、
-//! 右侧边栏的折叠开关在**标题栏右端**：两处都常驻，因此不会出现「窗口全空、没有任何恢复入口」的死角。
+//! 这些情况都**不影响**窗口底部那条空状态栏（它常驻），而「设置」入口与侧边栏的
+//! 显示 / 折叠都在**活动栏**（常驻最左一列）：因此不会出现「窗口全空、没有任何恢复入口」的死角。
 
 mod actions;
 mod assets;
@@ -73,10 +72,7 @@ use gpui_kit::{
         v_flex,
     },
 };
-use sidebar_panel::{
-    RIGHT_SIDEBAR_MAX_WIDTH, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
-    Sidebar, SidebarSide, activity_bar, toggle_button,
-};
+use sidebar_panel::{SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Sidebar, activity_bar};
 use sidebar_panel::files::FilesState;
 use sidebar_panel::sessions::SessionsState;
 use tab_bar::TerminalDockSkin;
@@ -120,18 +116,17 @@ fn main() {
         });
 }
 
-/// 应用根视图：装配标题栏 + 两条侧边栏 + 中间列 + 弹窗层（只存跨组件共享状态）。
+/// 应用根视图：装配标题栏 + 侧边栏 + 中间列 + 弹窗层（只存跨组件共享状态）。
 struct AppRoot {
     /// 所有终端会话（保持运行，切换仅切换显示）。
     terminals: Vec<Session>,
     /// 当前显示的终端下标。
     active: usize,
-    /// 左 / 右两条侧边栏（各一个实体：自带标签、折叠、宽度与渲染，见 [`sidebar_panel::Sidebar`]）。
-    left_sidebar: Entity<Sidebar>,
-    right_sidebar: Entity<Sidebar>,
-    /// 侧边栏「会话」视图的状态（两条侧边栏共用；记录与 [`AppRoot::terminals`] 无关）。
+    /// 唯一的侧边栏（自带视图清单、折叠、宽度与渲染，见 [`sidebar_panel::Sidebar`]）。
+    sidebar: Entity<Sidebar>,
+    /// 侧边栏「会话」视图的状态（记录与 [`AppRoot::terminals`] 无关）。
     sessions: Entity<SessionsState>,
-    /// 侧边栏「文件管理器」视图的状态（两条侧边栏共用；数据源 = 当前远端会话的 SFTP）。
+    /// 侧边栏「文件管理器」视图的状态（数据源 = 当前远端会话的 SFTP）。
     files: Entity<FilesState>,
     /// 终端会话的 dock（一个会话 = center 里的一块面板；没有会话时整块换成欢迎页）。
     dock: Entity<DockArea>,
@@ -165,24 +160,16 @@ impl AppRoot {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock = Self::build_dock(window, cx);
-        // 三个子组件实体：会话列表 + 文件管理器（两条侧边栏共用）+ 左右两条侧边栏。
+        // 三个子组件实体：会话列表 + 文件管理器（侧边栏的两个视图）+ 侧边栏本身。
         // 这两个视图状态只有侧边栏需要，根视图只借用它们装配，不持有。
         let sessions = cx.new(|_| SessionsState::new());
         let files = cx.new(|cx| FilesState::new(window, cx));
-        let left_sidebar = cx.new(|cx| {
-            Sidebar::new(SidebarSide::Left, sessions.clone(), files.clone(), cx)
-        });
-        let right_sidebar =
-            cx.new(|cx| Sidebar::new(SidebarSide::Right, sessions.clone(), files.clone(), cx));
-        // 两条侧边栏互指：标签跨栏拖动时要把视图从另一条实体取过来（见 `Sidebar::take_dragged`）。
-        left_sidebar.update(cx, |sidebar, _| sidebar.connect(right_sidebar.downgrade()));
-        right_sidebar.update(cx, |sidebar, _| sidebar.connect(left_sidebar.downgrade()));
+        let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
 
         let mut this = Self {
             terminals: Vec::new(),
             active: 0,
-            left_sidebar,
-            right_sidebar,
+            sidebar,
             sessions,
             files,
             dock,
@@ -286,15 +273,11 @@ impl Render for AppRoot {
         };
         self.files
             .update(cx, |files, cx| files.sync(fs, window, cx));
-        self.left_sidebar
-            .update(cx, |sidebar, cx| sidebar.set_files_enabled(remote, cx));
-        self.right_sidebar
+        self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_files_enabled(remote, cx));
 
         // 侧边栏宽度只由用户拖拽决定：容器尺寸变化引起的比例重排先钉回去（见子实体）。
-        self.left_sidebar
-            .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
-        self.right_sidebar
+        self.sidebar
             .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
 
         // 中间列 = 终端区（有会话 = dock，没有 = 欢迎页）。**状态栏不在这一列** ——
@@ -315,76 +298,46 @@ impl Render for AppRoot {
         //   main-split = 左侧边栏 | 中间列；right-split = 内层 | 右侧边栏
         // 侧边栏状态在各自实体里，这里只取装配所需的值（`read` 的借用很短）。
         // 侧边栏本身作为元素直接 `.child(实体)`：它自己实现 `Render`。
-        let left_visible = self.left_sidebar.read(cx).visible();
-        let left_width = self.left_sidebar.read(cx).width();
-        let left_resize = self.left_sidebar.read(cx).resize_state().clone();
-        let left_state = self.left_sidebar.downgrade();
-        let left_panel = self.left_sidebar.clone();
-        let center = if left_visible {
+        let visible = self.sidebar.read(cx).visible();
+        let width = self.sidebar.read(cx).width();
+        let resize = self.sidebar.read(cx).resize_state().clone();
+        let sidebar_state = self.sidebar.downgrade();
+        let panel = self.sidebar.clone();
+        let split = if visible {
             h_resizable("main-split")
                 // 拖拽条不画线（见 [`invisible_resize_handle`]），热区与拖动照旧。
                 .with_handle_appearance(invisible_resize_handle())
                 // 绑定侧边栏实体持有的状态：折叠再展开后宽度不会丢失。
-                .with_state(&left_resize)
+                .with_state(&resize)
                 // 拖拽结束后记下新宽度，作为窗口尺寸变化时的「期望宽度」。
                 .on_resize(move |state, _window, cx| {
                     if let Some(width) = state.read(cx).sizes().first().copied() {
-                        let _ = left_state.update(cx, |sidebar, _| sidebar.set_width(width));
+                        let _ = sidebar_state.update(cx, |sidebar, _| sidebar.set_width(width));
                     }
                 })
                 .child(
                     resizable_panel()
-                        .size(left_width)
+                        .size(width)
                         .size_range(SIDEBAR_MIN_WIDTH..SIDEBAR_MAX_WIDTH)
                         // flex_none：宽度完全由面板状态决定，否则组件内置的
                         // flex_grow_1 会把侧边栏撑得比设定值更宽。
                         .flex_none()
-                        .child(left_panel),
+                        .child(panel),
                 )
                 .child(resizable_panel().child(mid_column))
                 .into_any_element()
         } else {
-            // 折叠态：左侧边栏整块不渲染（它自己不在树里），中间列铺满。
+            // 折叠态：侧边栏整块不渲染（它自己不在树里），中间列铺满。
             mid_column
         };
 
-        let right_visible = self.right_sidebar.read(cx).visible();
-        let right_width = self.right_sidebar.read(cx).width();
-        let right_resize = self.right_sidebar.read(cx).resize_state().clone();
-        let right_state = self.right_sidebar.downgrade();
-        let right_panel = self.right_sidebar.clone();
-        let split = if right_visible {
-            h_resizable("right-split")
-                // 拖拽条不画线（见 [`invisible_resize_handle`]），热区与拖动照旧。
-                .with_handle_appearance(invisible_resize_handle())
-                .with_state(&right_resize)
-                // 拖拽结束后记下新宽度（右侧边栏是本组的最后一个面板，下标 1）。
-                .on_resize(move |state, _window, cx| {
-                    if let Some(width) = state.read(cx).sizes().get(1).copied() {
-                        let _ = right_state.update(cx, |sidebar, _| sidebar.set_width(width));
-                    }
-                })
-                // 左栏（左侧边栏 + 中间列）撑满剩余宽度，右栏宽度完全由面板状态决定。
-                .child(resizable_panel().child(center))
-                .child(
-                    resizable_panel()
-                        .size(right_width)
-                        .size_range(RIGHT_SIDEBAR_MIN_WIDTH..RIGHT_SIDEBAR_MAX_WIDTH)
-                        .flex_none()
-                        .child(right_panel),
-                )
-                .into_any_element()
-        } else {
-            center
-        };
-
-        // 主体 = **活动栏**（常驻最左一列，不进分栏组）+ 上面那两组分栏。
+        // 主体 = **活动栏**（常驻最左一列，不进分栏组）+ 上面的分栏组。
         // 活动栏不进分栏组是为了：折叠 / 展开侧边栏时它始终在，点图标就能把侧边栏叫回来；
-        // 它同时决定左侧边栏显示哪个视图（见 `sidebar_panel::activity_bar`）。
+        // 它同时决定侧边栏显示哪个视图（见 `sidebar_panel::activity_bar`）。
         let body = h_flex()
             .h_full()
             .w_full()
-            .child(activity_bar(&self.left_sidebar, cx))
+            .child(activity_bar(&self.sidebar, cx))
             .child(
                 div()
                     .flex_1()
@@ -401,17 +354,14 @@ impl Render for AppRoot {
             .track_focus(&self.background_focus)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_background_mouse_down))
             .bg(cx.theme().background)
-            // ── 顶部：自绘标题栏（左：应用名 / 右：右侧边栏开关 + 窗口控制）——
-            // 设置入口在**活动栏底部**（见 `sidebar_panel::activity_bar`），左侧边栏的折叠 / 展开
-            // 是活动栏的那两枚图标，所以标题栏里只剩右侧边栏那一枚开关（它没有活动栏）。
-            // 标题栏内容区本身就是窗口拖拽区，但其中的按钮仍有自己的 hitbox，
-            // 点击会被正常派发（与窗口控制按钮同理），因此这些按钮可以放在这里。
+            // ── 顶部：自绘标题栏（左：应用名 / 右：窗口控制）——
+            // 侧边栏的显示 / 折叠与「设置」入口都在**活动栏**（见 `sidebar_panel::activity_bar`），
+            // 所以标题栏里只剩应用名（窗口控制按钮由 gpui-kit 的 `TitleBar` 自己给）。
             .child(
                 TitleBar::new().child(
                     h_flex()
                         .w_full()
                         .px(px(8.))
-                        .gap(px(8.))
                         .items_center()
                         .child(
                             div()
@@ -420,10 +370,7 @@ impl Render for AppRoot {
                                 .text_size(px(13.))
                                 .text_color(cx.theme().secondary_foreground)
                                 .child("Alacrterm"),
-                        )
-                        // 右侧边栏的折叠开关：靠 flex_1 的标题顶到内容区最右端、
-                        // 窗口控制按钮左侧（按钮本身由侧边栏模块给出）。
-                        .child(toggle_button(&self.right_sidebar, cx)),
+                        ),
                 ),
             )
             // —— 中部：主体（活动栏 | 左侧边栏 | 中间列 | 右侧边栏）——

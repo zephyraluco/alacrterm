@@ -105,7 +105,7 @@ enum RowKind {
 
 /// 「文件管理器」视图的状态:远端句柄 + 根目录 + 节点树 + 展开状态 + 摊平后的行清单。
 ///
-/// **数据与交互状态都在这里**:[`crate::AppRoot`] 建好实体后交给两条侧边栏
+/// **数据与交互状态都在这里**:[`crate::AppRoot`] 建好实体后交给侧边栏
 /// (共用同一个),视图只在远端会话下摆出来;换会话走 [`FilesState::sync`]。
 /// 渲染不在这里 —— [`FilesState::sidebar_items`] 把「要摆哪些项」交给侧边栏(它负责虚拟化)。
 pub(crate) struct FilesState {
