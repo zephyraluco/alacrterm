@@ -111,7 +111,7 @@ graph TB
 Cargo.toml                      # workspace 根(resolver = "3", edition 2024)
 assets/
   icons/                        # rust-embed 内嵌(含 SquareTerminal 等)
-  keymaps/ settings/            # 保留自 Zed 的配置模板(未使用)
+  keymaps/                      # 内嵌的默认按键绑定 default-{windows,macos,linux}.json(§3.12)
 crates/
   alacrterm/                    # 应用层(§3)
     src/
@@ -322,7 +322,7 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 
 ### 3.5 设置窗口(`settings_window.rs`)
 
-- **入口两个**:主窗口最左**图标栏底部**的「设置」图标(`sidebar_panel::activity_bar`,原来在标题栏左端)、快捷键 `Ctrl+,`(`actions::OpenSettings`,绑在 `None` context);窗口句柄存 `AppRoot::settings_window`,重复点击只 `activate_window`。
+- **入口两个**:主窗口最左**图标栏底部**的「设置」图标(`sidebar_panel::activity_bar`,原来在标题栏左端)、快捷键 `Ctrl+,`(`actions::OpenSettings`,默认 keymap 里挂在 `!Dialog` context ⇒ 焦点在终端里也能触发);窗口句柄存 `AppRoot::settings_window`,重复点击只 `activate_window`。
 - ⚠️ 标题栏里的按钮要包一层 `div().occlude()`:`TitleBar` 内容区带 `WindowControlArea::Drag`,否则点击会被当成「拖标题栏」。
 - 独立顶层窗口(`WindowKind::Normal`):任务栏有独立条目、不模态、可单独最小化。⚠️ 不要用 `WindowKind::Dialog`(owner + `EnableWindow(parent,false)`,会锁住主窗口)。
 - ⚠️ 主程序退出要一并关掉设置窗口:`SettingsWindow::new` 记下主窗口句柄,`App::on_window_closed` 里 `App::quit()`(`Subscription` 必须存为视图字段)。
@@ -361,10 +361,10 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 ### 3.7 右键菜单与 Action(`actions.rs`)
 
 - 菜单项写法 `menu.menu("标签", Box::new(SomeAction))`,由菜单 `dispatch_action` 派发
-- 零字段 action 走宏:`actions!(alacrterm, [NewLocalTerminal, OpenSettings])`;带数据的必须**手写**并派生 `Deserialize`(`#[action(namespace = .., no_json)]` 免掉 schemars),⚠️ 写进 `actions!` 会与宏生成的 unit 结构体撞名(E0428):`NewSession{folder}` / `NewFolder{parent}` / `OpenSession{path}` / `MoveEntry{from,into}` / `RemoveEntry{path}`(后四个的数据都是 [`SessionPath`],见 §3.2 会话列表)
-- 快捷键在 `main` 建窗时 `cx.bind_keys` 注册:`ctrl-,` → `OpenSettings`(绑在 `None` context ⇒ 焦点在终端里也能触发)
+- 零字段 action 走宏:`actions!(alacrterm, [..])`;带数据的必须**手写**并派生 `Deserialize`(`#[action(namespace = .., no_json)]` 免掉 schemars),⚠️ 写进 `actions!` 会与宏生成的 unit 结构体撞名(E0428):`NewSession{folder}` / `NewFolder{parent}` / `OpenSession{path}` / `MoveEntry{from,into}` / `RemoveEntry{path}`(后四个的数据都是 [`SessionPath`],见 §3.2 会话列表)
 - 接收方用全局监听器 `App::on_action`(action 冒泡阶段必然触发,不依赖焦点)
 - 需要窗口的操作(打开对话框、建终端实体)配 `defer_after_update`;不需要窗口的直接 `root.update(cx, ..)`
+- 🔑 **快捷键不在这里**:没有硬编码绑定,全部走 keymap JSON(见 §3.12)。想被 keymap 引用就得能从 JSON 构造 ⇒ 数据型 action 不能带 `no_json`,而要派生 `Deserialize` + `JsonSchema`(见 §3.12 的 ⚠️)
 - ⚠️ 不要嵌套 `context_menu`(父容器与子条目都挂会同时弹出两个菜单);目前只有会话条目(记录行 / 文件夹行)有右键菜单,且由 `Tree::context_menu` 统一挂
 
 ### 3.8 Terminal 异步创建(`TerminalView::new`)
@@ -445,6 +445,101 @@ themes/*.json ──(config::preload_themes: ThemeRegistry::load_themes_from_str
 - ⚠️ 主题文件里的 `sidebar.border` 会被我们的透明覆盖盖掉(§3.2)
 - ⚠️ 终端 ANSI 调色板来自 `config/terminal.json`,不跟随界面主题
 - ⚠️ **主题开关不能带动画**:换模式必须两个窗口同帧变色。「深色主题」用 `settings_window.rs::theme_mode_switch`,把 element id 绑上当前模式(`("theme-mode-switch", usize::from(dark))`)⇒ 弹簧状态新建时直接到位
+
+---
+
+### 3.12 按键绑定(`keymap.rs` + `assets/keymaps/*.json`,Zed 风格)
+
+全部键位都是**数据**:Rust 里不再有硬编码绑定。`keymap::install(cx)` 在 `gpui_kit::init` 之后调用一次
+(`main` 建窗前),把两层 keymap 读成 gpui 的 `KeyBinding` 追加注册。
+
+```
+assets/keymaps/default-{windows,macos,linux}.json   # rust-embed:KeymapAssets(只收 default-*.json)
+config/keymap.json                                  # 可选用户文件(候选路径同 §3.10)
+        │
+        └─ strip_jsonc(去注释/尾随逗号) ─▶ serde_json ─▶ 逐节 build_action + KeyBinding::load ─▶ cx.bind_keys(..)
+              未知动作名 / 坏键位 / 坏 context ⇒ eprintln! 跳过该条(不 panic、不影响其它条目)
+```
+
+- JSON 形态:顶层数组,每项一节 `{ "context"?, "bindings": { 键位: 动作 } }`;动作 = `"ns::Name"` /
+  `["ns::Name", 参数]` / `"null"`(或 JSON `null`,= 解绑);支持 `//`、`/* */` 注释与尾随逗号
+- **优先级**:gpui 先比 context 深度(深者优先)、再比注册顺序(index 大者优先) ⇒ 默认资产先注册、
+  用户文件后注册,同键位同 context 下**用户胜**;`"null"` 会压掉更浅 context 上的同键位绑定
+- **键位选择原则**:绑在 `"Terminal"` context 上的键**不会再进 PTY**(见 §4.3 的 ⚠️),所以默认表只拦
+  `ctrl-shift-*` / `ctrl-tab` / `alt-<数字>` / `shift-<导航键>`,shell 在用的
+  `ctrl-a/b/c/d/e/k/l/n/p/r/u/w/y` 等一律不碰;应用级那一节用 `"context": "!Dialog"`,
+  对话框开着时自动让位(否则能嵌套弹出对话框)
+- ⚠️ **不要 `clear_key_bindings()`**:gpui-kit 的组件在 `init` 里注册了自己的绑定
+  (`Root`:`tab` / `shift-tab` / `ctrl-c`;`Dialog`:`escape` / `enter`),清空会把对话框确认、
+  焦点遍历、选中复制一起干掉。默认 keymap 用 `"null"` 在更深的 `"Terminal"` context 上精确压掉需要的那些
+- ⚠️ **action 必须能从 JSON 构造**(否则 keymap 里引用它会报 `Didn't find an action named ..`):
+  零字段用 `actions!` 宏;带数据的(`ActivateSession(usize)`)手写 + 派生 `Deserialize` + `JsonSchema`,
+  且**不能**加 `no_json`(加了 `build` 恒失败)
+- chord(多键序列)由 `KeyBinding::load` 原生支持,但**默认表不用** —— 前缀键会被 pending 绑定吃掉,
+  别拿 shell 常用的键当前缀
+- keymap 的键位不参与 UI 显示:欢迎页的快捷键提示(`welcome.rs::NEW_TERMINAL_SHORTCUT`)是手写的,改了默认 keymap 记得同步
+
+#### 默认键位(Windows / Linux;macOS 把应用级那批换成 `cmd-*`)
+
+全局那节(`context: "!Dialog"`):
+
+| 键位 | 动作 |
+| --- | --- |
+| `Ctrl+Shift+N` | `NewLocalTerminal` 新建本地终端 |
+| `Ctrl+Shift+M` | `NewSessionDialog` 新建 SSH 会话(弹对话框) |
+| `Ctrl+,` | `OpenSettings` |
+| `Ctrl+Shift+W` | `CloseActiveSession` |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | `NextSession` / `PrevSession` |
+| `Alt+1` … `Alt+9` | `ActivateSession { 0..8 }` |
+| `Ctrl+Shift+D` / `Ctrl+Shift+S` | `SplitSessionRight` / `SplitSessionDown` |
+| `Ctrl+Shift+Z` | `ToggleZoom` 最大化 / 还原标签组 |
+| `Ctrl+Shift+B` | `ToggleSidebar` |
+| `Ctrl+Shift+E` / `Ctrl+Shift+G` | `ShowSessionsView` / `ShowFilesView` |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | 字号 +1 / -1 / 复位(与设置窗口同一条落盘路径) |
+
+`Terminal` 那节(只在终端聚焦时):
+
+| 键位 | 动作 |
+| --- | --- |
+| `Tab` / `Shift+Tab` | `"null"` 解绑(gpui-kit `Root` 的焦点切换让位给终端) |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | `CopyText` / `PasteText` |
+| `Ctrl+Shift+K` | `ClearTerminal` |
+| `Shift+PageUp` / `Shift+PageDown` | 上下翻页 |
+| `Shift+Home` / `Shift+End` | 滚到顶 / 底 |
+| `Shift+Up` / `Shift+Down` | 上 / 下滚一行 |
+| `Ctrl+Shift+Space` | `ToggleViMode` |
+
+⚠️ `Ctrl+C` 保持**不绑定**(留给 SIGINT);「有选区才复制」需要拿到原始 keystroke,而 action 处理器拿不到 ⇒ 复制用 `Ctrl+Shift+C`。
+
+#### key context
+
+| context | 打在哪 | 谁用 |
+| --- | --- | --- |
+| `Terminal` | `TerminalView::render` 根 div(`terminal_view/lib.rs::TERMINAL_KEY_CONTEXT`) | 默认 keymap:压掉 Tab、复制粘贴、滚动、vi 模式 |
+| `Dock` | `tab_bar.rs` 标签栏根节点(`keymap::DOCK_CONTEXT`) | 留给用户(默认表未用) |
+| `Sidebar` | `components::ActivityBar` 整列根节点(`keymap::SIDEBAR_CONTEXT`) | 留给用户(默认表未用) |
+| `Dialog` | gpui-kit 的 `Dialog`(只有 `keyboard` 打开时) | gpui-kit(`escape`/`enter`)+ 默认表的 `!Dialog` |
+
+#### 动作 ↔ 处理器
+
+键位里的动作名都在 `actions.rs`(`actions!` 宏或手写结构体),处理器同样在 `actions.rs` 的
+`AppRoot::register_actions`(全局 `cx.on_action`),分三类:
+
+| 类别 | 动作 | 走法 |
+| --- | --- | --- |
+| 需要窗口(开关对话框 / 建会话 / 动 dock 布局) | `NewLocalTerminal` `NewSessionDialog` `OpenSettings` `CloseActiveSession` `NextSession` `PrevSession` `ActivateSession` `SplitSessionRight` `SplitSessionDown` `ToggleZoom` | `AppRoot::defer_after_update` → `terminal_panel.rs` 的 `AppRoot::*`(焦点会话按 `active_session_index` 认) |
+| 不需要窗口的 UI 状态 | `ToggleSidebar` `ShowSessionsView` `ShowFilesView` | 直接 `Entity::update`(`sidebar_panel/mod.rs` 的 `AppRoot::toggle_sidebar` / `open_sidebar_view`) |
+| 终端本身 | `CopyText` `PasteText` `ClearTerminal` `Scroll*` `ToggleViMode` | `AppRoot::with_active_terminal` → `TerminalView::*`(`terminal_view/lib.rs`) |
+
+- ⚠️ **终端类动作必须触发重绘**:`Terminal::{copy, clear, scroll_*}` 只是往终端自己的事件队列里塞
+  `InternalEvent`,队列要等 `TerminalElement::prepaint` 里的 `Terminal::sync` 才被消费 ——
+  `TerminalView::with_terminal` 里统一 `cx.notify()` 就是为了这个
+- ⚠️ **动作处理器拿不到原始 keystroke**:滚动键在 `ALT_SCREEN`(vim 等全屏 TUI)里要原样转发给 PTY,
+  但 `Action` 里没有按键信息 ⇒ `TerminalView::scroll_action` 自己造 CSI 序列
+  (`shift-pageup` = `CSI 5 ~` 等)
+- 字号动作(`IncreaseFontSize` / `DecreaseFontSize` / `ResetFontSize`)复用设置窗口那条路径
+  (§3.5 的三步):`settings_window::update_render`
+- `SearchTerminal` 只是**注册了动作占位**(处理器打一行提示),默认 keymap 里没有绑定 —— 终端内查找的 UI 还没做
 
 ---
 
@@ -553,14 +648,17 @@ graph LR
 - `selected_text_range` 恒返回 `0..0`;`bounds_for_range` 用光标矩形 + 列偏移定位候选窗
 
 **`try_keystroke` 流程**(`on_key_down` → `terminal.try_keystroke`):
-1. Ctrl+Shift+V → 剪贴板 → `terminal.paste`,然后 `stop_propagation`
-2. vi mode 开启 → `vi_motion`
-3. 否则 `to_esc_str(keystroke, mode, option_as_meta)`:方向键按 `APP_CURSOR` 区分 `\x1b[A` / `\x1bOA`;修饰组合 `enter+shift → \x0a`、`tab+shift → \x1b[Z`、`ctrl+space → \x00`、`ctrl+backspace → \x08`;Ctrl 字母 → caret 记号;**无修饰的普通字符返回 `None`**,交回 InputHandler 的 WM_CHAR 路径
-4. 处理成功则 `stop_propagation`
+1. vi mode 开启 → `vi_motion`
+2. 否则 `to_esc_str(keystroke, mode, option_as_meta)`:方向键按 `APP_CURSOR` 区分 `\x1b[A` / `\x1bOA`;修饰组合 `enter+shift → \x0a`、`tab+shift → \x1b[Z`、`ctrl+space → \x00`、`ctrl+backspace → \x08`;Ctrl 字母 → caret 记号;**无修饰的普通字符返回 `None`**,交回 InputHandler 的 WM_CHAR 路径
+3. 处理成功则 `stop_propagation`
+
+> ⚠️ 复制粘贴 / 滚动 / vi 模式**不在** `on_key_down` 里:它们被默认 keymap 绑成应用动作(`"Terminal"` context),动作优先 ⇒ 走不到这个 listener(见 §3.12)。
 
 > ⚠️ **Tab / Shift+Tab 归终端**(焦点在终端时):`Root` 在 `"Root"` context 里把 `tab` / `shift-tab` 绑为焦点切换,而键位派发在 key listener 之前且动作命中后停传播 ⇒ 终端收不到 Tab。
-> 做法:`TerminalView` 根 div 注册 `"Terminal"` context 并 `bind_keys(KeyBinding::new("tab", NoAction, Some("Terminal")))`——`NoAction` 压掉更浅的那条绑定,按键回落到焦点元素的 key listener。焦点不在终端时不影响焦点遍历。
+> 做法:默认 keymap 在更深的 `"Terminal"` context 上把这两个键绑成 `"null"`(= gpui 的 `NoAction`)压掉更浅的那条绑定,按键回落到焦点元素的 key listener。焦点不在终端时不影响焦点遍历。见 §3.12。
 > ⚠️ 代价:终端聚焦时 Tab 不做应用内焦点跳转;⚠️ 不要追加自己的转发动作(会绕开正常输入路径)。
+>
+> ⚠️ 同一机制的反面:**任何绑在 `"Terminal"` context 上的键都不会再进 PTY**(默认表里的复制粘贴 / 滚动 / vi 模式就是这样拦下来的),所以往默认表里加键要先想清楚 shell 还需不需要它。
 
 #### 焦点归属
 

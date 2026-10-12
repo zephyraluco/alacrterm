@@ -208,7 +208,7 @@ flowchart TD
 
 要点：
 
-- **键盘是"动作优先"**：`keymap` 先按 key context 派发 `Action`，命中动作后**默认在 bubble 阶段停止传播**（`window.rs` ≈6138 的注释），然后才轮到 key listener。本仓库的 Tab 键就是被 `Root` context 的绑定抢走的，解决办法是在更深的 `"Terminal"` context 用 `NoAction` 压掉绑定。
+- **键盘是"动作优先"**：`keymap` 先按 key context 派发 `Action`，命中动作后**默认在 bubble 阶段停止传播**（`window.rs` ≈6138 的注释），然后才轮到 key listener。⇒ 绑在某个 context 上的键不会再走到该元素的 key listener：本仓库的 Tab 键就是这样从 `Root` context 手里夺回来的（在更深的 `"Terminal"` context 上绑 `"null"` = `NoAction`），终端里那些"不进 PTY"的复制粘贴 / 滚动键也是同一机制。绑定与 context 见 `terminal-architecture.md` §3.12。
 - **鼠标命中用"上一帧"的 hitbox 集合**（`window.mouse_hit_test`），所以元素的命中区域滞后一帧；拖拽/悬停的状态判断都基于它。
 - **`occlude()` 会阻断命中链**（`HitboxBehavior::BlockMouse`），这是"标题栏拖拽区吃掉子元素点击"的解法（本仓库标题栏右端那枚侧边栏开关必须包 `div().occlude()`）。
 - **`window.on_mouse_event`** 是窗口级监听（所有元素都能收到，带 `DispatchPhase`），适合"需要全局状态"的交互（终端拖选就用了它 + 元素级 `interactivity` 监听混合）。
@@ -263,7 +263,7 @@ flowchart TD
 | `notify` / `observe` / `subscribe` | `TerminalView::new`（`cx.subscribe` 收事件 + `cx.observe` 收通知） | **只 subscribe 会导致拖选不跟手**（§4.4） |
 | `.cached(..)` | dock 面板 `panel.cached(..)`（`crates/alacrterm/src/tab_bar.rs`） | 它让终端不再"顺便"重绘，暴露了上面的缺陷 |
 | `Global` | 主题 / 配置（`crates/alacrterm/src/config.rs`） | 改完要 `refresh_windows()` |
-| key context / `NoAction` | `"Terminal"` context 压掉 Tab 绑定 | 动作优先于 key listener |
+| key context / `NoAction` | `assets/keymaps/default-*.json`（`Terminal` context 压掉 Tab 等；应用级那节用 `!Dialog`） | 动作优先于 key listener ⇒ 绑了就不进 PTY |
 | `occlude()` | 标题栏右端的侧边栏开关 | 否则被拖拽区吞点击 |
 | `h_flex()` / `flex()` | 侧边栏、状态栏、标签栏 | 只写 `flex_row()` 会让居中失效 |
 | gpui-kit dock | `DockArea` + `SessionPane` + 自绘标签栏 | `PanelStyle::TabBar`、`panel_handle`、`set_locked` 的语义 |
