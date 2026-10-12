@@ -123,7 +123,9 @@ fn main() {
 struct AppRoot {
     /// 所有终端会话（保持运行，切换仅切换显示）。
     terminals: Vec<Session>,
-    /// 当前显示的终端下标。
+    /// 当前会话下标：以**键盘焦点**为准（[`AppRoot::render`] 每帧按焦点校正，
+    /// 见 `terminal_panel::SessionPane::set_active` 那条说明），焦点不在任何终端里时
+    /// 保持最后一次的值。
     active: usize,
     /// 唯一的侧边栏（自带视图清单、折叠、宽度与渲染，见 [`sidebar_panel::Sidebar`]）。
     sidebar: Entity<Sidebar>,
@@ -246,6 +248,20 @@ impl AppRoot {
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 主体：侧边栏与终端由各自的模块渲染，中间是可拖拽分隔条（视图标签在侧边栏顶部）。
+
+        // 「当前会话」以**键盘焦点**为准：dock 是按**每个标签组**的显示标签回调
+        // `SessionPane::set_active` 的，分屏时两组都会把自己那枚报成当前会话
+        // （还会顺手把焦点抢过去），光看它分不出用户到底在哪枚终端里 —— 那正是
+        // 「文件管理器」该跟着走的那枚。焦点不在任何终端里（点了侧边栏 / 设置、
+        // 窗口失焦）时就什么都不动 ⇒ 保留最后一次的值：否则一点自己的文件树，
+        // 视图就跳到另一个会话上去了。
+        if let Some(index) = self
+            .terminals
+            .iter()
+            .position(|session| session.view.read(cx).is_focused(window))
+        {
+            self.active = index;
+        }
 
         // 「文件管理器」只服务**远端**会话：本地目录用系统自己的文件管理器打开就好，
         // 应用里再摆一份既多余、又只能看到本机目录。所以本地终端（以及没有会话时）

@@ -8,7 +8,7 @@
 //!
 //! 视图内容是两个共享实体:[`sessions::SessionsState`](「会话」)与
 //! [`files::FilesState`](「文件管理器」)——同一时刻只摆一个。后者只对远端会话可见,
-//! 可用性由根视图每帧同步([`Sidebar::set_files_enabled`])。
+//! 可用性由根视图每帧按**焦点所在**的会话同步([`Sidebar::set_files_enabled`])。
 //!
 //! - **图标栏**([`activity_bar::left_column`]):每个视图一枚图标 + 底部「设置」,常驻不折叠;
 //!   点一枚 = 让侧边栏显示这个视图,再点当前那枚 = 折叠侧边栏。
@@ -205,7 +205,7 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// 同步「文件管理器」的可用性(根视图每帧按当前会话是不是远端调用):
+    /// 同步「文件管理器」的可用性(根视图每帧按**焦点所在**的会话是不是远端调用):
     /// 不可用时该视图的图标与内容一起不摆([`SidebarView::visible_with`])。
     pub(crate) fn set_files_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.files_enabled == enabled {

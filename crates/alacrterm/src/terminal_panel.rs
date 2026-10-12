@@ -151,7 +151,11 @@ impl AppRoot {
         }
     }
 
-    /// dock 面板成为当前会话时按实体 id 同步下标（查不到就忽略）。
+    /// dock 把某块面板报成当前会话时按实体 id 同步下标（查不到就忽略）。
+    ///
+    /// ⚠️ 这只是个**近似值**：dock 按**每个标签组**的显示标签各回调一次（分屏时两组都会
+    /// 把自己那枚报上来，分不出用户在哪个终端里），所以 `active` 的权威是**键盘焦点**
+    /// —— `AppRoot::render` 每帧按焦点校正，这里只兜住「焦点还没落到终端里」的那几帧。
     pub(crate) fn set_active_pane(&mut self, pane: gpui::EntityId, cx: &mut Context<Self>) {
         let Some(index) = self
             .terminals
@@ -314,6 +318,9 @@ impl BasePanel for SessionPane {
     }
 
     /// 切到本会话：把键盘焦点交给它的终端，并让根视图记下「当前会话」。
+    ///
+    /// ⚠️ 分屏时**每个**标签组都会把它显示的那枚报成 `active` ⇒ 抢到的焦点才是真的
+    /// 「当前会话」（`AppRoot::render` 每帧按焦点校正 `active`）。
     ///
     /// ⚠️ 回写根视图要经 [`AppRoot::defer_after_update`]（这里可能正处在根视图的更新过程中）。
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {

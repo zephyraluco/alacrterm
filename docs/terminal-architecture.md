@@ -213,7 +213,7 @@ fn main() {
 
 **状态与渲染都归子组件**:最左整列 = 一个实体(`Entity<Sidebar>`,全应用一个,见 `sidebar_panel/mod.rs`),它自带当前视图 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 48px 图标栏 + 侧边栏面板,面板一直铺到窗口底部那条状态栏的上沿);根视图只把它 `.child(..)` 摆进第 0 个分栏面板。两个视图是两个实体:「会话」`Entity<SessionsState>` 与文件管理器 `Entity<FilesState>` —— 两者都**不实现 `Render`**:各自把「要摆哪些行」摊成**一行一项**(`SessionsItem` / `FilesItem`)交给侧边栏面板的行列表(它才按可见区间懒渲染);同一时刻只摆其中一个(另一个仍活着、状态不丢)。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
 
-- **最左整列**(`sidebar_panel` + `components`):**图标栏在左(48px)、侧边栏面板在右** —— 侧边栏是活动栏的一个成员(`ActivityBar::sidebar`),两块都由 `components/` 里自有的组件画(见下一条)。整列的装配在 `sidebar_panel/activity_bar.rs` 的 `left_column`:每个可用视图一枚 `ActivityBarItem`(图标 24px,由「名义尺寸 32px × 0.75」得出)、底部一枚「设置」(贴底,派发全局 `OpenSettings`),折叠时**一枚都不亮**且不挂侧边栏面板。点某一枚 = 让侧边栏显示这个视图,再点**正在显示**的那枚 = 折叠侧边栏(`Sidebar::toggle_view`),照 VS Code 折叠不另设开关。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,同一时刻只摆一个;⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按当前会话是不是远端调 `Sidebar::set_files_enabled`,为假时该视图的**图标与内容一起不摆**(当前选中的视图不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
+- **最左整列**(`sidebar_panel` + `components`):**图标栏在左(48px)、侧边栏面板在右** —— 侧边栏是活动栏的一个成员(`ActivityBar::sidebar`),两块都由 `components/` 里自有的组件画(见下一条)。整列的装配在 `sidebar_panel/activity_bar.rs` 的 `left_column`:每个可用视图一枚 `ActivityBarItem`(图标 24px,由「名义尺寸 32px × 0.75」得出)、底部一枚「设置」(贴底,派发全局 `OpenSettings`),折叠时**一枚都不亮**且不挂侧边栏面板。点某一枚 = 让侧边栏显示这个视图,再点**正在显示**的那枚 = 折叠侧边栏(`Sidebar::toggle_view`),照 VS Code 折叠不另设开关。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,同一时刻只摆一个;⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按**键盘焦点所在**的会话是不是远端调 `Sidebar::set_files_enabled`(见 §3.3「当前会话」那条),为假时该视图的**图标与内容一起不摆**(当前选中的视图不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
 - **活动栏**(`components/activitybar.rs` 的 `ActivityBar` / `ActivityBarItem`):一列 48px 见方的图标按钮,顶部一组、底部一组贴着列沿,列底色取 `title_bar`(与标题栏同色),**右缘一条 `sidebar_border` 竖线**(与侧边栏面板 / 中间列的分界)。⚠️ 结构用 gpui-kit **base** 的 `h_flex` / `v_flex` / `div` + gpui `Styled` 搭,只有两件 base 没有的小东西复用 `component`:图标用 `Icon`(尺寸要显式给,`svg()` 不吃父元素颜色)、悬停提示用按钮自带的 `.tooltip()`(base 的 tooltip 只给弹层内容、触发器要自己接线)。每枚活动项:图标**一律同色**(不按选中 / 未选中压暗或提亮),当前项只靠一条 2px 左端指示条(`primary`)区分;悬停 / 按下有底色(`secondary_hover` / `secondary_active`)。
 - **侧边栏面板**(`components/sidebar.rs` 的 `Sidebar` / `SidebarRow`):自绘的侧边栏外壳 —— 顶部固定标题栏 + 下方可滚动的行列表。外观照 `component::sidebar`(底色 `tokens.sidebar`、`sidebar_border` 画在右侧、标题栏 `pt_3` + `px_3`、内容 `px_3` + `gap_y_3`、列表首尾各留呼吸空间),实现**优先用 base**:`v_flex` / `div` + gpui 的 `list`(`ListState`,按可见区间要行)+ base 的 `Scrollbar`(`ListState` 自己就实现了 base 的 `ScrollbarHandle`),不依赖 `component::Sidebar`。⚠️ 行会被列表反复取用 ⇒ 行类型要实现 `SidebarRow`(`Clone` + `render(&mut App)`);本应用的行类型是 `SidebarContent`(`SessionsItem` / `FilesItem` 两个枚举)。⚠️ 标题行必须显式 `.h(PANEL_HEADER_HEIGHT)`(28px),否则空 flex 容器会塌成 0。
 - **面板标题栏**(`Sidebar::render_header`,见 `sidebar_panel/header.rs`):挂在侧边栏面板的 `header` 槽(固定、不随内容滚动),摆当前视图的标题 + 右端「…」菜单(`Button` + `DropdownMenu`,菜单 = 每个可用视图一项、勾选当前那个,点一下就切过去)。
@@ -258,7 +258,7 @@ fn main() {
 
 > 状态在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(远端句柄 + 根目录 + 目录项缓存 + 展开状态 + 摊平后的行清单);渲染交给 `SidebarContent::Files(FilesItem)` —— **一行一项**摆进侧边栏面板的行列表。侧边栏起来是「会话」,点图标栏那枚图标切过来,**且只对远端会话可见**(见 §3.2)。
 
-- **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步两件事:可用性(`Sidebar::set_files_enabled(remote)`)与**数据源**(当前会话的 `SshFs` 句柄,来自 `TerminalView::remote_fs(cx)`)。
+- **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步两件事:可用性(`Sidebar::set_files_enabled(remote)`)与**数据源**(当前会话的 `SshFs` 句柄,来自 `TerminalView::remote_fs(cx)`)。⚠️ 这里的「当前会话」= **键盘焦点所在**的那枚终端(见 §3.3「当前会话」):分屏时 dock 的「当前标签」每个标签组都会报一枚,跟着它走会让树跳到用户没在用的那个会话上。
 - **数据源是 SFTP**(`ssh::SshFs`,见 §5.3):起始根目录 = 远端家目录(`home_dir()`);远端 shell 的 `cd` 拿不到(要改远端 prompt),所以根目录**不跟随终端**,由用户自己跳。
 - ⚠️ **必须等会话连上再给句柄**(`TerminalView::is_connected`):连上之前主机密钥可能还没确认,而 SFTP 那条连接**没有确认通道**(`ClientHandler::new` 传 `None`)⇒ 只会失败。判断放在句柄那一层,`FilesState::sync` 自己只比较 `Option<SshFs>`(`Arc::ptr_eq`)。
 - **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 调 `list_dir`(一层),回填前核对**代次**(`generation`,换根目录 / 换会话时 +1 ⇒ 在途结果直接丢掉)。排序由 `SshFs` 负责:目录在前、名字不区分大小写。
@@ -294,6 +294,7 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 - 新建统一走 `AppRoot::spawn_session(SessionRequest)`:`TerminalView::new(None, target, host_key, settings, ..)` 是**唯一入口**(本地 / 远端只差 `target`,见 §3.8);之后包成 `SessionPane` 挂进 dock,再 `move_panel` 到该进的标签组(§3.2)。
 - ⚠️ **两条线不要混**:`SessionsState::entries`(会话记录:配置,§3.2 会话列表)与 `AppRoot::terminals`(终端实例:dock 面板)彼此独立 —— 记录可以 0 个终端,终端也可以不属于任何记录(标签栏 `+` 开的本地终端)。
 - 生命周期:`close_terminal`(→ `DockArea::remove_panel`)、`close_panel_id`(标签 `×` / 中键)、`sync_sessions_with_dock`;下标访问一律先 `get()`(允许会话为空)。dock 点标签会回调面板的 `set_active`,它用 `AppRoot::defer_after_update` 回写 `active`。
+- ⚠️ **「当前会话」`active` 的权威是键盘焦点**,不是 dock 报的那枚:dock 按**每个标签组**的显示标签各回调一次 `set_active`(gpui-kit `crates/base/src/dock/tab_group.rs` 的 `reconcile_active`,分屏时两组都会把自己那枚报成当前),所以 `AppRoot::render` 每帧找**真正持有焦点**的终端校正 `active`,焦点不在任何终端里(点侧边栏 / 设置、窗口失焦)时保持原值 —— 否则一点自己的文件树,「文件管理器」就会跳到另一个会话上。焦点落进终端会 `cx.notify()`,而根视图 `observe` 着每个 `TerminalView` ⇒ 这一帧的渲染必定跟在焦点变化之后(见 §3.2 文件管理器)。
 - 进程结束(本地 shell 退出 / SSH 断开):只标记 `exited` 并 `notify`,标签与终端内容保留(断开原因写在网格里,见 §5.2),用户自己决定关掉还是重开(§5)。
 
 ### 3.4 对话框(`dialog/connection.rs` / `dialog/folder.rs` / `dialog/host_key.rs`)
@@ -567,6 +568,7 @@ graph LR
 |---|---|
 | 点击终端区域 | `TerminalView` 左键聚焦终端并 `stop_propagation` |
 | 点击终端之外 | `AppRoot` 根节点把焦点交给 `AppRoot::background_focus` |
+| 焦点落进某个终端 | `AppRoot::render` 把「当前会话」`active` 校正成它(见 §3.3);焦点不在终端里时保持原值 |
 | 新建会话 | `spawn_session` 里 `window.focus(新会话的 focus_handle)` |
 | Tab / Shift+Tab | 焦点在终端归终端;不在终端则由 `Root` 做焦点遍历 |
 
