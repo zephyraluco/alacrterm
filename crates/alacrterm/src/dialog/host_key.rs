@@ -1,12 +1,4 @@
-//! 「未知主机密钥」确认对话框：首次连接一台主机时让用户核对指纹再决定信任。
-//!
-//! 触发链：SSH 握手 → `ssh::HostKeyPrompt` → `terminal::Event::HostKeyPrompt` →
-//! [`terminal_view::HostKeyPromptHandler`] → 本模块。用户的选择经
-//! [`HostKeyPrompt::respond`] 回给**正在等待的握手线程**（所以这里必须尽快弹窗；
-//! 超时不答则放弃连接，见 `ssh::HOST_KEY_TIMEOUT`）。
-//!
-//! 只处理「没见过的主机」；**密钥变了**（与 `known_hosts` 里记录的不一致）一律直接拒绝，
-//! 不走这里 —— 那种情况要用户自己清理 `known_hosts`（见 `ssh::SshError::HostKeyChanged`）。
+//! 「未知主机密钥」确认对话框：首次连接主机时让用户核对指纹。
 
 use gpui::{
     App, Context, IntoElement, ParentElement as _, Styled as _, WeakEntity, Window, div, px,
@@ -22,10 +14,7 @@ use terminal_view::HostKeyPromptHandler;
 
 use crate::AppRoot;
 
-/// 造一个主机密钥确认回调（传给 [`terminal_view::TerminalView::new_ssh`]）。
-///
-/// 回调发生在终端事件的处理过程中（此时主窗口正在更新栈上），所以弹窗要经
-/// [`AppRoot::defer_after_update`] 推迟一拍 —— 直接开窗会拿不到窗口。
+/// 造主机密钥确认回调。
 pub(crate) fn host_key_prompt_handler(root: WeakEntity<AppRoot>) -> HostKeyPromptHandler {
     std::sync::Arc::new(move |prompt: &HostKeyPrompt, cx: &mut App| {
         let prompt = prompt.clone();
@@ -37,9 +26,7 @@ pub(crate) fn host_key_prompt_handler(root: WeakEntity<AppRoot>) -> HostKeyPromp
 }
 
 impl AppRoot {
-    /// 弹「信任这台主机吗」对话框，并把用户的选择回给握手线程。
-    ///
-    /// 取消 / 关闭 / 点 X 都算**不信任**（`respond` 只认第一次回答，重复调用无副作用）。
+    /// 弹「信任这台主机吗」对话框。
     fn open_host_key_dialog(
         &mut self,
         prompt: HostKeyPrompt,
@@ -51,8 +38,6 @@ impl AppRoot {
             let reject = prompt.clone();
             let body = host_key_body(&prompt, cx);
 
-            // 页脚自拼：`Dialog::render` 不自动生成确定 / 取消按钮（同 `connection`）。
-            // 「信任」是主按钮，「不信任」走 `DialogClose`（派发 Cancel）。
             let footer = DialogFooter::new()
                 .child(DialogClose::new().child(Button::new("reject").label("不信任")))
                 .child(DialogAction::new().child(Button::new("accept").label("信任并继续").primary()));
@@ -78,7 +63,7 @@ impl AppRoot {
     }
 }
 
-/// 对话框正文：端点、密钥算法，以及**独占一行**的指纹（长串横排会被对话框裁掉）。
+/// 对话框正文。
 fn host_key_body(prompt: &HostKeyPrompt, cx: &App) -> gpui::AnyElement {
     let muted = cx.theme().muted_foreground;
     let line = |label: &'static str, value: String| {

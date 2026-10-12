@@ -1,12 +1,4 @@
-//! 独立窗口形式的「设置」界面：两页（主题 / 终端），由标题栏的「设置」按钮或欢迎页
-//! 同一入口打开（[`AppRoot::open_settings_window`]）。
-//!
-//! 它是**独立顶层窗口**（[`WindowKind::Normal`]）：任务栏里有自己的条目、不模态；
-//! 「主程序退出时一并关闭」由窗口自己负责（视图用 `App::on_window_closed` 盯住主窗口，
-//! 见 [`SettingsWindow::new`]）。
-//!
-//! 窗口句柄记在 [`AppRoot`] 上，重复点击只会激活已有窗口。主题是全局状态
-//! （`Theme::global`），切换深浅色后要 `cx.refresh_windows()` 让两个窗口都重绘。
+//! 独立窗口形式的「设置」界面：两页（主题 / 终端），入口 [`AppRoot::open_settings_window`]。
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FontWeight, IntoElement,
@@ -28,24 +20,18 @@ use crate::AppRoot;
 use crate::assets::IconName;
 use crate::config;
 
-/// 设置窗口的初始尺寸（宽, 高）。
+/// 初始尺寸（宽, 高）。
 const WINDOW_SIZE: (f32, f32) = (760., 520.);
-/// 设置窗口的最小尺寸（宽, 高）：`Settings` 内部是左右分栏，过窄会挤在一起。
+/// 最小尺寸（宽, 高）。
 const MIN_WINDOW_SIZE: (f32, f32) = (560., 400.);
 
-/// 设置窗口的根视图（内容即 `Settings` 组件）。
-///
-/// 除「主窗口已关闭」的观察句柄外，只持主窗口根视图的弱引用：终端渲染参数存在每个
-/// `TerminalView` 里，要即时生效得经 [`AppRoot::apply_render_settings`] 转发。
 struct SettingsWindow {
     app_root: WeakEntity<AppRoot>,
     _main_window_closed: Subscription,
 }
 
 impl SettingsWindow {
-    /// `main_window` = 主窗口句柄（由 [`AppRoot::open_settings_window`] 传入）。
-    ///
-    /// 盯住主窗口：它一关就 `App::quit()`，让设置窗口跟着主程序一起退出。
+    /// 主窗口关闭即退出。
     fn new(
         main_window: AnyWindowHandle,
         app_root: WeakEntity<AppRoot>,
@@ -62,7 +48,7 @@ impl SettingsWindow {
         }
     }
 
-    /// 「主题」页：深浅模式开关 + 深 / 浅两个槽位各用哪套配色。
+    /// 「主题」页。
     fn theme_page(&self, cx: &App) -> SettingPage {
         SettingPage::new("主题")
             .icon(Icon::new(IconName::Moon))
@@ -84,8 +70,7 @@ impl SettingsWindow {
             )
     }
 
-    /// 「终端」页：字体与光标相关的渲染参数（只列界面能表达的项；ANSI 配色仍写在
-    /// `config/terminal.json` 里，本页保存时不动它们）。
+    /// 「终端」页。
     fn terminal_page(&self) -> SettingPage {
         SettingPage::new("终端")
             .icon(Icon::new(IconName::SquareTerminal))
@@ -229,10 +214,6 @@ impl SettingsWindow {
 }
 
 /// 「深色主题」开关。
-///
-/// ⚠️ 不用 `SettingField::switch`：它的弹簧动画会让另一个窗口在动画期间不重绘。
-/// 这里把 element id 绑上当前模式（换模式 = 换新 id ⇒ 弹簧状态新建即已就位），
-/// 两个窗口同一帧一起变色；外观与其它开关一致（同一个 `Switch` 组件）。
 fn theme_mode_switch() -> SettingField<SharedString> {
     SettingField::render(move |options, _window, cx| {
         let dark = cx.theme().mode.is_dark();
@@ -246,8 +227,6 @@ fn theme_mode_switch() -> SettingField<SharedString> {
                 } else {
                     ThemeMode::Light
                 };
-                // 统一入口（见 `config::change_theme`）；`None` 窗口参数不会自动刷新，
-                // 需手动刷新所有窗口。
                 config::change_theme(mode, cx);
                 cx.refresh_windows();
             })
@@ -255,8 +234,7 @@ fn theme_mode_switch() -> SettingField<SharedString> {
     })
 }
 
-/// 主题下拉框：值 = 注册表里的主题名，空串 = 跟随 gpui-kit 内置主题。
-/// 候选项每帧重算，所以 `themes/` 里增删文件后打开本页就能看到最新列表。
+/// 主题下拉框：空串 = 跟随内置主题。
 fn theme_dropdown(cx: &App, mode: ThemeMode) -> SettingField<SharedString> {
     SettingField::scrollable_dropdown(
         config::theme_options(cx, mode),
@@ -276,7 +254,7 @@ fn theme_dropdown(cx: &App, mode: ThemeMode) -> SettingField<SharedString> {
     )
 }
 
-/// 终端渲染参数项：统一包一层 description（`SettingItem` 是链式构造的）。
+/// 渲染参数项：包一层 description。
 fn render_item(
     title: &'static str,
     description: &'static str,
@@ -285,7 +263,6 @@ fn render_item(
     SettingItem::new(title, field).description(description)
 }
 
-/// 光标形状下拉框的候选项（值 = 配置文件里的写法）。
 fn cursor_shape_options() -> Vec<(SharedString, SharedString)> {
     [
         ("Block", "方块"),
@@ -299,8 +276,7 @@ fn cursor_shape_options() -> Vec<(SharedString, SharedString)> {
     .collect()
 }
 
-/// 改一项终端渲染参数：更新全局 → 落盘 → 推给存活会话
-/// （最后一步经 [`AppRoot::apply_render_settings`] 转发）。
+/// 改一项渲染参数：更新全局 → 落盘 → 推给会话。
 fn update_render(
     root: &WeakEntity<AppRoot>,
     cx: &mut App,
@@ -320,7 +296,7 @@ impl Render for SettingsWindow {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
-            // —— 顶部：自绘标题栏（配色跟主题走；拖拽 / 窗口按钮由 `TitleBar` 处理）——
+            // 顶部：自绘标题栏。
             .child(
                 TitleBar::new().child(
                     h_flex()
@@ -339,7 +315,6 @@ impl Render for SettingsWindow {
                 ),
             )
             .child(
-                // `Settings` 是左右分栏，需要父级给出确定高度；不加内边距（要铺满窗口）。
                 div()
                     .flex_1()
                     .min_h_0()
@@ -349,15 +324,13 @@ impl Render for SettingsWindow {
                             .page(self.terminal_page()),
                     ),
             )
-            // 覆盖层（Dialog / Sheet / 通知 / Tooltip）由 gpui-kit 的 `Root` 按「插件」自己渲染
-            //（`gpui_kit::init` 注册），这里**不要再**挂 `Root::render_dialog_layer`。
+            // 覆盖层由 gpui-kit `Root` 渲染。
     }
 }
 
 impl AppRoot {
-    /// 打开设置窗口；已打开则激活它。`window` 是主窗口（设置窗口靠它的句柄跟随退出）。
+    /// 打开或激活设置窗口。
     pub(crate) fn open_settings_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 已打开过就激活原窗口；`update` 返回 Err 说明窗口已关闭，继续往下新建。
         if let Some(handle) = self.settings_window {
             if handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -372,18 +345,16 @@ impl AppRoot {
         let mut options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
-            // 独立顶层窗口：任务栏里有自己的条目、不模态、不随主窗口置顶。
-            // ⚠️ 别改回 `WindowKind::Dialog`（那会锁住主窗口、且随 owner 关闭）。
+            // 独立顶层窗口、不模态。
             kind: WindowKind::Normal,
-            // 隐藏系统标题栏，改由视图内的自绘 `TitleBar` 负责。
             ..TitleBar::window_options()
         };
-        // 独立窗口会在任务栏 / Alt-Tab 里露出条目，得有个名字。
+        // 任务栏 / Alt-Tab 里的窗口名。
         if let Some(titlebar) = options.titlebar.as_mut() {
             titlebar.title = Some("设置".into());
         }
 
-        // 外层包一层 gpui-kit `Root`（弹窗 / 通知 / 焦点恢复的宿主）。
+        // 外层包一层 gpui-kit `Root`。
         let app_root = cx.entity().downgrade();
         match cx.open_window(options, |window, cx| {
             let view = cx.new(|cx| SettingsWindow::new(main_window, app_root, cx));

@@ -1,14 +1,9 @@
-//! 终端容器关闭后的**欢迎页**（中间列的默认背景板）：内容居中、列宽固定、列内元素左对齐，
-//! 「圆角方块 logo + 标题 + 副标题」下面接一节「开始使用」（分节标题 + 分隔线 + 操作行）；
-//! 背景用主题 `background`（与终端区同色）。
-//!
-//! 所有标签页都关掉后中间列改渲染本页（见 [`crate::AppRoot::render`]）。
+//! 所有终端关闭后中间列显示的**欢迎页**。
 
 use gpui::{
     AnyElement, Context, CursorStyle, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, StatefulInteractiveElement as _, Styled as _, Window, div, px, svg,
 };
-// `h_flex` = `div().flex().flex_row().items_center()` 的速记（单写 `.flex_row()` 不会设置 `display: flex`）。
 use gpui_kit::base::h_flex;
 use gpui_kit::component::{ActiveTheme as _, IconNamed as _, v_flex};
 
@@ -16,15 +11,12 @@ use crate::AppRoot;
 use crate::actions::NewLocalTerminal;
 use crate::assets::IconName;
 
-/// 欢迎页内容列宽：整列居中，列内元素左对齐（同 zed 欢迎页）。
 const WELCOME_CONTENT_WIDTH: Pixels = px(420.);
-/// 品牌区：logo 方块边长 / 方块内图标尺寸。
 const LOGO_BOX_SIZE: Pixels = px(52.);
 const LOGO_ICON_SIZE: Pixels = px(28.);
-/// 操作行：行高 / 行内图标尺寸。
 const ACTION_ROW_HEIGHT: Pixels = px(26.);
 const ACTION_ICON_SIZE: Pixels = px(14.);
-/// 「新建终端」的快捷键提示（跟随平台：macOS 用 ⌘，其余用 Ctrl）。
+/// 「新建终端」的快捷键提示。
 const NEW_TERMINAL_SHORTCUT: &str = if cfg!(target_os = "macos") {
     "⌘ N"
 } else {
@@ -32,7 +24,6 @@ const NEW_TERMINAL_SHORTCUT: &str = if cfg!(target_os = "macos") {
 };
 
 impl AppRoot {
-    /// 欢迎页：终端容器关闭（所有标签都关掉）后中间列的默认内容。
     pub(crate) fn render_welcome(&self, cx: &mut Context<Self>) -> AnyElement {
         let background = cx.theme().background;
         let foreground = cx.theme().foreground;
@@ -42,7 +33,6 @@ impl AppRoot {
 
         v_flex()
             .size_full()
-            // 整块居中；内边距加在整页外层，内容列的宽度上限仍是完整的 420px。
             .items_center()
             .justify_center()
             .px(px(24.))
@@ -52,7 +42,6 @@ impl AppRoot {
                     .w_full()
                     .max_w(WELCOME_CONTENT_WIDTH)
                     .gap(px(22.))
-                    // —— 品牌区：圆角方块 logo + 标题 + 副标题 ——
                     .child(
                         h_flex()
                             .gap(px(14.))
@@ -68,7 +57,6 @@ impl AppRoot {
                                             .path(IconName::SquareTerminal.path())
                                             .w(LOGO_ICON_SIZE)
                                             .h(LOGO_ICON_SIZE)
-                                            // `svg()` 不继承父元素颜色。
                                             .text_color(foreground),
                                     ),
                             )
@@ -90,7 +78,6 @@ impl AppRoot {
                                     ),
                             ),
                     )
-                    // —— 开始使用：分节标题 + 分隔线 + 操作行 ——
                     .child(
                         v_flex()
                             .gap(px(8.))
@@ -128,9 +115,7 @@ impl AppRoot {
             .into_any_element()
     }
 
-    /// 欢迎页里的一行操作：左端图标 + 名称，右端快捷键；整行可点、悬停提亮。
-    ///
-    /// `id` 必须全局唯一（gpui 状态化元素的要求），由调用方给出。
+    /// 一行操作项：图标 + 名称 + 可选快捷键。
     fn welcome_action(
         &self,
         id: &'static str,
@@ -173,7 +158,6 @@ impl AppRoot {
                     .child(label),
             );
 
-        // 快捷键可有可无（没有绑定的操作不显示提示）。
         match shortcut {
             Some(shortcut) => row
                 .child(

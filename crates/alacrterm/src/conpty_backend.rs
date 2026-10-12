@@ -1,5 +1,4 @@
-//! Windows ConPTY 后端选择:优先加载随包的 Windows Terminal ConPTY
-//! (`conpty.dll` + `OpenConsole.exe`),找不到则退回系统自带的那套。
+//! Windows ConPTY 后端选择：优先随包的 Windows Terminal ConPTY，否则退回系统自带。
 
 use std::path::{Path, PathBuf};
 
@@ -15,8 +14,7 @@ fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// 按全路径预加载 `dir/conpty.dll`（加载器按模块基名去重，之后
-/// `alacritty_terminal` 那句 `LoadLibraryW("conpty.dll")` 会命中同一份）。
+/// 预加载 `dir/conpty.dll`。
 fn preload(dir: &Path) -> bool {
     let dll = dir.join("conpty.dll");
     if !dll.is_file() {
@@ -30,24 +28,21 @@ fn preload(dir: &Path) -> bool {
     true
 }
 
-/// 开发形态下 conpty 目录的候选位置（`cargo run` 时 exe 在 `target/<profile>/`）。
+/// conpty 目录的候选位置。
 fn candidate_dirs(exe_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    // target/debug 或 target/<triple>/debug → 仓库根
     for up in 2..=3 {
         if let Some(root) = exe_dir.ancestors().nth(up) {
             dirs.push(root.join("assets/windows/conpty"));
         }
     }
-    // cargo run 的 cwd 通常是仓库根
     if let Ok(cwd) = std::env::current_dir() {
         dirs.push(cwd.join("assets/windows/conpty"));
     }
     dirs
 }
 
-/// 让随包分发的 WT ConPTY 被 `alacritty_terminal` 选中：先看 exe 同级（发行形态），
-/// 再回退到仓库 `assets/windows/conpty/`（开发形态），都没有就告警并用系统 ConPTY。
+/// 选择 ConPTY 后端。
 pub fn ensure() {
     let Some(exe_dir) = std::env::current_exe()
         .ok()
@@ -57,18 +52,15 @@ pub fn ensure() {
         return;
     };
 
-    // 1) 发行形态：exe 旁边就有
     if preload(&exe_dir) {
         log::info!("conpty: 使用 exe 同级的 conpty.dll（Windows Terminal ConPTY）");
         return;
     }
 
-    // 2) 开发形态：仓库里的 assets
     for dir in candidate_dirs(&exe_dir) {
         if !dir.join("conpty.dll").is_file() || !dir.join("OpenConsole.exe").is_file() {
             continue;
         }
-        // 只影响之后的 LoadLibrary 搜索路径
         unsafe { SetDllDirectoryW(wide(&dir).as_ptr()) };
         if preload(&dir) {
             log::info!("conpty: 使用 {}（Windows Terminal ConPTY）", dir.display());
@@ -76,7 +68,6 @@ pub fn ensure() {
         }
     }
 
-    // 3) 退回系统 ConPTY
     let message = "conpty: 未找到 Windows Terminal 的 conpty.dll（应在 exe 同级或 \
                    assets/windows/conpty/），退回系统 ConPTY：窗口缩到极小再放大时可能丢失上方内容";
     log::warn!("{message}");

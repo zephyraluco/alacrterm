@@ -1,12 +1,5 @@
-//! 自绘的标签栏（dock 的 `TabGroupRenderer`）：定宽标签 + 图标 + 悬停/选中才出现的 `×`。
-//!
-//! `TerminalDockSkin` 把区级外观全委托给内层 `DockSkin`，只把 `tab_group_renderer()` 换成
-//! `TerminalTabBar`；后者只覆写 `render_tab_bar` / `render_active_panel` /
-//! `render_drop_indicator`，其余走 trait 默认值。
-//!
-//! 三条约定：渲染器不是实体（跨帧状态放 `Cell`，改完要走 [`TabBarState::repaint`]，
-//! 且只能通知根视图）；`TabGroupContext` 是只读快照，选中 / 拖放 / 关闭都要回调它；
-//! 关会话走 [`AppRoot::close_panel_id`]。
+//! 自绘标签栏（dock 的 `TabGroupRenderer`）：定宽标签 + 图标 + 关闭按钮。
+//! 渲染器不是实体：跨帧状态放 `Cell`，改完回调根视图重绘。
 
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
@@ -28,27 +21,23 @@ use gpui_kit::component::{
 use crate::AppRoot;
 use crate::assets::IconName;
 
-/// 标签栏高度。
 const TAB_BAR_HEIGHT: Pixels = px(32.);
-/// 标签定宽：不随标题长短变化。
 const TAB_WIDTH: Pixels = px(200.);
 const TAB_PADDING_X: Pixels = px(8.);
 const TAB_GAP: Pixels = px(6.);
 const TAB_ICON_SIZE: Pixels = px(12.);
-/// 关闭按钮的固定槽位：不显示时也占位，否则悬停时标题会抖。
+/// 关闭按钮槽位（隐藏时占位）。
 const TAB_CLOSE_SLOT: Pixels = px(16.);
 const TAB_CLOSE_ICON: Pixels = px(10.);
-/// 拖动预览尺寸（与皮肤一致）。
 const DRAG_PREVIEW_SIZE: gpui::Size<gpui::Pixels> = gpui::size(px(96.), px(30.));
 
-/// dock 区渲染器：区级外观全委托给 gpui-kit 的 [`DockSkin`]，只换标签栏。
+/// dock 区渲染器：只替换标签栏。
 pub(crate) struct TerminalDockSkin {
     inner: Rc<DockSkin>,
     tabs: Rc<TabBarState>,
 }
 
 impl TerminalDockSkin {
-    /// `root`：悬停重绘与关会话都要经过根视图。
     pub(crate) fn new(cx: &mut Context<DockArea>, root: WeakEntity<AppRoot>) -> Rc<Self> {
         let inner = DockSkin::new(cx);
         Rc::new(Self {
@@ -58,7 +47,6 @@ impl TerminalDockSkin {
     }
 }
 
-/// 区级外观全部转给内层皮肤（它知道分栏底色、dock 边框这些细节）。
 impl DockAreaRenderer for TerminalDockSkin {
     fn frame(&self, window: &mut Window, cx: &mut App) -> Stateful<gpui::Div> {
         self.inner.frame(window, cx)
@@ -98,15 +86,12 @@ impl DockAreaRenderer for TerminalDockSkin {
     }
 }
 
-/// 标签栏的跨帧状态：渲染器不是实体，这些只能是 [`Cell`]。
+/// 标签栏跨帧状态。
 struct TabBarState {
-    /// 标签横向滚动（标签多到超出时）。
     scroll: ScrollHandle,
-    /// 上一帧显示的活动标签，用来「活动标签变了就滚进可视区」。
     last_active: Cell<Option<usize>>,
-    /// 鼠标悬停的标签下标。
     hovered: Cell<Option<usize>>,
-    /// 应用根视图：悬停重绘与关会话都要经过它。
+    /// 应用根视图。
     root: WeakEntity<AppRoot>,
 }
 
@@ -120,14 +105,12 @@ impl TabBarState {
         }
     }
 
-    /// 改完状态后重绘一次（渲染器不是实体，没人会替我们重绘）。
-    ///
-    /// ⚠️ 必须通知**根视图**：`area.notify()` 不会让标签组重绘。
+    /// 通知根视图重绘。
     fn repaint(&self, cx: &mut App) {
         _ = self.root.update(cx, |_, cx| cx.notify());
     }
 
-    /// 记录悬停标签；变了才重绘（`on_hover` 每帧都可能回调）。
+    /// 记录悬停标签（变化才重绘）。
     fn set_hovered(&self, ix: Option<usize>, cx: &mut App) {
         if self.hovered.replace(ix) != ix {
             self.repaint(cx);
@@ -135,7 +118,6 @@ impl TabBarState {
     }
 }
 
-/// 自绘标签栏本体。
 struct TerminalTabBar {
     state: Rc<TabBarState>,
 }
@@ -156,7 +138,7 @@ impl TabGroupRenderer for TerminalTabBar {
             .map(|(ix, _)| ix)
             .collect();
 
-        // 活动标签变化时把它滚进可视区。
+        // 活动标签滚入可视区。
         if self.state.last_active.replace(Some(active_ix)) != Some(active_ix)
             && let Some(visible_ix) = visible.iter().position(|ix| *ix == active_ix)
         {
@@ -168,7 +150,7 @@ impl TabGroupRenderer for TerminalTabBar {
             .map(|ix| self.render_tab(group, *ix, active_ix, window, cx))
             .collect();
 
-        // 右端固定区：当前面板的工具栏按钮（只有 `+`）。
+        // 右端固定区：工具栏按钮。
         let toolbar = group
             .active_panel()
             .and_then(|panel| PanelHandle::of(panel))
@@ -187,7 +169,7 @@ impl TabGroupRenderer for TerminalTabBar {
                     .min_w_0()
                     .h_full()
                     .overflow_hidden()
-                    // 栏底线画在标签**下面**：选中标签的不透明底色会盖掉它。
+                    // 栏底线。
                     .child(
                         div()
                             .absolute()
@@ -222,7 +204,7 @@ impl TabGroupRenderer for TerminalTabBar {
             .into_any_element()
     }
 
-    /// 内容区：缓存 + 绝对定位铺满（同皮肤）。
+    /// 内容区：缓存 + 铺满。
     fn render_active_panel(
         &self,
         panel: AnyView,
@@ -239,7 +221,7 @@ impl TabGroupRenderer for TerminalTabBar {
             .into_any_element()
     }
 
-    /// 拖拽落点的预览块（`TabGroup` 已算好矩形，照画即可）。
+    /// 拖拽落点预览块。
     fn render_drop_indicator(
         &self,
         indicator: DropIndicator,
@@ -269,7 +251,6 @@ impl TerminalTabBar {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        // 先取出颜色（下面要在闭包里借用 `cx`）。
         let tab_active = cx.theme().tab_active;
         let tab_active_fg = cx.theme().tab_active_foreground;
         let tab_fg = cx.theme().tab_foreground;
@@ -281,16 +262,16 @@ impl TerminalTabBar {
         let panel = &group.panels()[ix];
         let selected = ix == active_ix;
         let hovered = self.state.hovered.get() == Some(ix);
-        // 关闭按钮：选中常驻，其余悬停才出现。
+        // 关闭按钮：选中常驻，否则悬停。
         let show_close = selected || hovered;
         let panel_id = panel.panel_id(cx);
         let title: SharedString = PanelHandle::of(panel)
             .and_then(|handle| handle.tab_name(cx))
             .unwrap_or_else(|| panel.panel_name(cx).into());
 
-        // id 带组节点：分屏后两块面板的同一下标不会撞车。
+        // id 带组节点，避免同下标撞车。
         let tab_id = (group.node().as_u64() as usize) << 8 | ix;
-        // 相邻标签的竖线（每条边界一条线）。
+        // 相邻标签的竖线。
         let draw_left = ix > 0 && ix <= active_ix;
         let draw_right = ix >= active_ix;
 
@@ -311,7 +292,6 @@ impl TerminalTabBar {
                     .cursor(CursorStyle::PointingHand)
                     .hover(|style| style.bg(muted))
                     .on_click(move |_, window, cx| {
-                        // 别再冒泡到标签的「选中」处理。
                         cx.stop_propagation();
                         let _ = root.update(cx, |root, cx| {
                             root.close_panel_id(panel_id, window, cx)
@@ -344,7 +324,6 @@ impl TerminalTabBar {
                 this.text_color(tab_fg).hover(|style| style.bg(muted))
             })
             .cursor(CursorStyle::PointingHand)
-            // 悬停自己记账（gpui-pre 没有 `visible_on_hover`）。
             .on_hover({
                 let state = self.state.clone();
                 move |hovered: &bool, _, cx| state.set_hovered(hovered.then_some(ix), cx)
@@ -353,14 +332,13 @@ impl TerminalTabBar {
                 let group = group.clone();
                 move |_, window, cx| group.select_tab(ix, window, cx)
             })
-            // 中键关闭。
             .on_mouse_up(MouseButton::Middle, {
                 let root = self.state.root.clone();
                 move |_, window, cx| {
                     let _ = root.update(cx, |root, cx| root.close_panel_id(panel_id, window, cx));
                 }
             })
-            // 拖动换位 / 拖出去分屏：只提供载荷与落点，状态机在 dock 里。
+            // 拖动换位 / 分屏：只给载荷与落点。
             .when_some(drag, |this, drag| {
                 this.on_drag(drag, {
                     let title = title.clone();
@@ -374,7 +352,6 @@ impl TerminalTabBar {
                 })
             })
             .when(group.is_droppable(), {
-                // 落点上高亮左边框，提示「会插到这个标签前面」。
                 let on_drop_panel = {
                     let group = group.clone();
                     move |drag: &DragPanel, window: &mut Window, cx: &mut App| {
@@ -410,7 +387,6 @@ impl TerminalTabBar {
     }
 }
 
-/// 拖标签时跟着鼠标的小卡片。
 struct TabDragPreview {
     title: SharedString,
 }

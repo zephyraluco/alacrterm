@@ -1,6 +1,4 @@
-//! 「新建文件夹」对话框：给会话列表建一个文件夹（只改列表结构，不碰终端实例）。
-//!
-//! `parent` = 建在哪个文件夹下（`None` = 顶层）；文件夹名不能为空。
+//! 「新建文件夹」对话框：给会话列表建一个文件夹。
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Styled as _,
@@ -17,7 +15,7 @@ use gpui_kit::component::{
 use crate::sidebar_panel::sessions::SessionPath;
 use crate::AppRoot;
 
-/// 文件夹表单：一个名字输入框。
+/// 文件夹表单。
 #[derive(Clone)]
 pub(crate) struct FolderForm {
     name: Entity<InputState>,
@@ -30,14 +28,14 @@ impl FolderForm {
         }
     }
 
-    /// 去掉首尾空白后的文件夹名。
+    /// 去掉首尾空白的文件夹名。
     fn trimmed_name(&self, cx: &App) -> String {
         self.name.read(cx).value().trim().to_string()
     }
 }
 
 impl AppRoot {
-    /// 弹出「新建文件夹」对话框；`parent` = 建在哪个文件夹下（`None` = 顶层）。
+    /// 弹出「新建文件夹」对话框。
     pub(crate) fn open_new_folder_dialog(
         &mut self,
         parent: Option<SessionPath>,
@@ -51,7 +49,6 @@ impl AppRoot {
             let form_for_ok = form.clone();
             let sessions_for_ok = sessions.clone();
             let parent_for_ok = parent.clone();
-            // 空名字不允许创建
             let valid = !form.trimmed_name(cx).is_empty();
 
             let footer = DialogFooter::new()
@@ -83,7 +80,7 @@ impl AppRoot {
     }
 }
 
-/// 唯一那个字段：标题 + 输入框。
+/// 对话框唯一的字段。
 fn field(input: &Entity<InputState>, cx: &App) -> AnyElement {
     v_flex()
         .gap_1()

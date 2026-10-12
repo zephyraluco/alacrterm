@@ -1,12 +1,9 @@
-//! 自有图标资产：`assets/icons/*.svg` 由 [`icon_named!`] 扫成 `IconName` 枚举（资产路径
-//! 约定为 `icons/<文件名>`，与 gpui-kit 内置组件的图标路径一致），[`Assets`] 用 rust-embed
-//! 嵌入并实现 gpui 的 [`AssetSource`]，由 `application().with_assets(assets::Assets)` 注册。
+//! 自有图标资产：`assets/icons/*.svg` 经 [`icon_named!`] 生成 `IconName`，[`Assets`] 用 rust-embed 嵌入。
 
 use gpui::{AnyElement, App, AssetSource, IntoElement, RenderOnce, Result, SharedString, Window};
 use gpui_kit::component::{icon_named, Icon, IconNamed};
 use rust_embed::RustEmbed;
 
-// 扫描 `assets/icons` 生成本 crate 的 `IconName` 枚举
 icon_named!(IconName, "../../assets/icons");
 
 impl From<IconName> for AnyElement {
@@ -21,7 +18,7 @@ impl RenderOnce for IconName {
     }
 }
 
-/// 嵌入 `assets/` 目录（`icons/**/*`），作为 gpui 的资产源。
+/// gpui 资产源：嵌入 `assets/` 目录（`icons/**/*`）。
 #[derive(RustEmbed)]
 #[folder = "../../assets"]
 #[include = "icons/**/*"]

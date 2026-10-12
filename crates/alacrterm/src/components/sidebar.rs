@@ -1,8 +1,4 @@
-//! 侧边栏面板:顶部标题栏 + 下方可滚动的内容列表。用 `base` 的 `v_flex`/`div`、`Scrollbar`
-//! 与 gpui 的 `list`(`ListState` 按可见区间取行)实现。
-//!
-//! 列表按索引懒渲染,行类型需 `Clone`(见 [`SidebarRow`]);行自己的交互(点击 / 右键 /
-//! 拖放)在行元素里,这里只管排版与滚动。
+//! 侧边栏面板:顶部标题栏 + 下方可滚动的内容列表。
 
 use std::rc::Rc;
 
@@ -14,22 +10,17 @@ use gpui::{
 use gpui_kit::base::{Scrollbar, v_flex};
 use gpui_kit::component::ActiveTheme as _;
 
-/// 内容区左右内边距 / 行间距。
 const CONTENT_PADDING: gpui::Pixels = px(12.);
-/// 标题栏内边距。
 const HEADER_PADDING: gpui::Pixels = px(12.);
-/// 列表按视口高度额外渲染的比例(滚动时不露白)。
 const LIST_OVERDRAW_RATIO: f32 = 0.3;
 
 /// 侧边栏里的一行。
-///
-/// 列表按索引懒渲染 ⇒ 行必须 `Clone`。
 pub(crate) trait SidebarRow: Clone + 'static {
-    /// 画这一行(`render` 拿的是普通 `&mut App`)。
+    /// 画这一行。
     fn render(self, cx: &mut App) -> AnyElement;
 }
 
-/// 侧边栏面板(左栏):尺寸由外层槽位给,内容一行一项由调用方给。
+/// 侧边栏面板(左栏)。
 #[derive(IntoElement)]
 pub(crate) struct Sidebar<E: SidebarRow> {
     id: ElementId,
@@ -46,13 +37,13 @@ impl<E: SidebarRow> Sidebar<E> {
         }
     }
 
-    /// 顶部标题栏(不随内容滚动)。
+    /// 顶部标题栏。
     pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
         self.header = Some(header.into_any_element());
         self
     }
 
-    /// 内容:一行一项,按索引懒渲染。
+    /// 内容:一行一项。
     pub(crate) fn children(mut self, rows: impl IntoIterator<Item = E>) -> Self {
         self.rows.extend(rows);
         self
@@ -94,7 +85,6 @@ impl<E: SidebarRow> RenderOnce for Sidebar<E> {
                 )
             })
             .child(
-                // 滚动区 + 滚动条(后者是 sibling,盖在上面、不跟内容滚)。
                 div()
                     .id(format!("{id}-scroll"))
                     .relative()
@@ -125,7 +115,6 @@ impl<E: SidebarRow> RenderOnce for Sidebar<E> {
                         div().absolute().inset_0().child(
                             Scrollbar::vertical(&list_state)
                                 .id(format!("{id}-scrollbar"))
-                                // 视口 = 这块覆盖层的边界。
                                 .viewport_from_layout(),
                         ),
                     ),
