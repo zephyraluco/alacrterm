@@ -162,6 +162,8 @@ impl TabGroupRenderer for TerminalTabBar {
             .w_full()
             .h(TAB_BAR_HEIGHT)
             .bg(bar_bg)
+            // 焦点落在标签栏/工具按钮上时的 key context（默认 keymap 未使用，留给用户）。
+            .key_context(crate::keymap::DOCK_CONTEXT)
             .child(
                 div()
                     .relative()

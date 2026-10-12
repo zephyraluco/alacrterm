@@ -38,7 +38,7 @@ fn candidates(relative: &str) -> Vec<PathBuf> {
 }
 
 /// 读第一个命中的配置文件。
-fn read_config_file(relative: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn read_config_file(relative: &str) -> Option<(PathBuf, String)> {
     candidates(relative).into_iter().find_map(|path| {
         std::fs::read_to_string(&path)
             .ok()
@@ -65,7 +65,7 @@ pub(crate) fn sessions_config_path() -> PathBuf {
 }
 
 /// 去掉 Windows 路径的 `\\?\` 前缀。
-fn shown_path(path: &Path) -> String {
+pub(crate) fn shown_path(path: &Path) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()

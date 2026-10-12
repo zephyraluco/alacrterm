@@ -21,8 +21,8 @@ use std::{
 
 use gpui::{
     App, AppContext as _, AsyncApp, Entity, FocusHandle, IntoElement, InteractiveElement,
-    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, NoAction, ParentElement, Render,
-    ScrollWheelEvent, SharedString, Styled, Subscription, WeakEntity, Window, div, rgb,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollWheelEvent, SharedString,
+    Styled, Subscription, WeakEntity, Window, div, rgb,
 };
 use terminal::{
     Event as TerminalEvent, HostKeyPrompt, Modes, SshFs, Terminal, TerminalBounds,
@@ -57,12 +57,13 @@ const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 终端的 key context。
 ///
-/// 用途只有一个：在焦点位于终端时**取消** tab / shift-tab 的键位绑定，把按键交回
-/// 焦点所在的组件。gpui-component 的 `Root` 把这两个键绑成了焦点切换动作，而 gpui 的
-/// 键位派发在 key listener 之前、且动作默认停止传播 ⇒ 终端一个 Tab 都收不到。
-/// 用 [`NoAction`] 在更深的 context 上压掉那条绑定后，按键就顺着 gpui 的正常流程
-/// 落到焦点元素（终端）的 key listener，与 Enter / 方向键走同一条路；
-/// 焦点不在终端时本 context 不参与匹配，`Root` 的 Tab 焦点切换照旧。
+/// 打在终端视图根节点上，让 keymap 里 `"context": "Terminal"` 的绑定只在终端聚焦时生效
+/// （默认 keymap 用它压掉 `Root` 的 tab / shift-tab 焦点切换、绑复制粘贴与滚动键，
+/// 见 `assets/keymaps/default-*.json`）。
+///
+/// ⚠️ 绑在这个 context 上的键**不会**再进 PTY：gpui 的按键派发是「动作优先」——
+/// 先按 context 深度 + 注册顺序派发 `Action`（命中即默认停止传播），然后才轮到
+/// key listener（`TerminalView::on_key_down` → `Terminal::try_keystroke`）。
 const TERMINAL_KEY_CONTEXT: &str = "Terminal";
 
 /// 终端视图。
@@ -105,16 +106,6 @@ impl TerminalView {
         let env = std::env::vars().collect();
         let builder = TerminalBuilder::new(working_directory, target, env, cx);
         let focus_handle = cx.focus_handle();
-
-        // 焦点在终端时让 tab / shift-tab 归终端（见 [`TERMINAL_KEY_CONTEXT`]）。
-        // 只需注册一次——每个标签页都会走 `new`。
-        static UNBIND_TAB_KEYS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        UNBIND_TAB_KEYS.get_or_init(|| {
-            cx.bind_keys([
-                KeyBinding::new("tab", NoAction, Some(TERMINAL_KEY_CONTEXT)),
-                KeyBinding::new("shift-tab", NoAction, Some(TERMINAL_KEY_CONTEXT)),
-            ]);
-        });
 
         // 焦点进出：通知终端应用（FOCUS_IN_OUT 模式），并设置默认光标形状
         let focus_in = cx.on_focus_in(&focus_handle, window, |terminal_view, _window, cx| {
@@ -326,19 +317,100 @@ impl TerminalView {
         }
     }
 
+    /// 对底层终端做一件事并触发重绘。
+    ///
+    /// ⚠️ 终端把请求排进自己的事件队列（`copy` / `clear` / `Scroll(..)` 都是），
+    /// 队列要等 [`TerminalElement::prepaint`](crate::terminal_element::TerminalElement)
+    /// 里的 `Terminal::sync` 才被消费 —— 不重绘，事件就躺在队列里不动。
+    fn with_terminal(&mut self, cx: &mut gpui::Context<Self>, action: impl FnOnce(&mut Terminal)) {
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+        terminal.update(cx, |terminal, cx| {
+            action(terminal);
+            cx.notify();
+        });
+    }
+
+    /// 复制选中内容（`Ctrl+Shift+C`）。
+    pub fn copy_text(&mut self, cx: &mut gpui::Context<Self>) {
+        self.with_terminal(cx, |terminal| terminal.copy(None));
+    }
+
+    /// 粘贴剪贴板内容（`Ctrl+Shift+V`）。
+    pub fn paste_text(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        self.with_terminal(cx, |terminal| terminal.paste(&text));
+    }
+
+    /// 清屏（`Ctrl+Shift+K`）。
+    pub fn clear_terminal(&mut self, cx: &mut gpui::Context<Self>) {
+        self.with_terminal(cx, |terminal| terminal.clear());
+    }
+
+    /// 切换 vi 模式（`Ctrl+Shift+Space`）。
+    pub fn toggle_vi_mode(&mut self, cx: &mut gpui::Context<Self>) {
+        self.with_terminal(cx, |terminal| terminal.toggle_vi_mode());
+    }
+
+    /// 滚动类动作：全屏 TUI（`ALT_SCREEN`）里同一按键属于那个程序，要原样转发给 PTY。
+    ///
+    /// 动作处理器拿不到原始 keystroke（gpui 只递 `Action`），所以这里自己造转义序列 ——
+    /// 与 `terminal::mappings::keys::to_esc_str` 给这几个键的序列一致
+    /// （`shift-pageup` = `CSI 5 ~`、`shift-pagedown` = `CSI 6 ~`、`shift-home` / `shift-end`
+    /// = `CSI H` / `CSI F`、`shift-up` / `shift-down` = `CSI 1 ; 2 A` / `CSI 1 ; 2 B`）。
+    fn scroll_action(
+        &mut self,
+        cx: &mut gpui::Context<Self>,
+        alt_screen_sequence: &'static [u8],
+        local: impl FnOnce(&mut Terminal),
+    ) {
+        self.with_terminal(cx, |terminal| {
+            if terminal.last_content().mode.contains(Modes::ALT_SCREEN) {
+                terminal.input(alt_screen_sequence);
+            } else {
+                local(terminal);
+            }
+        });
+    }
+
+    /// 上翻一页（`Shift+PageUp`）。
+    pub fn scroll_page_up(&mut self, cx: &mut gpui::Context<Self>) {
+        self.scroll_action(cx, b"\x1b[5~", |terminal| terminal.scroll_page_up());
+    }
+
+    /// 下翻一页（`Shift+PageDown`）。
+    pub fn scroll_page_down(&mut self, cx: &mut gpui::Context<Self>) {
+        self.scroll_action(cx, b"\x1b[6~", |terminal| terminal.scroll_page_down());
+    }
+
+    /// 滚到顶部（`Shift+Home`）。
+    pub fn scroll_to_top(&mut self, cx: &mut gpui::Context<Self>) {
+        self.scroll_action(cx, b"\x1b[H", |terminal| terminal.scroll_to_top());
+    }
+
+    /// 滚到底部（`Shift+End`）。
+    pub fn scroll_to_bottom(&mut self, cx: &mut gpui::Context<Self>) {
+        self.scroll_action(cx, b"\x1b[F", |terminal| terminal.scroll_to_bottom());
+    }
+
+    /// 上滚一行（`Shift+Up`）。
+    pub fn scroll_line_up(&mut self, cx: &mut gpui::Context<Self>) {
+        self.scroll_action(cx, b"\x1b[1;2A", |terminal| terminal.scroll_line_up());
+    }
+
+    /// 下滚一行（`Shift+Down`）。
+    pub fn scroll_line_down(&mut self, cx: &mut gpui::Context<Self>) {
+        self.scroll_action(cx, b"\x1b[1;2B", |terminal| terminal.scroll_line_down());
+    }
+
     fn on_key_down(&mut self, e: &KeyDownEvent, _window: &mut Window, cx: &mut gpui::Context<Self>) {
         if let Some(terminal) = &self.terminal {
-            // 粘贴：Ctrl+Shift+V
-            if e.keystroke.modifiers.control
-                && e.keystroke.modifiers.shift
-                && e.keystroke.key.eq_ignore_ascii_case("v")
-            {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    terminal.update(cx, |terminal, _cx| terminal.paste(&text));
-                }
-                cx.stop_propagation();
-                return;
-            }
+            // ⚠️ 复制粘贴 / 滚动 / vi 模式不在这里：那些键由 keymap 绑成应用动作
+            // （`Terminal` context），动作优先于 key listener ⇒ 根本走不到这里。
+            // 这个 listener 只负责**没被绑定的键** → 转义序列 → PTY。
 
             // 可打印字符交给 InputHandler（`TerminalElement::paint` 里的 `window.handle_input`），
             // 这里提前返回，避免同一字符被 `try_keystroke` 与 InputHandler 各处理一次。

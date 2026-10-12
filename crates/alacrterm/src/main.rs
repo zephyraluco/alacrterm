@@ -8,6 +8,7 @@ mod config;
 #[cfg(windows)]
 mod conpty_backend;
 mod dialog;
+mod keymap;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
@@ -18,9 +19,8 @@ mod welcome;
 use components::ACTIVITY_BAR_WIDTH;
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render,
-    Styled as _, Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div,
-    px, size,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Styled as _,
+    Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use gpui_kit::{
     QuitMode,
@@ -61,7 +61,9 @@ fn main() {
                 |window, cx| {
                     let root = cx.new(|cx| AppRoot::new(window, cx));
                     AppRoot::register_actions(root.downgrade(), cx);
-                    cx.bind_keys([KeyBinding::new("ctrl-,", actions::OpenSettings, None)]);
+                    // 键位全部来自 keymap JSON；必须在 gpui_kit::init 之后注册
+                    // （它自己的 Root / Dialog 绑定不能被清掉），见 [`keymap`]。
+                    keymap::install(cx);
                     cx.new(|cx| Root::new(root, window, cx))
                 },
             )

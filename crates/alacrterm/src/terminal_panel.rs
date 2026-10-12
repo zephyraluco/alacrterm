@@ -8,11 +8,12 @@ use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, WeakEntity, Window, div,
 };
+use gpui_kit::base::Placement;
 use gpui_kit::component::{
     button::Button,
     dock::{
-        BasePanel, DockPlacement, InsertTarget, Panel, PanelControl, PanelEvent, PanelId, TabGroup,
-        panel_handle,
+        BasePanel, DockPlacement, InsertTarget, NodeId, Panel, PanelControl, PanelEvent, PanelId,
+        TabGroup, panel_handle,
     },
 };
 use terminal::TerminalTarget;
@@ -229,6 +230,135 @@ impl AppRoot {
             .unwrap_or_else(|| self.active.min(self.terminals.len().saturating_sub(1)));
         cx.notify();
     }
+
+    /// 「当前会话」下标：焦点所在的终端优先，否则用 `active`。
+    ///
+    /// 键位动作都是从键盘派发来的（焦点必然在某个终端里），但 `Window` 只有拿到窗口的
+    /// 回调才有（见 [`AppRoot::defer_after_update`]），所以键位动作一律走这条路径而不用
+    /// [`Self::active`] 直觉判断。
+    pub(crate) fn active_session_index(&self, window: &Window, cx: &App) -> Option<usize> {
+        self.terminals
+            .iter()
+            .position(|session| session.view.read(cx).is_focused(window))
+            .or_else(|| (!self.terminals.is_empty()).then(|| self.active.min(self.terminals.len() - 1)))
+    }
+
+    /// 对「当前会话」的终端视图做一件事（找不到就什么也不做）。
+    ///
+    /// 键位动作的另一条入口：不需要 `Window`，用 `active` 即可（渲染时按焦点更新过）。
+    pub(crate) fn with_active_terminal(
+        &self,
+        cx: &mut App,
+        action: impl FnOnce(&mut TerminalView, &mut Context<TerminalView>),
+    ) {
+        let Some(session) = self.terminals.get(self.active) else {
+            return;
+        };
+        session.view.update(cx, action);
+    }
+
+    /// 关闭当前会话（`Ctrl+Shift+W`）。
+    pub(crate) fn close_active_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.active_session_index(window, cx) else {
+            return;
+        };
+        self.close_terminal(index, window, cx);
+    }
+
+    /// 前后切换会话（`Ctrl+Tab` / `Ctrl+Shift+Tab`），到头折返。
+    pub(crate) fn step_session(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.terminals.len();
+        if count == 0 {
+            return;
+        }
+        let Some(current) = self.active_session_index(window, cx) else {
+            return;
+        };
+        let next = (current as i32 + delta).rem_euclid(count as i32) as usize;
+        self.activate_session(next, window, cx);
+    }
+
+    /// 跳到第 `index` 个会话：切到它所在的标签页并聚焦。
+    pub(crate) fn activate_session(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.terminals.get(index) else {
+            return;
+        };
+        let pane = session.pane.clone();
+        let focus = session.view.read(cx).focus_handle(cx);
+        let group = session.pane.read(cx).group().and_then(|group| group.upgrade());
+        self.active = index;
+
+        let Some(group) = group else {
+            // 还没进过标签组（首个会话）：直接聚焦它。
+            window.focus(&focus, cx);
+            cx.notify();
+            return;
+        };
+        let panel = panel_handle(pane.clone()).panel_id(cx);
+        let tab = group
+            .read(cx)
+            .panels()
+            .iter()
+            .position(|candidate| candidate.panel_id(cx) == panel);
+        match tab {
+            // 切标签页会顺带聚焦（`TabGroup::select_tab` → `focus_active_panel`）。
+            Some(tab) => group.update(cx, |group, cx| group.select_tab(tab, window, cx)),
+            None => window.focus(&focus, cx),
+        }
+        cx.notify();
+    }
+
+    /// 在「当前会话」旁边新建一个会话并放进新的标签组（`Ctrl+Shift+D` / `Ctrl+Shift+S`）。
+    pub(crate) fn split_active_session(
+        &mut self,
+        placement: Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(node) = self.active_session_node(window, cx) else {
+            return;
+        };
+        // 新建的会话先按常规进当前组，再挪到旁边新开的组里。
+        self.spawn_terminal(window, cx);
+        let Some(session) = self.terminals.last() else {
+            return;
+        };
+        let panel = panel_handle(session.pane.clone()).panel_id(cx);
+        self.dock.update(cx, |area, cx| {
+            area.split_at(node, panel, placement, window, cx)
+        });
+        self.sync_sessions_with_dock(cx);
+        cx.notify();
+    }
+
+    /// 最大化 / 还原当前会话所在的标签组（`Ctrl+Shift+Z`）。
+    pub(crate) fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dock.read(cx).is_zoomed() {
+            self.dock
+                .update(cx, |area, cx| area.set_zoomed_out(window, cx));
+            return;
+        }
+        let Some(node) = self.active_session_node(window, cx) else {
+            return;
+        };
+        self.dock
+            .update(cx, |area, cx| area.set_zoomed_in(node, window, cx));
+    }
+
+    /// 当前会话在 dock 布局里所在的节点（标签组），没有就 `None`。
+    fn active_session_node(&self, window: &Window, cx: &App) -> Option<NodeId> {
+        let index = self.active_session_index(window, cx)?;
+        let panel = panel_handle(self.terminals.get(index)?.pane.clone()).panel_id(cx);
+        self.dock
+            .read(cx)
+            .layout(DockPlacement::Center)
+            .and_then(|tree| tree.find_panel_node(panel))
+    }
 }
 
 /// 一个会话对应的 dock 面板。
@@ -284,7 +414,9 @@ impl BasePanel for SessionPane {
     }
 
     fn zoomable(&self, _: &App) -> bool {
-        false
+        // `Ctrl+Shift+Z`（`alacrterm::ToggleZoom`）要把标签组撑满 dock：
+        // gpui-kit 的 `TabGroup::set_zoomed` 会拒绝不可缩放的 panel。
+        true
     }
 
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, _: &mut Context<Self>) {
