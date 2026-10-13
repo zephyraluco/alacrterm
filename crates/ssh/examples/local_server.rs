@@ -28,9 +28,13 @@
 //!
 //! ## sftp 子系统
 //!
-//! 服务端**也**支持 `sftp`(只读,见 [`FsSession`]):列的是**服务端进程当前目录**下的
-//! 真实文件。这不是玩具 shell 的一部分,而是为了让「远端文件管理器」也能被验证 ——
-//! 客户端那边 [SshFs](ssh::SshFs) 走的是**另开一条连接**的 sftp 子系统。
+//! 服务端**也**支持 `sftp`(见 [`FsSession`]):读写的是**服务端进程当前目录**下的真实
+//! 文件。这不是玩具 shell 的一部分,而是为了让「远端文件管理器」也能被验证 —— 客户端那边
+//! [SshFs](ssh::SshFs) 走的是**另开一条连接**的 sftp 子系统。
+//!
+//! 支持的范围:`realpath` / `stat` / `lstat` / `opendir` / `readdir` / `close`(浏览)与
+//! `open` / `read` / `write` / `mkdir` / `remove` / `rmdir`(上传下载)。没有的
+//! (`rename` / `symlink` / `setstat` …)一律回 `SSH_FX_OP_UNSUPPORTED`。
 
 #![allow(dead_code)] // 被测试 `#[path]` 包进来时 `main` 是多余的
 
@@ -42,7 +46,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use russh::server::{Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
-use russh_sftp::protocol::{Attrs, File, FileAttributes, Handle, Name, Status, StatusCode, Version};
+use russh_sftp::protocol::{
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+};
 use tokio::net::TcpListener;
 
 /// 唯一接受的密码(测试与手工验收共用)。
@@ -312,13 +318,13 @@ fn host_key() -> russh::keys::PrivateKey {
     russh::keys::PrivateKey::from_openssh(HOST_KEY).expect("内嵌的测试主机密钥应当能解析")
 }
 
-// ---------------------------------------------------------------- 只读 SFTP 子系统
+// ---------------------------------------------------------------- SFTP 子系统
 
-/// 只读的 SFTP 处理:列**服务端进程当前目录**下的真实文件。
+/// SFTP 处理:读写**服务端进程当前目录**下的真实文件。
 ///
-/// 目的只是让「远端文件管理器」这条路能被端到端验证(读目录 / 判断是不是目录),
-/// 所以刻意最小:只实现 `realpath` / `stat` / `lstat` / `opendir` / `readdir` / `close`,
-/// 其余(`open` / `write` / `remove` …)一律回 `SSH_FX_OP_UNSUPPORTED`。
+/// 目的只是让「远端文件管理器」这条路能被端到端验证(列目录 / 判断是不是目录 / 上传 /
+/// 下载),所以刻意最小:余下的 `rename` / `symlink` / `setstat` … 一律回
+/// `SSH_FX_OP_UNSUPPORTED`。
 ///
 /// 路径解析按**服务端本机**语义(`std::fs`),不做 POSIX 归一化 —— 测试与手工验收
 /// 都在同一台机器上,Windows 盘符路径照样能用。
@@ -326,6 +332,10 @@ fn host_key() -> russh::keys::PrivateKey {
 struct FsSession {
     /// 已经列过一次的目录句柄:`readdir` 第二次起回 `SSH_FX_EOF`(协议约定靠它收尾)。
     listed: HashSet<String>,
+    /// 打开着的文件:句柄 → 文件。`read` / `write` 都带偏移,所以按偏移 seek 即可。
+    open_files: HashMap<String, std::fs::File>,
+    /// 自增的文件句柄(与目录句柄用路径当句柄的约定区分开:这里一律是 `fh-N`)。
+    next_handle: u64,
 }
 
 impl russh_sftp::server::Handler for FsSession {
@@ -345,6 +355,75 @@ impl russh_sftp::server::Handler for FsSession {
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
         self.listed.remove(&handle);
+        // 关文件 = 丢掉 `std::fs::File`(它的 `Drop` 会 flush)。
+        self.open_files.remove(&handle);
+        Ok(ok(id))
+    }
+
+    async fn open(
+        &mut self,
+        id: u32,
+        filename: String,
+        pflags: OpenFlags,
+        _attrs: FileAttributes,
+    ) -> Result<Handle, Self::Error> {
+        let path = resolve(&filename);
+        let read = pflags.contains(OpenFlags::READ);
+        let write = pflags.contains(OpenFlags::WRITE);
+        let mut options = std::fs::OpenOptions::new();
+        options.read(read).write(write);
+        if write && pflags.contains(OpenFlags::CREATE) {
+            options.create(true);
+        }
+        if write && pflags.contains(OpenFlags::TRUNCATE) {
+            options.truncate(true);
+        }
+        let file = options
+            .open(&path)
+            .map_err(|_| StatusCode::NoSuchFile)?;
+
+        self.next_handle += 1;
+        let handle = format!("fh-{}", self.next_handle);
+        self.open_files.insert(handle.clone(), file);
+        Ok(Handle { id, handle })
+    }
+
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<Data, Self::Error> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            return Err(StatusCode::NoSuchFile);
+        };
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| StatusCode::Failure)?;
+        let mut buffer = vec![0u8; len as usize];
+        let read = file.read(&mut buffer).map_err(|_| StatusCode::Failure)?;
+        // 读空了回一个**空 Data**(客户端那边等同于 EOF,见 `check_read_result`)。
+        buffer.truncate(read);
+        Ok(Data { id, data: buffer })
+    }
+
+    async fn write(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<Status, Self::Error> {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            return Err(StatusCode::NoSuchFile);
+        };
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| StatusCode::Failure)?;
+        file.write_all(&data).map_err(|_| StatusCode::Failure)?;
         Ok(ok(id))
     }
 
@@ -397,6 +476,26 @@ impl russh_sftp::server::Handler for FsSession {
             })
             .collect();
         Ok(Name { id, files })
+    }
+
+    async fn mkdir(
+        &mut self,
+        id: u32,
+        path: String,
+        _attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        std::fs::create_dir(resolve(&path)).map_err(|_| StatusCode::Failure)?;
+        Ok(ok(id))
+    }
+
+    async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+        std::fs::remove_file(resolve(&filename)).map_err(|_| StatusCode::Failure)?;
+        Ok(ok(id))
+    }
+
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        std::fs::remove_dir(resolve(&path)).map_err(|_| StatusCode::Failure)?;
+        Ok(ok(id))
     }
 }
 

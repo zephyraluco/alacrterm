@@ -21,6 +21,8 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
     "io-util",
+    # 传输要读 / 写本地文件(见 src/fs.rs),`tokio::fs` 需要它。
+    "fs",
     "time",
     "sync",
     "macros",
