@@ -9,12 +9,15 @@ use gpui::{
     Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window,
     div, prelude::FluentBuilder as _, px, svg,
 };
-use gpui_kit::component::{
-    ActiveTheme as _, IconNamed as _, Sizable as _, h_flex,
-    button::ButtonVariants as _,
-    dock::{
-        BasePanelView, DockArea, DockAreaRenderer, DockContext, DockSkin, DragPanel, DropIndicator,
-        NodeId, PanelHandle, PanelState, TabGroupContext, TabGroupRenderer,
+use gpui_kit::{
+    base::ResizeHandleContext,
+    component::{
+        ActiveTheme as _, IconNamed as _, Sizable as _, h_flex,
+        button::ButtonVariants as _,
+        dock::{
+            BasePanelView, DockArea, DockAreaRenderer, DockContext, DockSkin, DragPanel,
+            DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext, TabGroupRenderer,
+        },
     },
 };
 
@@ -58,6 +61,21 @@ impl DockAreaRenderer for TerminalDockSkin {
 
     fn split_frame(&self, node: NodeId, axis: Axis, window: &mut Window, cx: &mut App) -> Stateful<gpui::Div> {
         self.inner.split_frame(node, axis, window, cx)
+    }
+
+    /// 分叉的分隔条（「两个标签组之间」那条缝）：本皮肤不自己画，转发给设计系统
+    /// —— 和侧边栏、页内分屏同一套（细线 + 悬停 / 拖拽胶囊）。
+    ///
+    /// ⚠️ 不转发就等于用**基类默认**（返回 `None` = 朴素 1px 线）：这个钩子只决定
+    /// *画什么*，抓取带、光标和拖拽都在 base 那边的 `ResizablePanelGroup` 里
+    /// （dock 的每个分叉本来就是 `h_resizable` / `v_resizable`）。
+    fn render_split_handle(
+        &self,
+        handle: &ResizeHandleContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.inner.render_split_handle(handle, window, cx)
     }
 
     fn render_dock(
