@@ -8,17 +8,20 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity,
-    Window, div,
+    AnyElement, App, AppContext as _, Axis, Context, Div, DragMoveEvent, Empty, Entity, EntityId,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    relative,
 };
 use gpui_kit::component::{
-    ActiveTheme as _,
     button::Button,
     dock::{
         BasePanel, DockPlacement, InsertTarget, Panel, PanelControl, PanelEvent, PanelId, TabGroup,
         panel_handle,
     },
+    h_flex,
+    resizable::resize_handle,
+    v_flex,
 };
 use terminal::{SshFs, TerminalTarget};
 use terminal_view::{RenderSettings, TerminalView};
@@ -27,7 +30,7 @@ use crate::actions::NewLocalTerminal;
 use crate::assets::IconName;
 use crate::config;
 use crate::dialog::host_key;
-use crate::pane_layout::{Dir, Layout};
+use crate::pane_layout::{Dir, Layout, ratio_at};
 use crate::AppRoot;
 
 /// 新建会话的参数。
@@ -356,6 +359,8 @@ pub(crate) struct TabPane {
     subs: Vec<Subscription>,
     /// 格子布局。
     layout: Layout,
+    /// 下一个分叉 id（[`Layout::Split::node`] 用，单调递增就够）。
+    next_node: u64,
     /// 当前聚焦的格子（下标进 `panes`）。
     focused: usize,
     /// [`Self::focus_handle`] 的兜底（格子列表为空时才用得上）。
@@ -380,6 +385,7 @@ impl TabPane {
             panes: vec![view],
             subs: vec![sub],
             layout: Layout::single(),
+            next_node: 0,
             focused: 0,
             fallback_focus: cx.focus_handle(),
         }
@@ -475,9 +481,11 @@ impl TabPane {
         cx: &mut Context<Self>,
     ) {
         let index = self.panes.len();
-        if !self.layout.split(self.focused, axis, index) {
+        let node = self.next_node;
+        if !self.layout.split(self.focused, axis, index, node) {
             return;
         }
+        self.next_node += 1;
         let sub = Self::observe_pane(&view, window, cx);
         self.panes.push(view);
         self.subs.push(sub);
@@ -527,6 +535,136 @@ impl TabPane {
         self.focused = ix;
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// 递归渲染分屏树：叶子是终端，分叉是「两侧按 `ratio` 摊 + 前缘一条可拖的分隔条」。
+    fn render_layout(&self, layout: &Layout, cx: &mut Context<Self>) -> AnyElement {
+        match layout {
+            Layout::Leaf(ix) => pane_element(&self.panes, *ix),
+            Layout::Split {
+                node,
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let (node, axis, ratio) = (*node, *axis, *ratio);
+                let (first, second) = (
+                    self.render_layout(first, cx),
+                    self.render_layout(second, cx),
+                );
+                // 分隔条挂到后一格的前缘（straddle：把手向缝的两侧各伸出一半）。
+                let tail = slot(axis, 1. - ratio)
+                    .relative()
+                    .child(second)
+                    .child(
+                        resize_handle(("terminal-divider", node), axis).on_drag(
+                            DividerDrag { node },
+                            |drag, _, _, cx| {
+                                // 拖分隔条不该顺带点到底下的终端（聚焦 / 选择）。
+                                cx.stop_propagation();
+                                cx.new(|_| drag.clone())
+                            },
+                        ),
+                    );
+                let container = match axis {
+                    Axis::Horizontal => h_flex().size_full().min_w_0(),
+                    Axis::Vertical => v_flex().size_full().min_h_0(),
+                };
+                container
+                    .id(("terminal-split", node))
+                    .child(slot(axis, ratio).child(first))
+                    .child(tail)
+                    .on_drag_move::<DividerDrag>(cx.listener(
+                        // ⚠️ 嵌套分屏时，指针路径上的**每一层**容器都会收到同一次拖拽：
+                        // 只有「分叉 id 和自己对得上」的那层才该动（否则会拿错 bounds）。
+                        move |this, drag: &DragMoveEvent<DividerDrag>, _, cx| {
+                            this.handle_divider_drag(node, drag, cx)
+                        },
+                    ))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// 拖分隔条：按指针在**分叉容器**里的位置改那一叉的比例。
+    ///
+    /// `container` = 挂这个监听的分叉 id（见 `render_layout` 里的说明）。
+    fn handle_divider_drag(
+        &mut self,
+        container: u64,
+        drag: &DragMoveEvent<DividerDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let node = drag.drag(cx).node;
+        if node != container {
+            return;
+        }
+        let Some(axis) = self.layout.axis_of(node) else {
+            return;
+        };
+        // 监听挂在分叉容器上 ⇒ `drag.bounds` 就是它的 bounds，指针位置据此换算成比例。
+        let (origin, extent, along) = match axis {
+            Axis::Horizontal => (
+                drag.bounds.left(),
+                drag.bounds.size.width,
+                drag.event.position.x,
+            ),
+            Axis::Vertical => (
+                drag.bounds.top(),
+                drag.bounds.size.height,
+                drag.event.position.y,
+            ),
+        };
+        let ratio = ratio_at(origin.as_f32(), extent.as_f32(), along.as_f32());
+        if self.layout.set_ratio(node, ratio) {
+            cx.notify();
+        }
+    }
+}
+
+/// 分屏里的一格：主轴按 `ratio` 占份，交叉轴铺满（比例是百分比，父容器变宽变窄都跟得上）。
+fn slot(axis: Axis, ratio: f32) -> Div {
+    let slot = div()
+        .flex_basis(relative(ratio))
+        .flex_grow(0.)
+        .flex_shrink(1.)
+        .min_w_0()
+        .min_h_0();
+    match axis {
+        Axis::Horizontal => slot.h_full(),
+        Axis::Vertical => slot.w_full(),
+    }
+}
+
+/// 一块格子。
+///
+/// ⚠️ 外层 div 必须带 **每个终端唯一** 的 id：`TerminalElement` 自己不贡献 element id
+/// （`Interactivity` 是 `default()`），同一页里两块终端会算出同一条 global id 路径。
+fn pane_element(panes: &[Entity<TerminalView>], ix: usize) -> AnyElement {
+    let Some(view) = panes.get(ix) else {
+        return div().size_full().into_any_element();
+    };
+    div()
+        .id(("terminal-pane", view.entity_id()))
+        .size_full()
+        .min_w_0()
+        .min_h_0()
+        .overflow_hidden()
+        .child(view.clone())
+        .into_any_element()
+}
+
+/// 拖分隔条时跟着指针走的载荷（gpui 靠载荷的**类型**区分不同的拖拽）。
+#[derive(Clone)]
+struct DividerDrag {
+    node: u64,
+}
+
+/// 分隔条的拖拽预览：什么也不画（比例是拖的时候直接改的，不需要浮层）。
+impl Render for DividerDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
     }
 }
 
@@ -613,10 +751,9 @@ impl Focusable for TabPane {
 impl Render for TabPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_focus(window, cx);
-        let divider = cx.theme().border;
         div()
             .size_full()
             .overflow_hidden()
-            .child(self.layout.render(&self.panes, divider))
+            .child(self.render_layout(&self.layout, cx))
     }
 }
