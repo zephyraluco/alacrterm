@@ -26,7 +26,9 @@
 | `gpui`(`gpui-pre 0.3`) | UI 框架、窗口、文本布局、事件分发 |
 | `gpui-kit`(`features = ["component"]`) | 标题栏 / Sidebar / Tabs / StatusBar / Settings / Resizable、`icon_named!`、主题系统 |
 | `alacritty_terminal 0.26` | VT 解析、网格模型、PTY 封装(`tty`) |
-| `russh 0.63` + `russh-sftp 3`(`crates/ssh`) | 内建 SSH 客户端(终端通道 + SFTP 列远端目录);⚠️ **必须关掉默认的 `aws-lc-rs`** 改用 `ring`,否则 Windows 上要 NASM |
+| `russh 0.63` + `russh-sftp 3`(`crates/ssh`) | 内建 SSH 客户端(终端通道 + SFTP:浏览远端目录 / 上传 / 下载 / 写回);⚠️ **必须关掉默认的 `aws-lc-rs`** 改用 `ring`,否则 Windows 上要 NASM |
+| `tree-sitter` + 几种 grammar(经 gpui-kit 的 `tree-sitter-*` feature) | 预览窗口里那个简易编辑器的**语法高亮**(bash / python / json / yaml / toml / rust / js / ts / tsx / c / cpp / markdown,见 §3.5.1);⚠️ **故意不**开 `tree-sitter-languages`(全开要拖进三十多个 grammar crate) |
+| `dirs 7` | 预览缓存目录 / 系统下载目录 |
 | `portable-pty 0.9` | 经 alacritty `tty` 间接使用的跨平台 PTY |
 | `sysinfo 0.39` | 前台进程 / 工作目录 / 标题检测(仅 `crates/terminal`,应用层已不再依赖) |
 | `rust-embed` | 内嵌 `assets/icons` |
@@ -125,7 +127,7 @@ crates/
         header.rs               # 面板标题栏(当前视图的标题 + 「…」菜单)
         shared.rs               # 两棵树共用:行骨架 / 缩进 / 省略号标签 / RowCache / 拖拽预览卡片
         sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + 摊平成 SessionsItem)
-        files.rs                # FilesState(文件管理器:远端 SFTP 目录树 + 摊平成 FilesItem)
+        files.rs                # FilesState(文件管理器:远端 SFTP 目录树 + 传输行 + 摊平成 FilesItem)
       components/               # 应用自有的可复用组件(base + 自绘)
         mod.rs                  # 组件模块出口
         activitybar.rs           # VS Code 式**整列**(ActivityBar / ActivityBarItem:48px 图标列 + sidebar 成员)
@@ -137,6 +139,8 @@ crates/
         host_key.rs             # 「未知主机密钥」:首次连接让用户核对指纹
       welcome.rs                # 无会话时中间列的欢迎页
       settings_window.rs        # 独立设置窗口
+      preview_window.rs         # 独立文件预览窗口(文本可改并写回远端 / 图片 / 其他占位;见 §3.5.1)
+      format.rs                 # 显示用的小格式化(字节数 / 时长)
       actions.rs                # 自定义 Action + 全局监听器
       assets.rs                 # 图标资产
   terminal_view/                # 视图层
@@ -161,9 +165,9 @@ crates/ssh/                      # 内建 SSH 客户端(russh)
     auth.rs                     # agent → 私钥文件 → 密码
     handler.rs                  # 主机密钥校验(Ask / AcceptNew / Strict)+ 确认请求
     params.rs                   # SshParams / SshAuth / HostKeyPolicy / SshSize
-    fs.rs                       # SshFs:SFTP 子系统(另开一条连接,懒连接)
-    error.rs                    # SshError(连不上哪个地址 / 认证 / 主机密钥变更…)
-  examples/local_server.rs      # 本机验证用的假服务端(玩具 shell + 只读 sftp 子系统)
+    fs.rs                       # SshFs:SFTP 子系统(浏览 + 传输各一条连接,都是懒连接)
+    error.rs                    # SshError(连不上哪个地址 / 认证 / 主机密钥变更 / 传输已取消…)
+  examples/local_server.rs      # 本机验证用的假服务端(玩具 shell + 可读写的 sftp 子系统)
 ```
 
 ---
@@ -267,13 +271,29 @@ fn main() {
 - ⚠️ **必须等会话连上再给句柄**(`TerminalView::is_connected`):连上之前主机密钥可能还没确认,而 SFTP 那条连接**没有确认通道**(`ClientHandler::new` 传 `None`)⇒ 只会失败。判断放在句柄那一层,`FilesState::sync` 自己只比较 `Option<SshFs>`(`Arc::ptr_eq`)。
 - **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 调 `list_dir`(一层),回填前核对**代次**(`generation`,换根目录 / 换会话时 +1 ⇒ 在途结果直接丢掉)。排序由 `SshFs` 负责:目录在前、名字不区分大小写。
 - **展开的目录还没读回来时**,摊平会在它后面插一行「加载中…」占位(`RowKind::Loading`),这样它看起来仍是可展开的父节点。
-- 行有四种形态(都由 `RowKind` 决定):目录展开(`ChevronDown` + `FolderOpen`) / 目录收起(`ChevronRight` + `Folder`) / 文件(`File` 图标) / 占位(灰字,不接点击)。视图**只读** —— 行点击只展开 / 收起(文件行只记选中),不打开文件。
+- 行有四种形态(都由 `RowKind` 决定):目录展开(`ChevronDown` + `FolderOpen`) / 目录收起(`ChevronRight` + `Folder`) / 文件(`File` 图标) / 占位(灰字,不接点击)。
 - 展开状态存 `FilesState::expanded`(下标链),由 `FilesState::activate_row` 自己改;改完 `RowCache::bump` 让摊平缓存失效。
 - 顶部一行是一条**路径输入框**(整行铺满),**根目录就显示在它里面**(唯一的显示处,⚠️ 不要再另加一行「当前根目录」——那是重复且白占一行高度),与「显示中的根目录」双向对齐:改内容就尝试跳过去(`navigate_to`,先 `fs.is_dir()` 问远端,**只认确实是目录的路径**——不存在 / 不是目录 / 为空时什么都不动,否则打字中途那些不成立的中间态会把树清空);根目录变了时把新路径写回输入框(`sync_path_input`,用 `InputState::set_value`,它内部关掉事件发射 ⇒ 不会回环触发 `navigate_to`)。⚠️ **根目录还没问到、或根目录的列表还没读回来时整个内容位什么都不摆**(既没有路径输入框,也没有空占位),免得先闪一句占位再刷成树;问家目录失败时摆空占位,这时也**连这条输入框都不摆**(空框既没内容可编辑、也没东西可跳)。⚠️ 输入框用组件**默认尺寸**(`Size::Medium`,高 32px)且关掉清除按钮(`cleanable(false)`)⇒ 那一行是**自己的** `PATH_ROW_HEIGHT = 36px`,**不能**复用它上面面板标题栏的 `PANEL_HEADER_HEIGHT`(28px,输入框会溢出到树上)。两条容易踩的机制:**(a) 写回要推迟到下一帧**(`path_input_pending`,由 `FilesState::sync` 每帧补一次):根目录是后台异步问回来的(`home_dir`),那条回调里没有窗口、写不进输入框;⚠️ 但不能每帧无条件写,否则会把用户正在敲的内容顶掉。**(b) 跳转请求带序号**(`nav_seq`):输入框每敲一个字符就发一次 `is_dir` 查询,只有**最新**那次的回答算数,否则先发的短路径后回来会把树拽回上级目录。
 - 失败要**说清原因**:连不上 SFTP(认证被拒 / 服务端没开 sftp 子系统)时把 `SshError` 的话显示在空占位上;某个目录读不到(没权限 / 连接断了)则显示成「这个目录是空的」+ 一句原因。⚠️ 连接能在下次请求时重连(`SshFs` 内部),所以这里的错误只是**当时**的结果。
 - ⚠️⚠️ **虚拟化靠外层侧边栏的行列表,不要再嵌内层虚拟列表**。侧边栏面板(`components/sidebar.rs`)的内容区就是 gpui 的 `list(list_state)`(`size_full()`,高度确定 ⇒ 只渲染可见项 + overdraw),所以文件树是把整棵树**摊平成一行一项**(`FilesState::sidebar_items` → `FilesItem`)交给它。早先的做法是把整棵树(`gpui-kit` 的 `Tree`)塞成**一项**、并按行数给它 `.h(行数 × 28)`,于是内层 `uniform_list` 的「视口」= 那一项的高度 = 整棵树 ⇒ 它的可见区间按**自身 bounds 高度**算(`last_visible_element_ix = ceil((-scroll_offset.y + bounds.height) / item_height)`,**不看 `content_mask`**)⇒ 每帧构建 / 布局**所有**行元素,目录一大就卡,且卡顿与条目数成正比。
 - 摊平结果与行骨架走共用模块 `sidebar_panel/shared.rs`(`RowCache` 缓存 + `row_shell` / `row_content` / `ellipsis_label` / `indent`):侧边栏每帧都会来要一次行清单,不缓存就会每帧 `O(总节点数)`。
 - ⚠️ 文件树**不再自己实现 `Render`** ⇒ 它的 `cx.notify()` 落不到窗口上(`App::notify` 只失效「正在渲染该实体」的窗口),所以 `Sidebar::new` 用 `cx.observe(&files, ..)` 把变化转成侧边栏自己的重绘。
+
+##### 打开 / 上传 / 下载
+
+三个动作把这一栏从「只读目录树」变成「能用的文件管理器」。它们都建立在 §5.3 那套**传输**上 —— 浏览走一条连接,传输再开一条。
+
+- **打开**(双击文件行 / 行右键「打开」,只对文件):`FilesState::open_file` 先把远端文件下到**本地缓存**(`dirs::cache_dir()/alacrterm/preview/<序号>-<名字>`,序号是 `FilesState::cache_seq`,避免同名文件的两个窗口互相删缓存),下完**按类型分两条路**:
+  - **文本 / 图片 / 其他** ⇒ 开预览窗口(见 §3.5.1)。**先下再看**是为了让预览那一侧只认识「一个本地路径」(图片走 gpui 的图片元素,不必再为「远端」写一套解码)。⚠️ 请求里还要捎上 `SshFs` 句柄与根实体:文本在那个窗口里能改,「保存」要写回远端(`upload_one`),写完还要让本视图把所在目录重读一次(见 §3.5.1)。
+  - **音频 / 视频** ⇒ **不开窗口**,直接 `App::open_with_system`(`FileKind::handed_to_system` 判的;进程里没有解码器,见 §3.5.1)。那份副本要留给播放器读、应用不知道它什么时候读完,所以**留在缓存目录里不删**,由下次启动统一清(`clear_preview_cache`,在 `main` 里、任何窗口打开之前调一次 —— 那一刻还没有窗口在用它们,剩下的只可能是上次跑留下的;被上一轮播放器占着的文件删不掉,忽略即可)。⚠️ 这条「打开」只推一条 info 通知说明交给了系统,不像预览窗口那样自带反馈。
+  - ⚠️ 序号不能省:两个窗口看不同目录下的同名文件时,共用一份缓存会在关掉其中一个时把另一个正在用的文件删掉。
+- **上传**:两种入口,都落到 `FilesState::start_upload`(`locals` 可以是文件也可以是目录,目录递归)。
+  1. **拖放**(主入口):把本地文件 / 目录拖进侧边栏的「文件管理器」面板即上传 —— 目标目录不需要瞄,整块面板都是落点。实现在 `sidebar_panel/activity_bar.rs` 的 `files_panel`:平台层把外部拖拽翻译成内部拖拽(`FileDropEvent` → `active_drag` 里放 `ExternalPaths`,见 `gpui_pre::window`),所以只要 `.on_drop::<ExternalPaths>`。⚠️ `on_drop` 是 `InteractiveElement` 的方法,要显式 `use gpui::InteractiveElement as _`;⚠️ 它必须挂在 `context_menu` **之前**(`context_menu` 会把元素包成 `ContextMenu<E>`,那个类型上没这个方法)。
+  2. **右键菜单**:「上传文件…」/「上传文件夹…」走系统选择器(`App::prompt_for_paths`,可多选),给不习惯拖放的人。
+- **上传落到哪个目录** = `FilesState::upload_target_dir()`:**选中目录 ⇒ 它本身;选中文件 ⇒ 它的父目录;什么都没选 ⇒ 当前根目录**。
+- **下载**(行右键,文件目录都有):`download_as` 走系统对话框(文件 = **另存为** `prompt_for_new_path`,目录 = 选目标目录 `prompt_for_paths` + `fs.download` 整棵下);`download_to_download_dir` 不问直接落到 `dirs::download_dir()`。⚠️ 单个文件落到下载目录时用 `unique_path` 自动改名(`name (1).ext`),**绝不覆盖**用户已有的文件;走「另存为」时重名交给系统自己问,应用里不偷偷改名。
+- **传输行**:每条在跑的传输摊成一行(`FilesItem::Transfer`),摆在路径框下面、树上面(有东西在传时它最该被看到),显示名字 + 进度条 + 「取消」。进度数据来自 `Transfer::events`,由 `FilesState::spawn_transfer` 起的任务读:`Progress` 推进那一行,`Done` 收尾(收掉行 → 预览窗口 or 通知 → 重读受影响的目录);⚠️ 通道在 `Done` 之前断掉 = worker 线程没了,`on_transfer_lost` 也要收掉那一行并报错,否则它会永远挂在界面上。⚠️ 取消是「**先收掉行再置位**」:行没了之后 `on_transfer_done` 会早退,所以取消不会弹「传输失败」。
+- ⚠️ 换会话(`FilesState::sync`)会清掉传输行,但在途的传输**不会**停(它们活在 worker 那条连接上)。这是有意的取舍:会话已经换了,行留着也没处显示。
 
 ### 3.3 标签页模型(`TabPane` / `SessionRequest`)
 
@@ -360,6 +380,28 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 四个数字字段(字号 / 字重 / 行高倍数 / 最小对比度)直接用 gpui-kit 内置的 `SettingField::number_input`(`min` / `max` / `step` 各写一次,包一层 `render_item`);取值走 `config::as_number(…)`、设值走 `update_render`,每敲一键即时生效。没有 `number_item` 之类的包装函数。
 
 ⚠️ **必须用 git main 的 gpui-kit**:crates.io 的 `0.6.0` 里 `NumberField` 的 `step` 不生效(点一次只 ±1)。`Cargo.toml` 指向 git main,由 `Cargo.lock` 锁定。
+
+### 3.5.1 文件预览窗口(`preview_window.rs`)
+
+> 「文件管理器」里打开一个远端文件时,先把它下到本地缓存,再开这个窗口(见 §3.2「打开 / 上传 / 下载」)。
+
+**为什么是独立窗口,而不是 dock 里的一页**:预览正文(文本编辑器 / 图片)与终端是两种东西。塞进 dock 就得把 `TabPane` 从「一堆终端」泛化成「一堆视图」,而终端那条线上每个假设(`focused_view().read(cx).remote_fs()`、标签名取自终端标题、格子布局与焦点…)都得跟着改。独立窗口对现有代码**零改动**,而且大图 / 长文本本来就该有一块自己的地方。开窗模式与 §3.5 的设置窗口完全一样(`WindowKind::Normal` + 自绘 `TitleBar` + 外层包 gpui-kit `Root` + 主窗口关闭即 `quit`)。
+
+- **载荷**是 `PreviewRequest { name, remote_path, local_path, size, fs, app_root }` —— 正文只看**本地路径**(下载由文件管理器负责);另外两件是**文本保存**用的:远端句柄(`fs`,写回 `remote_path`)与根实体(`app_root`,写回成功后让文件管理器重读所在目录)。
+- **按扩展名分派**(`FileKind::of`):文本 / 图片 / 音频 / 视频 / 其他。⚠️ 图片那一类**直接用** `gpui::Img::extensions()` 的清单,免得这里的分类和 gpui 真正支持的解码器悄悄走散。⚠️ **这个窗口只接文本 / 图片 / 其他**:音频与视频由文件管理器下完缓存**直接交给系统默认程序**(见 §3.2「打开 / 上传 / 下载」),`FileKind::handed_to_system` 就是那条分岔的判据(分类清单只此一份,所以判定留在 `FileKind` 上)。
+- **文本是一个简易编辑器**(`Editor` + `EditorState`):行号 + 语法高亮 + 可改,**不是只读**。语言按**扩展名**认(见下面的 `Language`),认不出来当纯文本(`text` 模式:照样有行号 / 选中复制,只是不染色)。⚠️ 超过 `MAX_TEXT_BYTES`(8 MiB)或不是 UTF-8 就**不加载**,改成「用系统默认程序打开」的提示 —— 编辑器的解析 / 布局是全量的,几十 MB 的日志挂上去就动不了了。建好编辑器顺手把焦点给它(打开就能直接敲,Ctrl+S 才有人接)。
+- **语言表**(`Language`,与 `Cargo.toml` 的 `tree-sitter-*` feature **成对**):`sh/bash/zsh` → bash、`py/pyi` → python、`json/jsonc` → json、`yaml/yml` → yaml、`toml` → toml、`rs` → rust、`js/jsx/mjs` → javascript、`ts/mts` → typescript、`tsx` → tsx、`c/h` → c、`cc/cpp/hpp/…` → cpp、`md/markdown` → markdown;其余(含 `.txt` / `.log` / `.csv` / `Makefile`)→ `text`。⚠️ 每种语言都要在 `crates/alacrterm/Cargo.toml` 里开对应的 feature(gpui-kit 把每个语法编译成一个 feature):**没开不会报错**,只是注册表里没有那棵树、编辑器把它当普通文本画 —— 所以 `every_language_with_a_grammar_is_registered` 那条单测盯着两者别走散。⚠️ 不开 `tree-sitter-languages`(全开)是刻意的:三十多个 grammar crate 会把构建时间拉长,这里只挑常用那几种。
+- **底部状态栏**(`PreviewWindow::render_status_bar`,用 gpui-kit 的 `StatusBar`,与主窗口那条同一个组件 / 同一个高度):左边是**远端路径**(长了省略),右边依次是**语言**(`Language::label`,如 `Unix Shell Script`)/ **编码**(`UTF-8`,文件有 BOM 就 `UTF-8 with BOM`)/ **`Row: n | Col: n | Pos: n`** / **`n lines | n chars`**。⚠️ 后两组的数是**每帧现读**编辑器状态的(`caret` / `counts`,行 / 列 / 位置都从 **1** 起、列与位置按**字符**算):光标一动编辑器就会 `cx.notify()` ⇒ `show_text` 里除了订阅改动事件,还 `cx.observe(&editor, ..)` 借那次通知让本窗口重绘。⚠️ BOM **留在文本里**不做剥离(编辑器当它一个零宽字符)⇒ 存回远端时一模一样。⚠️ 上图那种「远端主机 / 远端系统」两栏没有数据源(`SshFs` 不透出参数),没做。
+- **文本保存**(`PreviewWindow::save`):Ctrl+S / 工具条那枚「保存」把编辑器里的内容写回**远端那个路径**。一条链:**抓快照**(`EditorState::value()`)→ 落本地缓存那份(编辑器只活在内存里,`std::fs::write` 走后台执行器)→ `SshFs::upload_one` 交给传输 worker(**不占浏览那条连接**,见 §5.3)。三条容易踩的:
+  - **版本号账本**(`Revisions { current, saved }`):`current` 每改一笔 +1,写回成功后把 `saved` 记成**开写时那份快照**的版本号(不是 `current`)⇒ 写回路上用户接着改,「已写回」不会盖住那笔新改动(脏标记该亮还亮,`editing_while_a_write_back_is_in_flight_keeps_the_dirty_mark` 那条单测钉的就是这个);
+  - **写回期间不许关窗口**(`on_window_should_close` 见下):`Transfer` 的接收端一丢,worker 就把这次写回当取消 ⇒ 远端可能留下**半截文件**(`create` 是 CREATE|TRUNCATE|WRITE)。所以正在写回时点 X 只弹一句「写完才能关」;
+  - **失败不静默**:工具条那行小字变红 + 这个窗口推一条 error 通知,编辑器内容仍在(脏标记也不清)。
+- **关窗口前的确认**(`PreviewWindow::should_close`):窗口在 `new` 里挂 `Window::on_window_should_close`。没改动 ⇒ 放行;正在写回 ⇒ 挡一下(理由见上);有没写回的改动 ⇒ 弹「保存 / 丢弃 / 取消」并**返回 `false` 挡下这一次关闭**。⚠️ `Dialog` 的 ok / cancel 只有两个通道,分不出三个选择 ⇒ 三个按钮各自 `on_click` 收尾(自己 `window.close_dialog` / `remove_window`),`escape`、点遮罩仍走 `on_cancel` = 取消。选「保存」= 置 `close_after_save` 再走同一条写回,写回成功后才由 `finish_save` 收掉窗口;写回失败就不关了(错误摆在那儿,用户自己决定)。⚠️ `Window::remove_window()` 绕过 `on_window_should_close`,所以「丢弃」那条不用再抬一个标志位。
+- **文件管理器跟着刷新**:写回成功后 `refresh_parent_dir` 取 `remote_path` 的父目录,`AppRoot::reload_files_dir` → `FilesState::reload_dir` 把树里那一层重读一次(文件大小会对上)。⚠️ 预览窗口的写回**不进**侧边栏那份「传输」列表(它在自己的窗口里报进度),所以这条刷新得自己来。
+- **图片**:`img(local_path)` + `ObjectFit::ScaleDown`(等比缩到装得下,**小图不放大**;`Contain` 会把 16×16 的图标拉成满屏)。
+- **其他类型**(含音频 / 视频,虽然它们不到这个窗口):只摆「这个类型没有内嵌预览」+ 工具条那两枚动作(「复制远端路径」与「用系统程序打开」)。进程里没有任何音视频解码器(gpui-pre 只做图片),内嵌播放要么用 Windows Media Foundation 自己写一层 unsafe 的 COM,要么引来 ffmpeg —— 所以音频 / 视频干脆不在这儿,由文件管理器直接开系统程序(见 §3.2)。
+- ⚠️ **缓存文件在窗口 `Drop` 时删掉**:它是「打开」时临时下的那份,不是工作副本。改过的内容靠「保存」写回远端;关窗口那一下会先确认(见上),所以走到 `Drop` 的要么已经写回、要么是用户明确选了「丢弃」。⚠️ 交给系统程序的那份**不由窗口管**(没有窗口),留到下次启动统一清(见 §3.2)。
+- ⚠️ 一个文件一个窗口(不复用):「同一个远端路径」不代表内容没变,复用会让用户以为看的是刚下的那份。⚠️ 同一路径开两个窗口时**两边都改**是没定义的:后保存的那次覆盖先保存的(gpui 侧不做文件锁)。
 
 ### 3.6 状态栏(`status_bar.rs`)
 
@@ -518,6 +560,12 @@ config/keymap.json                                  # 可选用户文件(候选�
 | `Shift+Up` / `Shift+Down` | 上 / 下滚一行 |
 | `Ctrl+Shift+Space` | `ToggleViMode` |
 
+`Preview` 那节(只在预览窗口聚焦时,见 §3.5.1):
+
+| 键位 | 动作 |
+| --- | --- |
+| `Ctrl+S` | `SavePreviewFile` 把改过的文本写回远端(macOS 是 `Cmd+S`) |
+
 ⚠️ `Ctrl+C` 保持**不绑定**(留给 SIGINT);「有选区才复制」需要拿到原始 keystroke,而 action 处理器拿不到 ⇒ 复制用 `Ctrl+Shift+C`。
 
 #### key context
@@ -525,6 +573,7 @@ config/keymap.json                                  # 可选用户文件(候选�
 | context | 打在哪 | 谁用 |
 | --- | --- | --- |
 | `Terminal` | `TerminalView::render` 根 div(`terminal_view/lib.rs::TERMINAL_KEY_CONTEXT`) | 默认 keymap:压掉 Tab、复制粘贴、滚动、vi 模式 |
+| `Preview` | `preview_window.rs` 的窗口根节点(`keymap::PREVIEW_CONTEXT`) | 默认 keymap:`Ctrl+S` 写回远端 |
 | `Dock` | `tab_bar.rs` 标签栏根节点(`keymap::DOCK_CONTEXT`) | 留给用户(默认表未用) |
 | `Sidebar` | `components::ActivityBar` 整列根节点(`keymap::SIDEBAR_CONTEXT`) | 留给用户(默认表未用) |
 | `Dialog` | gpui-kit 的 `Dialog`(只有 `keyboard` 打开时) | gpui-kit(`escape`/`enter`)+ 默认表的 `!Dialog` |
@@ -546,6 +595,9 @@ config/keymap.json                                  # 可选用户文件(候选�
 - ⚠️ **动作处理器拿不到原始 keystroke**:滚动键在 `ALT_SCREEN`(vim 等全屏 TUI)里要原样转发给 PTY,
   但 `Action` 里没有按键信息 ⇒ `TerminalView::scroll_action` 自己造 CSI 序列
   (`shift-pageup` = `CSI 5 ~` 等)
+- ⚠️ `SavePreviewFile` 是**唯一不走 `AppRoot` 的动作**:预览窗口是窗口级的(一个文件一个窗口),
+  全局监听器拿不到「是哪个窗口」⇒ 由 `PreviewWindow::render` 的 `.on_action(..)` 自己接
+  (打在同一个根节点的 `Preview` key context 上,见 §3.5.1)
 - 字号动作(`IncreaseFontSize` / `DecreaseFontSize` / `ResetFontSize`)复用设置窗口那条路径
   (§3.5 的三步):`settings_window::update_render`
 - `SearchTerminal` 只是**注册了动作占位**(处理器打一行提示),默认 keymap 里没有绑定 —— 终端内查找的 UI 还没做
@@ -782,11 +834,20 @@ graph LR
 
 ### 5.3 远端文件系统(`crates/ssh/src/fs.rs`)
 
-- **另开一条连接走 sftp 子系统**(不复用终端那条):russh 开新通道要 `&mut Handle`,而终端那条连接一直在自己的线程里 `select!` 搬字节 —— 塞进去要么让列目录卡住键盘输入,要么加一层互斥与任务调度。代价是多一次认证(密码在加密信道里再送一遍),所以连接是**懒的**:第一次真正列目录时才建。
-- 线程模型与 `session.rs` 同一套(自带 OS 线程 + current-thread 运行时 + `tokio::mpsc` 请求 / `futures::oneshot` 应答);发送失败(线程已退出)会**清掉句柄重试一次**。
-- API:`home_dir()`(远端家目录)/ `list_dir(path)`(一层,排序 = 目录在前、名字不区分大小写)/ `is_dir(path)`;错误统一翻成一句中文(`远端没有这个路径` / `拒绝访问` / `响应超时` / …)。
-- ⚠️ **状态错误不丢连接**(没有这个路径 / 没权限只是那一条路径的事),只有 IO / 超时 / 协议错误才丢连接让下次重连。
+- **另开一条连接走 sftp 子系统**(不复用终端那条):russh 开新通道要 `&mut Handle`,而终端那条连接一直在自己的线程里 `select!` 搬字节 —— 塞进去要么让列目录卡住键盘输入,要么加一层互斥与任务调度。代价是多一次认证(密码在加密信道里再送一遍),所以连接是**懒的**:第一次真正要列目录时才建。
+- **两条 worker,两个用途**:浏览(家目录 / 列目录 / 元数据)一条,**传输(上传 / 下载)另一条**。理由:传一个 2 GiB 的文件要跑几分钟,而浏览必须一直是即时的 —— 塞进同一个 worker 就等于「传输期间展开任何目录都要等它传完」。两条各自懒建,所以只用文件管理器、不传文件时只有一条连接。
+  - 传输 worker **一次只跑一个传输**(天然排队,不至于把链路打满)。
+  - ⚠️ **取消是共享的原子标志(`CancelToken`),不是一条消息**:worker 跑起来就占住了自己那条通道,用消息取消恰恰在「最需要取消」的时候送不进去。置位后 worker 在**下一个分块边界**放弃(不会中断一次进行中的往返)。
+  - ⚠️ 宿主把 `Transfer::events` 丢掉 = 取消(worker 发现没人要结果就停),所以窗口 / 行被关掉时不必专门清理。
+- 线程模型与 `session.rs` 同一套(自带 OS 线程 + current-thread 运行时);跨边界只用**执行器无关**的通道:浏览走 `tokio::mpsc`(请求)+ `futures::oneshot`(应答),传输走 `futures::mpsc`(请求 + 进度 / 结果 —— 结果不再单开一条 oneshot,`Done` 就是通道里的最后一个事件)。发送失败(线程已退出)会**清掉句柄重试一次**。
+- API:浏览 `home_dir()`(远端家目录)/ `list_dir(path)`(一层,排序 = 目录在前、名字不区分大小写)/ `is_dir(path)` / `stat(path)`;传输 `upload(locals, remote_dir)` / `download(remotes, local_dir)` / `download_one(remote, local_file)` / `upload_one(local_file, remote_file)`。错误统一翻成一句中文(`远端没有这个路径` / `拒绝访问` / `响应超时` / `传输已取消` / …)。
+- ⚠️ `upload_one` 与 `upload` 的区别是**不改名、不拼目录**:远端路径由调用方给全,同名远端文件被**覆盖 / 截断**(`create` = CREATE|TRUNCATE|WRITE)。它是 `download_one` 的反向,给预览窗口的「保存」用(见 §3.5.1)——那条路必须写回**打开时那个路径**。
+- **`RemoteEntry` 带 `size`**:界面靠它显示大小 / 传给预览窗口;目录那点大小(4096 之类)没有意义,在 `list_dir` 里直接归零。
+- **传输的实现**:先把清单摊平(目录递归,**父目录排在子目录前面**)再开传 ⇒ 进度条一开始就知道总数 / 总字节数,文件名也显示得出来。文件用 `SftpSession::open` / `create` + 64 KiB 分块搬。⚠️ 写完必须 `File::close()`:它才会把在途的写等回来并发 `CLOSE`,只靠 `Drop` 不等在途写,远端那份可能是残的。⚠️ 进度**按字节累积到 256 KiB 才上报一次**(一个 1 GiB 的文件有 16384 个分块,比屏幕刷新还密就没有意义了)。
+- ⚠️ **状态错误不丢连接**(没有这个路径 / 没权限只是那一条路径的事),只有 IO / 超时 / 协议错误才丢连接让下次重连。⚠️ 传输那侧的读写接口返回的是 `io::Error`,要用 `get_ref().downcast_ref::<SftpError>()` 把原错误取回来才分得出这两类(`File` 内部是 `io::Error::new` 裹着 SftpError);写失败那一路只带一句服务端的文本,取不回来就按「连接不可靠」处理。
+- ⚠️ 上传目录时**指向目录的符号链接不递归**(指回上层目录的链接会让遍历转不出来),只记一条 debug 日志。
 - ⚠️ 未知主机 + 这条连接**没有确认通道** ⇒ 直接失败并提示「请先打开这台主机的终端会话,在那里信任它的主机密钥」(不能干等)。
+- ⚠️ 要加新的远端写操作(删除 / 重命名 / 新建文件夹)请沿用同一套「传输请求 + 事件通道」的形状,不要往浏览那条请求 / 应答上挂长任务。
 
 ---
 
@@ -894,7 +955,7 @@ cargo test -p alacrterm       # 单元测试(格式化等纯函数)
 cargo check --workspace       # 编译检查
 cargo build -p alacrterm      # 构建
 
-# 内建 SSH 客户端(本地假服务端,含只读 sftp 子系统)
+# 内建 SSH 客户端(本地假服务端,含可读写的 sftp 子系统;本地服务端也能用来验收上传 / 下载)
 cargo test -p ssh --test roundtrip
 # 手工验收:起假服务端(用户 tester / 密码 alacrterm-test),再在界面里建一条指向 127.0.0.1:2299 的会话
 cargo run -p ssh --example local_server -- 2299

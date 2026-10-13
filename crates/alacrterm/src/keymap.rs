@@ -35,6 +35,9 @@ pub(crate) const DOCK_CONTEXT: &str = "Dock";
 /// 「侧边栏」的 key context（打在 `components::ActivityBar` 的整列根节点上）。
 pub(crate) const SIDEBAR_CONTEXT: &str = "Sidebar";
 
+/// 「预览窗口」的 key context（打在 `preview_window` 的窗口根节点上）。
+pub(crate) const PREVIEW_CONTEXT: &str = "Preview";
+
 /// 当前平台的默认 keymap 资产路径。
 fn default_keymap_asset() -> &'static str {
     if cfg!(target_os = "macos") {

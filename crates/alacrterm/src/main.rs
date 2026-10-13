@@ -8,8 +8,10 @@ mod config;
 #[cfg(windows)]
 mod conpty_backend;
 mod dialog;
+mod format;
 mod keymap;
 mod pane_layout;
+mod preview_window;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
@@ -26,9 +28,10 @@ use gpui::{
 use gpui_kit::{
     QuitMode,
     component::{
-        ActiveTheme as _, Root, ThemeMode, TitleBar,
+        ActiveTheme as _, Root, ThemeMode, TitleBar, WindowExt as _,
         dock::{DockArea, DockEvent, TabGroup},
         h_flex,
+        notification::Notification,
         resizable::{h_resizable, resizable_panel},
         v_flex,
     },
@@ -52,6 +55,9 @@ fn main() {
             config::load_themes(cx);
             config::apply_saved_themes(cx);
             config::change_theme(ThemeMode::Dark, cx);
+            // 上一次跑剩下的预览缓存(交给系统程序打开的那些副本)现在没人用了,清掉。
+            // ⚠️ 必须在任何窗口打开之前。
+            sidebar_panel::files::clear_preview_cache();
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(
@@ -116,7 +122,8 @@ impl AppRoot {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock = Self::build_dock(window, cx);
         let sessions = cx.new(|_| SessionsState::new());
-        let files = cx.new(|cx| FilesState::new(window, cx));
+        let app_root = cx.weak_entity();
+        let files = cx.new(|cx| FilesState::new(window, app_root, cx));
         let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
 
         let mut this = Self {
@@ -176,6 +183,26 @@ impl AppRoot {
             let _ = root.update_in(cx, |this, window, cx| action(this, window, cx));
         })
         .detach();
+    }
+
+    /// 往主窗口推一条通知。
+    ///
+    /// 给「没有窗口句柄」的地方用(比如文件管理器的传输任务回调)。没有活动窗口 = 应用在
+    /// 收尾,直接丢掉。
+    pub(crate) fn notify(&self, note: Notification, cx: &mut App) {
+        let Some(window) = cx.active_window() else {
+            log::debug!("没有活动窗口,通知被丢掉");
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| window.push_notification(note, cx));
+    }
+
+    /// 让「文件管理器」把某个远端目录重读一次。
+    ///
+    /// 给预览窗口用:它把改过的文本写回远端之后,树里那份目录项(大小)就旧了(见
+    /// [`crate::preview_window::PreviewWindow::refresh_parent_dir`])。
+    pub(crate) fn reload_files_dir(&mut self, dir: &str, cx: &mut Context<Self>) {
+        self.files.update(cx, |files, cx| files.reload_dir(dir, cx));
     }
 }
 
