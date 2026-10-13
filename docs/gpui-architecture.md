@@ -266,7 +266,7 @@ flowchart TD
 | key context / `NoAction` | `assets/keymaps/default-*.json`（`Terminal` context 压掉 Tab 等；应用级那节用 `!Dialog`） | 动作优先于 key listener ⇒ 绑了就不进 PTY |
 | `occlude()` | 标题栏右端的侧边栏开关 | 否则被拖拽区吞点击 |
 | `h_flex()` / `flex()` | 侧边栏、状态栏、标签栏 | 只写 `flex_row()` 会让居中失效 |
-| gpui-kit dock | `DockArea` + `SessionPane` + 自绘标签栏 | `PanelStyle::TabBar`、`panel_handle`、`set_locked` 的语义 |
+| gpui-kit dock | `DockArea` + `TabPane`(页内分屏在 `pane_layout.rs`) + 自绘标签栏 | `PanelStyle::TabBar`、`panel_handle`、`set_locked` 的语义 |
 
 ## 12. 源码索引（本文引用到的关键位置）
 

@@ -9,6 +9,7 @@ mod config;
 mod conpty_backend;
 mod dialog;
 mod keymap;
+mod pane_layout;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
@@ -36,7 +37,7 @@ use sidebar_panel::files::FilesState;
 use sidebar_panel::sessions::SessionsState;
 use sidebar_panel::Sidebar;
 use tab_bar::TerminalDockSkin;
-use terminal_panel::Session;
+use terminal_panel::TabPane;
 
 fn main() {
     #[cfg(windows)]
@@ -73,9 +74,9 @@ fn main() {
 
 /// 应用根视图（只存共享状态）。
 struct AppRoot {
-    /// 所有终端会话。
-    terminals: Vec<Session>,
-    /// 当前会话下标。
+    /// 所有标签页（每页内部自己分屏）。
+    tabs: Vec<Entity<TabPane>>,
+    /// 当前标签页下标。
     active: usize,
     /// 侧边栏。
     sidebar: Entity<Sidebar>,
@@ -104,9 +105,9 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let terminal_focused = self
-            .terminals
+            .tabs
             .iter()
-            .any(|session| session.view.read(cx).is_focused(window));
+            .any(|tab| tab.read(cx).is_focused(window, cx));
         if terminal_focused {
             window.focus(&self.background_focus, cx);
         }
@@ -119,7 +120,7 @@ impl AppRoot {
         let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
 
         let mut this = Self {
-            terminals: Vec::new(),
+            tabs: Vec::new(),
             active: 0,
             sidebar,
             sessions,
@@ -135,7 +136,7 @@ impl AppRoot {
             window,
             |root, _, event, _window, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
-                    root.sync_sessions_with_dock(cx);
+                    root.sync_tabs_with_dock(cx);
                 }
             },
         ));
@@ -157,7 +158,7 @@ impl AppRoot {
         dock
     }
 
-    /// 记下下一个新建会话该进的标签组。
+    /// 记下下一个新建标签页该进的标签组。
     pub(crate) fn set_pending_session_group(&mut self, group: Option<WeakEntity<TabGroup>>) {
         self.pending_session_group = group;
     }
@@ -182,23 +183,30 @@ impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 主体：侧边栏 | 中间列。
 
-        // 「当前会话」以键盘焦点为准。
+        // 「当前标签页」以键盘焦点为准。
         if let Some(index) = self
-            .terminals
+            .tabs
             .iter()
-            .position(|session| session.view.read(cx).is_focused(window))
+            .position(|tab| tab.read(cx).is_focused(window, cx))
         {
             self.active = index;
         }
 
+        // 窗口标题跟「当前标签页」走：一页可能同时渲染好几格终端，不能让它们各自去抢。
+        let title = match self.tabs.get(self.active) {
+            Some(tab) => tab.read(cx).name(cx).to_string(),
+            None => "Alacrterm".to_string(),
+        };
+        window.set_window_title(&title);
+
         // 「文件管理器」只服务远端会话。
-        let active = self.terminals.get(self.active);
-        let remote = active.is_some_and(|session| session.is_remote(cx));
-        // 当前会话的 SFTP 句柄；未连上返回 `None`。
+        let active = self.tabs.get(self.active);
+        let remote = active.is_some_and(|tab| tab.read(cx).is_remote());
+        // 当前标签页的 SFTP 句柄；未连上返回 `None`。
         let fs = if remote {
             active
-                .filter(|session| session.view.read(cx).is_connected(cx))
-                .and_then(|session| session.view.read(cx).remote_fs(cx))
+                .filter(|tab| tab.read(cx).is_connected(cx))
+                .and_then(|tab| tab.read(cx).remote_fs(cx))
         } else {
             None
         };
@@ -212,7 +220,7 @@ impl Render for AppRoot {
             .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
 
         // 中间列：终端区（dock 或欢迎页）。
-        let terminal_area = if self.terminals.is_empty() {
+        let terminal_area = if self.tabs.is_empty() {
             self.render_welcome(cx)
         } else {
             self.dock.clone().into_any_element()

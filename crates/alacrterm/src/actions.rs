@@ -8,13 +8,13 @@
 //! - 带数据的 action 手写并派生 `Deserialize` + `JsonSchema`，且**不能**加 `no_json`
 //!   （加了 `build` 恒失败），keymap 里写成 `["名字", 参数]`。
 
-use gpui::{Action, App, WeakEntity, actions, px};
-use gpui_kit::base::Placement;
+use gpui::{Action, App, Axis, WeakEntity, actions, px};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use terminal_view::RenderSettings;
 
 use crate::AppRoot;
+use crate::pane_layout::Dir;
 use crate::sidebar_panel::SidebarView;
 use crate::sidebar_panel::sessions::SessionPath;
 
@@ -29,10 +29,13 @@ actions!(
         NextSession,
         PrevSession,
         NewSessionDialog,
-        // 布局
+        // 布局（标签页内部署分屏）
         SplitSessionRight,
         SplitSessionDown,
-        ToggleZoom,
+        FocusPaneLeft,
+        FocusPaneRight,
+        FocusPaneUp,
+        FocusPaneDown,
         // 侧边栏
         ToggleSidebar,
         ShowSessionsView,
@@ -202,21 +205,42 @@ impl AppRoot {
         let split_right_root = root.clone();
         cx.on_action(move |_: &SplitSessionRight, cx: &mut App| {
             Self::defer_after_update(split_right_root.clone(), cx, |this, window, cx| {
-                this.split_active_session(Placement::Right, window, cx)
+                this.split_active_session(Axis::Horizontal, window, cx)
             });
         });
 
         let split_down_root = root.clone();
         cx.on_action(move |_: &SplitSessionDown, cx: &mut App| {
             Self::defer_after_update(split_down_root.clone(), cx, |this, window, cx| {
-                this.split_active_session(Placement::Bottom, window, cx)
+                this.split_active_session(Axis::Vertical, window, cx)
             });
         });
 
-        let zoom_root = root.clone();
-        cx.on_action(move |_: &ToggleZoom, cx: &mut App| {
-            Self::defer_after_update(zoom_root.clone(), cx, |this, window, cx| {
-                this.toggle_zoom(window, cx)
+        let focus_left_root = root.clone();
+        cx.on_action(move |_: &FocusPaneLeft, cx: &mut App| {
+            Self::defer_after_update(focus_left_root.clone(), cx, |this, window, cx| {
+                this.focus_pane(Dir::Left, window, cx)
+            });
+        });
+
+        let focus_right_root = root.clone();
+        cx.on_action(move |_: &FocusPaneRight, cx: &mut App| {
+            Self::defer_after_update(focus_right_root.clone(), cx, |this, window, cx| {
+                this.focus_pane(Dir::Right, window, cx)
+            });
+        });
+
+        let focus_up_root = root.clone();
+        cx.on_action(move |_: &FocusPaneUp, cx: &mut App| {
+            Self::defer_after_update(focus_up_root.clone(), cx, |this, window, cx| {
+                this.focus_pane(Dir::Up, window, cx)
+            });
+        });
+
+        let focus_down_root = root.clone();
+        cx.on_action(move |_: &FocusPaneDown, cx: &mut App| {
+            Self::defer_after_update(focus_down_root.clone(), cx, |this, window, cx| {
+                this.focus_pane(Dir::Down, window, cx)
             });
         });
 

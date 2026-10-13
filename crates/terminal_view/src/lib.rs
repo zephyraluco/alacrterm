@@ -532,13 +532,13 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        window.set_window_title(&self.title);
-
         let focused = self.focus_handle.is_focused(window);
         let cursor_visible = self.should_show_cursor(focused, cx);
 
         let mut root = div()
-            .id("terminal-view")
+            // 一页里可能同时有好几格终端，id 必须逐台区分
+            // （`TerminalElement` 自己不贡献 element id）。
+            .id(("terminal-view", cx.entity_id()))
             .size_full()
             .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)

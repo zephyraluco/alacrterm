@@ -45,7 +45,7 @@ graph TB
         SBAR[status_bar.rs<br/>底部状态栏(空条)]
         SIDE[sidebar_panel/<br/>最左整列:图标栏 + 侧边栏]
         COMP[components/<br/>活动栏 / 侧边栏(自绘)]
-        TPANEL[terminal_panel.rs<br/>会话生命周期 + SessionPane]
+        TPANEL[terminal_panel.rs<br/>标签页生命周期 + TabPane 分屏]
         TABBAR[tab_bar.rs<br/>自绘标签栏]
         DIALOG[dialog/<br/>新建会话 / 新建文件夹 / 主机密钥]
         SETWIN[settings_window.rs]
@@ -116,7 +116,7 @@ crates/
   alacrterm/                    # 应用层(§3)
     src/
       main.rs                   # 入口 + AppRoot(根视图:跨组件共享状态 + 布局装配)
-      terminal_panel.rs         # 会话生命周期 + SessionRequest + Session + SessionPane
+      terminal_panel.rs         # 标签页生命周期 + SessionRequest + TabPane(dock 面板)
       tab_bar.rs                # 自绘标签栏
       status_bar.rs             # 整窗底部的状态栏(空条);STATUS_BAR_HEIGHT
       sidebar_panel/            # 最左整列:图标栏 + 侧边栏(§3.2)
@@ -211,9 +211,9 @@ fn main() {
 
 `AppRoot::render` 只负责装配:`h_resizable("main-split")[最左整列, 中间列]` —— 第 0 个面板就是**最左整列**(48px 图标栏 + 侧边栏面板,面板宽 = 二者之和,`SIDEBAR_PANEL_INDEX`);**折叠时整列只剩那 48px 图标栏**,没有可拖的缝,这时不摆分栏组,直接 `h_flex[图标栏, 中间列]`(图标栏因此**始终在**);容器渲染方法统一返回 `AnyElement`(edition 2024 下 `impl Trait` 会捕获 `&mut Context` 生命周期,同一渲染树里连续 `&mut cx` 会借用冲突)。
 
-**状态与渲染都归子组件**:最左整列 = 一个实体(`Entity<Sidebar>`,全应用一个,见 `sidebar_panel/mod.rs`),它自带当前视图 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 48px 图标栏 + 侧边栏面板,面板一直铺到窗口底部那条状态栏的上沿);根视图只把它 `.child(..)` 摆进第 0 个分栏面板。两个视图是两个实体:「会话」`Entity<SessionsState>` 与文件管理器 `Entity<FilesState>` —— 两者都**不实现 `Render`**:各自把「要摆哪些行」摊成**一行一项**(`SessionsItem` / `FilesItem`)交给侧边栏面板的行列表(它才按可见区间懒渲染);同一时刻只摆其中一个(另一个仍活着、状态不丢)。`AppRoot` 只剩跨组件的共享状态(终端表 `terminals` / `active` / `dock` / 设置窗口句柄 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
+**状态与渲染都归子组件**:最左整列 = 一个实体(`Entity<Sidebar>`,全应用一个,见 `sidebar_panel/mod.rs`),它自带当前视图 / 折叠 / 期望宽度 / 那一组 `ResizableState`,并**自己实现 `Render`**(整列 = 48px 图标栏 + 侧边栏面板,面板一直铺到窗口底部那条状态栏的上沿);根视图只把它 `.child(..)` 摆进第 0 个分栏面板。两个视图是两个实体:「会话」`Entity<SessionsState>` 与文件管理器 `Entity<FilesState>` —— 两者都**不实现 `Render`**:各自把「要摆哪些行」摊成**一行一项**(`SessionsItem` / `FilesItem`)交给侧边栏面板的行列表(它才按可见区间懒渲染);同一时刻只摆其中一个(另一个仍活着、状态不丢)。`AppRoot` 只剩跨组件的共享状态(标签表 `tabs` / `active` / `dock` / 设置窗口句柄 / 背景焦点)。⚠️ `Entity::read(cx)` 会把 `cx` 借到返回值活着的整段时间,所以「既要读状态又要 `cx.listener`」的地方先把它拷成小值(`Pixels` / `Entity` 句柄 / `.downgrade()`)。⚠️ 整棵树还没上 `.cached()`,每帧重建(见 `docs/gpui-architecture.md` §10)。
 
-- **最左整列**(`sidebar_panel` + `components`):**图标栏在左(48px)、侧边栏面板在右** —— 侧边栏是活动栏的一个成员(`ActivityBar::sidebar`),两块都由 `components/` 里自有的组件画(见下一条)。整列的装配在 `sidebar_panel/activity_bar.rs` 的 `left_column`:每个可用视图一枚 `ActivityBarItem`(图标 24px,由「名义尺寸 32px × 0.75」得出)、底部一枚「设置」(贴底,派发全局 `OpenSettings`),折叠时**一枚都不亮**且不挂侧边栏面板。点某一枚 = 让侧边栏显示这个视图,再点**正在显示**的那枚 = 折叠侧边栏(`Sidebar::toggle_view`),照 VS Code 折叠不另设开关。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,同一时刻只摆一个;⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按**键盘焦点所在**的会话是不是远端调 `Sidebar::set_files_enabled`(见 §3.3「当前会话」那条),为假时该视图的**图标与内容一起不摆**(当前选中的视图不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
+- **最左整列**(`sidebar_panel` + `components`):**图标栏在左(48px)、侧边栏面板在右** —— 侧边栏是活动栏的一个成员(`ActivityBar::sidebar`),两块都由 `components/` 里自有的组件画(见下一条)。整列的装配在 `sidebar_panel/activity_bar.rs` 的 `left_column`:每个可用视图一枚 `ActivityBarItem`(图标 24px,由「名义尺寸 32px × 0.75」得出)、底部一枚「设置」(贴底,派发全局 `OpenSettings`),折叠时**一枚都不亮**且不挂侧边栏面板。点某一枚 = 让侧边栏显示这个视图,再点**正在显示**的那枚 = 折叠侧边栏(`Sidebar::toggle_view`),照 VS Code 折叠不另设开关。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,同一时刻只摆一个;⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按**键盘焦点所在**的那一格终端是不是远端调 `Sidebar::set_files_enabled`(见 §3.3「当前标签页」那条),为假时该视图的**图标与内容一起不摆**(当前选中的视图不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
 - **活动栏**(`components/activitybar.rs` 的 `ActivityBar` / `ActivityBarItem`):一列 48px 见方的图标按钮,顶部一组、底部一组贴着列沿,列底色取 `title_bar`(与标题栏同色),**右缘一条 `sidebar_border` 竖线**(与侧边栏面板 / 中间列的分界)。⚠️ 结构用 gpui-kit **base** 的 `h_flex` / `v_flex` / `div` + gpui `Styled` 搭,只有两件 base 没有的小东西复用 `component`:图标用 `Icon`(尺寸要显式给,`svg()` 不吃父元素颜色)、悬停提示用按钮自带的 `.tooltip()`(base 的 tooltip 只给弹层内容、触发器要自己接线)。每枚活动项:图标**一律同色**(不按选中 / 未选中压暗或提亮),当前项只靠一条 2px 左端指示条(`primary`)区分;悬停 / 按下有底色(`secondary_hover` / `secondary_active`)。
 - **侧边栏面板**(`components/sidebar.rs` 的 `Sidebar` / `SidebarRow`):自绘的侧边栏外壳 —— 顶部固定标题栏 + 下方可滚动的行列表。外观照 `component::sidebar`(底色 `tokens.sidebar`、`sidebar_border` 画在右侧、标题栏 `pt_3` + `px_3`、内容 `px_3` + `gap_y_3`、列表首尾各留呼吸空间),实现**优先用 base**:`v_flex` / `div` + gpui 的 `list`(`ListState`,按可见区间要行)+ base 的 `Scrollbar`(`ListState` 自己就实现了 base 的 `ScrollbarHandle`),不依赖 `component::Sidebar`。⚠️ 行会被列表反复取用 ⇒ 行类型要实现 `SidebarRow`(`Clone` + `render(&mut App)`);本应用的行类型是 `SidebarContent`(`SessionsItem` / `FilesItem` 两个枚举)。⚠️ 标题行必须显式 `.h(PANEL_HEADER_HEIGHT)`(28px),否则空 flex 容器会塌成 0。
 - **面板标题栏**(`Sidebar::render_header`,见 `sidebar_panel/header.rs`):挂在侧边栏面板的 `header` 槽(固定、不随内容滚动),摆当前视图的标题 + 右端「…」菜单(`Button` + `DropdownMenu`,菜单 = 每个可用视图一项、勾选当前那个,点一下就切过去)。
@@ -239,15 +239,18 @@ fn main() {
 - **侧边栏没有自己的状态栏**(面板一直铺到窗口底部那条状态栏的上沿):原来那两枚新建按钮已进「会话」视图的右键菜单(见上)。侧边栏宽度与那一组 `ResizableState` 都在 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 把第 0 个面板钉回「图标栏 + 侧边栏宽度」;拖拽后的整列宽度由 `Sidebar::set_panel_width` 折算回侧边栏宽度)。⚠️ **侧边栏没有最小 / 最大宽度**:分栏面板的 `size_range` 是 `图标栏宽(48px)..Pixels::MAX`;拖到贴着图标栏(宽度 ≤ `SIDEBAR_COLLAPSE_WIDTH` = 24px,再窄连一行图标都放不下)时**直接收起侧边栏**,且**保留收起前那一档宽度**(下次展开回到它,不是一条几像素的缝)。**侧边栏默认折叠**(`visible: false`):展开 / 折叠都靠**图标栏的图标** —— 点某枚即显示那个视图,再点当前那枚即折叠(`sidebar_panel::activity_bar`)。⚠️ 折叠 / 展开会让分栏组整块进出渲染树,而面板尺寸存在共享的 `ResizableState` 里 —— 所以 `Sidebar::show` / `set_visible` 会清掉 `split_width`,让下一帧的 `pin_width` 重新把面板钉回期望宽度(否则收起时那次拖拽留下的窄尺寸会在展开时留在面板状态里)。
 - **中间列** = 终端区(有会话 = dock,没有 = 欢迎页);**状态栏不在这一列**(它独占窗口最后一行,见下)。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」(直接开一个本地终端)/「打开设置」两行操作)——**启动时就是这个状态**(不自动开会话)。
 - **一组分栏**:`main-split` = **最左整列** | 中间列(面板宽度按下标存在 `ResizableState`;整列是第 0 个面板 `SIDEBAR_PANEL_INDEX`,宽度 = 48px 图标栏 + 侧边栏宽度;它的 `size_range` = `48px..Pixels::MAX`,即**侧边栏本身不限宽**,能拖多宽由窗口宽度与中间列自己的下限决定)。折叠时不摆分栏组(整列只剩图标栏,没有可拖的缝)。
-- **终端区 = dock,只用 center**(侧边栏不进 dock):每个会话一块 `SessionPane`,`add_panel_view(.., DockPlacement::Center, ..)` 挂入;`AppRoot::build_dock` 里 `set_locked(false)`。面板覆写 `title_bar(false)` / `inner_padding(false)` / `zoomable(false)` / `zoom_control() -> None`,`closable` 为真。⚠️ 注册必须走 `panel_handle`(裸 `Entity<P>` 时 skin 取不到表现层 trait,标签会退化成只写 `panel_name` 的标题栏)。
-- **拖动**:组内横向拖 = 换位;拖到终端区边缘 = 把 center 分成两个标签组(各带一条标签栏与自己的 `+`)。dock 里最后一块面板拖不动 ⇒ 只有一个会话时拖不起来;面板拖不出 center。
-- ⚠️ 分屏后 `add_panel_view` 只塞进 center 的**第一个**标签组:标签栏 `+` 先 `AppRoot::set_pending_session_group`,由 `spawn_session` 取用后 `move_panel` 过去。
+- **终端区 = dock,只用 center**(侧边栏不进 dock):每个**标签页**一块 `TabPane`(一个标签页 = 标签栏上的一枚标签),`add_panel_view(.., DockPlacement::Center, ..)` 挂入;`AppRoot::build_dock` 里 `set_locked(false)`。面板覆写 `title_bar(false)` / `inner_padding(false)` / `zoomable(false)` / `zoom_control() -> None`,`closable` 为真。⚠️ 注册必须走 `panel_handle`(裸 `Entity<P>` 时 skin 取不到表现层 trait,标签会退化成只写 `panel_name` 的标题栏)。
+- **页内分屏**(kitty / ghostty 模型):`TabPane` 渲染的不是一台终端,而是一棵**分屏树**(`pane_layout::Layout` = `Leaf(下标)` / `Split { axis, first, second }`),叶子是 `panes: Vec<Entity<TerminalView>>` 里的格子 —— 一个标签页可以有若干台终端(**各自一个 PTY**),却只有**一条标签栏**。分叉固定 50/50(两侧 `flex_1`),中间一条 1px 分隔线,**不支持拖拽调尺寸**。⚠️ 每片叶子外那层 div 必须带**逐台终端唯一**的 element id(`("terminal-pane", 实体 id)`):`TerminalElement` 自己不贡献 element id(`Interactivity` 是 `default()`,`element_id` 为 `None`),同一页里两块终端会算出同一条 global id 路径。
+- **焦点与「当前格子」**:`TabPane::focused` 是权威(每帧按 `TerminalView::is_focused` 校正,窗口失焦时保持原值);面板的 `Focusable::focus_handle` 返回**当前格子**的 handle ⇒ dock 切标签页与 `defer_after_update` 回写 `active` 都跟着当前格子走。切换手段:点格子(终端自己 `window.focus`)/ `Ctrl+Shift+方向键`(见 `pane_layout::Layout::neighbor`:沿该轴在前 + 另一轴真重叠,取轴向最近的那个,不折返)。
+- **关闭**:`Ctrl+Shift+W` 关**当前格子**(`TabPane::close_pane` 返回 `false` = 这是最后一格 ⇒ 改关整个标签页);关格后分屏树折叠掉只剩一个孩子的分叉并把后面的下标前移一位。
+- **拖动**:组内横向拖 = 换位;拖到终端区边缘 = 把 center 分成两个标签组(各带一条标签栏与自己的 `+`)。dock 里最后一块面板拖不动 ⇒ 只有一个标签页时拖不起来;面板拖不出 center。
+- ⚠️ dock 被拖成两个标签组后 `add_panel_view` 只塞进 center 的**第一个**标签组:标签栏 `+` 先 `AppRoot::set_pending_session_group`,由 `spawn_session` 取用后 `move_panel` 过去。
 - **标签栏自绘**:`tab_bar.rs::TerminalDockSkin` 只换标签栏,区级外观全部委托 `DockSkin`。可用接口只有 `DockAreaRenderer::tab_group_renderer()` 与 `TabGroupRenderer::render_tab_bar()`(`TabGroupSkin` 未导出、`DockSkin::shared()` 是 `pub(crate)`,皮肤不可继承)。
 - **`TerminalTabBar` 内容**:标签条(`h_flex` + `overflow_x_scroll` + 自持 `ScrollHandle`,活动标签变化时 `scroll_to_item`)+ 右端工具栏(`group.active_panel()` 的 `Panel::toolbar_buttons` = `+`)。标签定宽 200px:图标 + 单行省略名 + 固定 16px 关闭槽位;选中 `tab_active` / `tab_active_foreground` 且底色盖掉栏底 1px 线,未选中 `tab_foreground`、hover 变 `muted`;相邻竖线按 zed `TabPosition` 规则。⚠️ `render_active_panel` 必须自己写:`tab-content` + `overflow_*` + `panel.cached(StyleRefinement::default().absolute().size_full())`。
 - **关闭按钮只在悬停 / 选中时出现**(gpui-pre 无 `visible_on_hover`):标签 `on_hover` 把下标记进 `TabBarState::hovered`(`Cell`)。⚠️ 重绘只能通知**根视图**(`DockArea::notify()` 不重绘标签组);⚠️ 别用 `div().occlude()` 包关闭按钮(会吃掉标签的 hover-leave),用 `cx.stop_propagation()`。
-- **接线**(`TabGroupContext` 是只读快照):点标签 → `select_tab(ix, ..)`;拖 → `on_drag(group.drag_panel(ix, cx)?)` + 自绘 `TabDragPreview`;落点 → `drag_over::<DragPanel>(..)` + `on_drop` 调 `group.drop_panel(drag.clone(), Some(ix), true, ..)`;中键 → 关会话。
-- **关会话三条路**:标签 `×` / 中键 / 侧边栏右键菜单(按下标)。前两条走 [`AppRoot::close_panel_id`](`AppRoot::close_panel_id`)(按面板 id 找下标);不走 dock 的 `TabGroup::close_panel`(它拒绝关最后一块面板,而本应用要支持全关到欢迎页)。
-- **会话表是 dock 的镜像**:`AppRoot::terminals` 顺序 = `dock.layout(Center).panels()`,成员 = dock 里还在的面板,由 `sync_sessions_with_dock` 在 `DockEvent::LayoutChanged` 与新建 / 关闭后同步。
+- **接线**(`TabGroupContext` 是只读快照):点标签 → `select_tab(ix, ..)`;拖 → `on_drag(group.drag_panel(ix, cx)?)` + 自绘 `TabDragPreview`;落点 → `drag_over::<DragPanel>(..)` + `on_drop` 调 `group.drop_panel(drag.clone(), Some(ix), true, ..)`;中键 → 关标签页。
+- **关标签页三条路**:标签 `×` / 中键 / 侧边栏右键菜单(按下标)。前两条走 [`AppRoot::close_panel_id`](`AppRoot::close_panel_id`)(按面板 id 找下标);不走 dock 的 `TabGroup::close_panel`(它拒绝关最后一块面板,而本应用要支持全关到欢迎页)。
+- **标签表是 dock 的镜像**:`AppRoot::tabs` 顺序 = `dock.layout(Center).panels()`,成员 = dock 里还在的面板,由 `sync_tabs_with_dock` 在 `DockEvent::LayoutChanged` 与新建 / 关闭后同步。
 - **底部状态栏**(`status_bar::empty_status_bar`):**空条**、常驻、**独占窗口最后一行**(横跨全部列)⇒ 窗口是「标题栏 / 主体 / 状态栏」三级结构。⚠️ 侧边栏可见性**只由图标栏的图标**改变(状态栏里没有「展开」入口)。
 - **状态栏高度**(`status_bar::STATUS_BAR_HEIGHT` = 28px):现在只剩**中间列**这一条,它是空条(没有任何按钮)。
 - **主体里两条竖线**(分工不同,别再各画一条):
@@ -258,7 +261,7 @@ fn main() {
 
 > 状态在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(远端句柄 + 根目录 + 目录项缓存 + 展开状态 + 摊平后的行清单);渲染交给 `SidebarContent::Files(FilesItem)` —— **一行一项**摆进侧边栏面板的行列表。侧边栏起来是「会话」,点图标栏那枚图标切过来,**且只对远端会话可见**(见 §3.2)。
 
-- **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步两件事:可用性(`Sidebar::set_files_enabled(remote)`)与**数据源**(当前会话的 `SshFs` 句柄,来自 `TerminalView::remote_fs(cx)`)。⚠️ 这里的「当前会话」= **键盘焦点所在**的那枚终端(见 §3.3「当前会话」):分屏时 dock 的「当前标签」每个标签组都会报一枚,跟着它走会让树跳到用户没在用的那个会话上。
+- **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步两件事:可用性(`Sidebar::set_files_enabled(remote)`)与**数据源**(当前标签页的 `SshFs` 句柄,即当前格子的 `TerminalView::remote_fs(cx)`)。⚠️ 这里的「当前」= **键盘焦点所在**的那一格终端(见 §3.3「当前标签页」):dock 的「当前标签」在有多个标签组时每个组都会报一枚,跟着它走会让树跳到用户没在用的那个标签页上。
 - **数据源是 SFTP**(`ssh::SshFs`,见 §5.3):起始根目录 = 远端家目录(`home_dir()`);远端 shell 的 `cd` 拿不到(要改远端 prompt),所以根目录**不跟随终端**,由用户自己跳。
 - ⚠️ **必须等会话连上再给句柄**(`TerminalView::is_connected`):连上之前主机密钥可能还没确认,而 SFTP 那条连接**没有确认通道**(`ClientHandler::new` 传 `None`)⇒ 只会失败。判断放在句柄那一层,`FilesState::sync` 自己只比较 `Option<SshFs>`(`Arc::ptr_eq`)。
 - **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 调 `list_dir`(一层),回填前核对**代次**(`generation`,换根目录 / 换会话时 +1 ⇒ 在途结果直接丢掉)。排序由 `SshFs` 负责:目录在前、名字不区分大小写。
@@ -271,7 +274,7 @@ fn main() {
 - 摊平结果与行骨架走共用模块 `sidebar_panel/shared.rs`(`RowCache` 缓存 + `row_shell` / `row_content` / `ellipsis_label` / `indent`):侧边栏每帧都会来要一次行清单,不缓存就会每帧 `O(总节点数)`。
 - ⚠️ 文件树**不再自己实现 `Render`** ⇒ 它的 `cx.notify()` 落不到窗口上(`App::notify` 只失效「正在渲染该实体」的窗口),所以 `Sidebar::new` 用 `cx.observe(&files, ..)` 把变化转成侧边栏自己的重绘。
 
-### 3.3 会话模型(`Session` / `SessionRequest`)
+### 3.3 标签页模型(`TabPane` / `SessionRequest`)
 
 ```rust
 // crates/alacrterm/src/terminal_panel.rs —— 终端实例那条线
@@ -279,7 +282,12 @@ enum SessionRequest {                       // 建会话要的全部信息
     name: Option<SharedString>,
     target: TerminalTarget,                 // 本地 shell / 远端 SSH(见 §5.2)
 }
-struct Session { view: Entity<TerminalView>, pane: Entity<SessionPane> }
+struct TabPane {                            // 一个标签页 = 一个 dock 面板
+    panes: Vec<Entity<TerminalView>>,       // 每格一台终端(各自一个 PTY)
+    layout: Layout,                         // 分屏树,叶子下标进 panes(见 §3.2)
+    focused: usize,                         // 当前格子
+    name: Option<SharedString>,             // 用户填的名字,否则用当前格子的标题
+}
 
 // crates/alacrterm/src/sidebar_panel/sessions.rs —— 记录那条线(纯数据 + 该视图的增删改/拖放)
 enum SessionEntry { Folder(SessionFolder), Session(SessionRecord) }
@@ -288,13 +296,13 @@ struct SessionRecord { id: u64, name: SharedString, user: String, host: String, 
 type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3.2 会话列表)
 ```
 
-- **代码位置与归属**(没有单独的 `session.rs`):`SessionRequest` 与运行时句柄 `Session` 同在 `terminal_panel.rs`(终端实例那条线);`SessionEntry` / `SessionFolder` / `SessionRecord` / `SessionPath` 与**视图状态 `SessionsState`** 同在 `sidebar_panel/sessions.rs`(记录那条线:数据 + 增删改 + 拖放 + 树同步);`main.rs` 只留程序入口 + 根视图 `AppRoot`(跨组件共享状态 + 装配)。
-- **连接目标直接复用 `TerminalTarget`**(`terminal::TerminalTarget`):`SessionRequest` 只需 `name` + `target`,不必再自己造一个枚举。会话表里只留一个 `is_remote` 布尔(`SessionPane`),因为「文件管理器只服务远端会话」只需要这一位。
-- `Session::target(cx)` 转调 `pane`(`SessionPane` 持有显示名 + 连接目标:文件管理器据此判断远端 / 本地)。标题取自终端 **OSC 标题**(`breadcrumb_text`),不是 shell 的 `title_override` ⇒ 自定义名称必须自己存。
-- 新建统一走 `AppRoot::spawn_session(SessionRequest)`:`TerminalView::new(None, target, host_key, settings, ..)` 是**唯一入口**(本地 / 远端只差 `target`,见 §3.8);之后包成 `SessionPane` 挂进 dock,再 `move_panel` 到该进的标签组(§3.2)。
-- ⚠️ **两条线不要混**:`SessionsState::entries`(会话记录:配置,§3.2 会话列表)与 `AppRoot::terminals`(终端实例:dock 面板)彼此独立 —— 记录可以 0 个终端,终端也可以不属于任何记录(标签栏 `+` 开的本地终端)。
-- 生命周期:`close_terminal`(→ `DockArea::remove_panel`)、`close_panel_id`(标签 `×` / 中键)、`sync_sessions_with_dock`;下标访问一律先 `get()`(允许会话为空)。dock 点标签会回调面板的 `set_active`,它用 `AppRoot::defer_after_update` 回写 `active`。
-- ⚠️ **「当前会话」`active` 的权威是键盘焦点**,不是 dock 报的那枚:dock 按**每个标签组**的显示标签各回调一次 `set_active`(gpui-kit `crates/base/src/dock/tab_group.rs` 的 `reconcile_active`,分屏时两组都会把自己那枚报成当前),所以 `AppRoot::render` 每帧找**真正持有焦点**的终端校正 `active`,焦点不在任何终端里(点侧边栏 / 设置、窗口失焦)时保持原值 —— 否则一点自己的文件树,「文件管理器」就会跳到另一个会话上。焦点落进终端会 `cx.notify()`,而根视图 `observe` 着每个 `TerminalView` ⇒ 这一帧的渲染必定跟在焦点变化之后(见 §3.2 文件管理器)。
+- **代码位置与归属**(没有单独的 `session.rs`):`SessionRequest` 与运行时面板 `TabPane` 同在 `terminal_panel.rs`(终端实例那条线,分屏树在 `pane_layout.rs`);`SessionEntry` / `SessionFolder` / `SessionRecord` / `SessionPath` 与**视图状态 `SessionsState`** 同在 `sidebar_panel/sessions.rs`(记录那条线:数据 + 增删改 + 拖放 + 树同步);`main.rs` 只留程序入口 + 根视图 `AppRoot`(跨组件共享状态 + 装配)。
+- **连接目标直接复用 `TerminalTarget`**(`terminal::TerminalTarget`):`SessionRequest` 只需 `name` + `target`,不必再自己造一个枚举。标签页里只留一个 `is_remote` 布尔(`TabPane`),因为「文件管理器只服务远端会话」只需要这一位。
+- **标题与 `is_remote` 都跟着当前格子**:`TabPane::name(cx)` = 用户填的名字 或 **当前聚焦格子**的终端 OSC 标题(`breadcrumb_text`,不是 shell 的 `title_override` ⇒ 自定义名称必须自己存);`remote_fs` / `is_connected` 也取当前格子(文件管理器列的就是用户正在看的那台)。
+- 新建统一走 `AppRoot::spawn_session(SessionRequest)`:`TerminalView::new(None, target, host_key, settings, ..)` 是**唯一入口**(本地 / 远端只差 `target`,见 §3.8);之后包成 `TabPane`(内含一格)挂进 dock,再 `move_panel` 到该进的标签组(§3.2)。`AppRoot::split_active_session(axis, ..)` 走另一条:给**当前标签页**加一格(新格子固定是本地 shell,与旧的分屏行为一致)。
+- ⚠️ **两条线不要混**:`SessionsState::entries`(会话记录:配置,§3.2 会话列表)与 `AppRoot::tabs`(终端实例:dock 面板)彼此独立 —— 记录可以 0 个终端,终端也可以不属于任何记录(标签栏 `+` 开的本地终端)。
+- 生命周期:`close_tab`(→ `DockArea::remove_panel`)、`close_panel_id`(标签 `×` / 中键)、`close_active_session`(关当前格子,最后一格时转成 `close_tab`)、`sync_tabs_with_dock`;下标访问一律先 `get()`(允许标签表为空)。dock 点标签会回调面板的 `set_active`,它用 `AppRoot::defer_after_update` 回写 `active`。
+- ⚠️ **「当前标签页」`active` 的权威是键盘焦点**,不是 dock 报的那枚:dock 按**每个标签组**的显示标签各回调一次 `set_active`(gpui-kit `crates/base/src/dock/tab_group.rs` 的 `reconcile_active`,dock 被拖成两组时两组都会把自己那枚报成当前),所以 `AppRoot::render` 每帧找**真正持有焦点**的终端校正 `active`(`TabPane::is_focused` = 本页任意一格持有焦点),焦点不在任何终端里(点侧边栏 / 设置、窗口失焦)时保持原值 —— 否则一点自己的文件树,「文件管理器」就会跳到另一个标签页上。焦点落进终端会 `cx.notify()`,而根视图 `observe` 着每台 `TerminalView` ⇒ 这一帧的渲染必定跟在焦点变化之后(见 §3.2 文件管理器)。⚠️ 窗口标题也因此改由 `AppRoot::render` 统一设置(以前是每台终端在自己 `render` 里 `set_window_title`,一页多格时会互相抢)。
 - 进程结束(本地 shell 退出 / SSH 断开):只标记 `exited` 并 `notify`,标签与终端内容保留(断开原因写在网格里,见 §5.2),用户自己决定关掉还是重开(§5)。
 
 ### 3.4 对话框(`dialog/connection.rs` / `dialog/folder.rs` / `dialog/host_key.rs`)
@@ -491,8 +499,8 @@ config/keymap.json                                  # 可选用户文件(候选�
 | `Ctrl+Shift+W` | `CloseActiveSession` |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | `NextSession` / `PrevSession` |
 | `Alt+1` … `Alt+9` | `ActivateSession { 0..8 }` |
-| `Ctrl+Shift+D` / `Ctrl+Shift+S` | `SplitSessionRight` / `SplitSessionDown` |
-| `Ctrl+Shift+Z` | `ToggleZoom` 最大化 / 还原标签组 |
+| `Ctrl+Shift+D` / `Ctrl+Shift+S` | `SplitSessionRight` / `SplitSessionDown` 在**当前标签页内**向右 / 向下再开一格 |
+| `Ctrl+Shift+←` / `→` / `↑` / `↓` | `FocusPaneLeft` / `FocusPaneRight` / `FocusPaneUp` / `FocusPaneDown` 切换聚焦的格子 |
 | `Ctrl+Shift+B` | `ToggleSidebar` |
 | `Ctrl+Shift+E` / `Ctrl+Shift+G` | `ShowSessionsView` / `ShowFilesView` |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | 字号 +1 / -1 / 复位(与设置窗口同一条落盘路径) |
@@ -527,7 +535,7 @@ config/keymap.json                                  # 可选用户文件(候选�
 
 | 类别 | 动作 | 走法 |
 | --- | --- | --- |
-| 需要窗口(开关对话框 / 建会话 / 动 dock 布局) | `NewLocalTerminal` `NewSessionDialog` `OpenSettings` `CloseActiveSession` `NextSession` `PrevSession` `ActivateSession` `SplitSessionRight` `SplitSessionDown` `ToggleZoom` | `AppRoot::defer_after_update` → `terminal_panel.rs` 的 `AppRoot::*`(焦点会话按 `active_session_index` 认) |
+| 需要窗口(开关对话框 / 建会话 / 动 dock 布局) | `NewLocalTerminal` `NewSessionDialog` `OpenSettings` `CloseActiveSession` `NextSession` `PrevSession` `ActivateSession` `SplitSessionRight` `SplitSessionDown` `FocusPaneLeft` `FocusPaneRight` `FocusPaneUp` `FocusPaneDown` | `AppRoot::defer_after_update` → `terminal_panel.rs` 的 `AppRoot::*`(焦点标签页按 `active_tab_index` 认) |
 | 不需要窗口的 UI 状态 | `ToggleSidebar` `ShowSessionsView` `ShowFilesView` | 直接 `Entity::update`(`sidebar_panel/mod.rs` 的 `AppRoot::toggle_sidebar` / `open_sidebar_view`) |
 | 终端本身 | `CopyText` `PasteText` `ClearTerminal` `Scroll*` `ToggleViMode` | `AppRoot::with_active_terminal` → `TerminalView::*`(`terminal_view/lib.rs`) |
 
@@ -583,16 +591,17 @@ terminal.process_pty_event(event, cx)?;
 ```rust
 fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     // ⚠️ 不在这里自动抢焦点:焦点策略在应用层(见 §4.3 「焦点归属」)
-    window.set_window_title(&self.title);   // 同步原生窗口标题(自绘标题栏固定显示 Alacrterm)
+    // ⚠️ 窗口标题也不在这里设:一页可能同时渲染好几格终端(§3.2 页内分屏),
+    //    由根视图按「当前标签页」统一设(见 §3.3)
     let focused = self.focus_handle.is_focused(window);
     let cursor_visible = self.should_show_cursor(focused, cx);
-    // 根 div:bg(terminal_background) + track_focus + on_key_down
+    // 根 div:id(逐台唯一) + bg(terminal_background) + track_focus + on_key_down
     //   + on_mouse_down(左键:聚焦 + stop_propagation;右键:粘贴)
     //   └─ TerminalElement::new(terminal, view, focus, focused, cursor_visible, settings)
 }
 ```
 
-> `set_window_title`(不是 `set_title`)同步**原生窗口标题**;自绘 `TitleBar` 固定显示 `Alacrterm`,终端 OSC 标题只作标签栏 / 侧边栏的会话显示名(`spawn_session` 里对每个 `TerminalView` 做 `cx.observe(.., |_, _, cx| cx.notify())`)。
+> 原生窗口标题由 `AppRoot::render` 用 `window.set_window_title`(不是 `set_title`)同步成**当前标签页**的名字;自绘 `TitleBar` 固定显示 `Alacrterm`,终端 OSC 标题只作标签栏 / 侧边栏的显示名(`spawn_session` / `split_active_session` 里对每台 `TerminalView` 做 `cx.observe(.., |_, _, cx| cx.notify())`,根视图据此重绘标签栏与标题)。
 
 **`TerminalElement::prepaint` 内(`self.terminal.update`)**:
 
@@ -664,14 +673,15 @@ graph LR
 
 | 情形 | 行为 |
 |---|---|
-| 点击终端区域 | `TerminalView` 左键聚焦终端并 `stop_propagation` |
+| 点击某一格终端 | 该 `TerminalView` 左键聚焦自己并 `stop_propagation` |
 | 点击终端之外 | `AppRoot` 根节点把焦点交给 `AppRoot::background_focus` |
-| 焦点落进某个终端 | `AppRoot::render` 把「当前会话」`active` 校正成它(见 §3.3);焦点不在终端里时保持原值 |
-| 新建会话 | `spawn_session` 里 `window.focus(新会话的 focus_handle)` |
+| 焦点落进某个终端 | `AppRoot::render` 把「当前标签页」`active` 校正成它(见 §3.3);焦点不在终端里时保持原值。标签页内部的「当前格子」同理:`TabPane::render` 每帧问各格 `is_focused` |
+| 新建标签页 / 分屏 | dock 的 `set_active` → `TabPane::set_active`(聚焦当前格子);分屏走 `TabPane::add_pane`,新格子直接聚焦 |
+| `Ctrl+Shift+方向键` | `Layout::neighbor` 找那一格邻格 → `window.focus`;没有邻居就什么都不做 |
 | Tab / Shift+Tab | 焦点在终端归终端;不在终端则由 `Root` 做焦点遍历 |
 
 - ⚠️ **不能用 `Window::blur` 代替 `background_focus`**:完全失焦时 `focus_next` 没有起点,Tab 会失效。
-- `TerminalView::render` 不自动抢焦点;启动聚焦由 `spawn_session` 显式做。
+- `TerminalView::render` 不自动抢焦点;启动聚焦由 dock 的 `set_active`(→ `TabPane::set_active`)显式做。
 - 「点击终端之外」靠终端内的 `stop_propagation` 判断;若点击处自己拿到了焦点,`background_focus` 不会去抢。
 
 **`Terminal::input` 的副作用**:入队 `InternalEvent::Scroll(Scroll::Bottom)` + `SetSelection(None)`(输入即回到底部并清空选择),置 `keyboard_input_sent = true`,再 `write_to_pty`。`keyboard_input_sent` 用于 Shell 关闭判定(见 §6)。
@@ -792,7 +802,7 @@ graph LR
 | **颜色体系** | `TerminalColors::dark()` 为本地 XTerm 深色默认;256 色含 6×6×6 立方体(`index = 16+36r+6g+b` 求逆)与 24 级灰阶;NamedColor 变体来自 vte 0.15 |
 | **vi mode** | `vi_motion` 支持 `h/j/k/l/w/b/e/%/$/0/^/H/M/L`;`g/G` 顶/底、`ctrl+b/f` 翻页、`ctrl+d/u` 半页;`v` 选择、`y` 复制、`i` 退出。每次移动先入队 `UpdateSelection(cursor_pos)` 再入队 `ViMotion` |
 | **焦点** | 应用层掌握(§4.3);焦点进出经 `FOCUS_IN_OUT` 向应用发 `\x1b[I` / `\x1b[O` |
-| **窗口标题** | `window.set_window_title(&str)` 同步原生标题;自绘标题栏固定 `Alacrterm` |
+| **窗口标题** | 由根视图按「当前标签页」调 `window.set_window_title`(§4.2);自绘标题栏固定 `Alacrterm` |
 | **标题栏集成** | `WindowOptions` 用 `TitleBar::window_options()`;`gpui_kit::init` 必须在 `run` 回调开头,`Theme::change(Dark)` |
 | **Shell 关闭判定** | `register_task_finished`:输入过(`keyboard_input_sent`)或退出码为 0 才 `CloseTerminal` |
 | **Drop 清理** | `pty_tx.shutdown()` + `terminate_child_process()`(Unix `killpg(SIGTERM)`),100ms 后 `kill_child_process()` 兜底 |
@@ -856,8 +866,8 @@ flowchart TD
     M[鼠标] -->|mouse_down/move/up/scroll| N[选择/超链接/鼠标协议]
     N --> L
 
-    E -->|window.set_window_title| T[原生标题]
-    E -.-> B2["AppRoot 经 cx.observe → 标签栏 / 侧边栏显示会话名"]
+    E -.->|cx.observe| B2["AppRoot：标签栏 / 侧边栏显示标签页名"]
+    B2 -->|window.set_window_title(当前标签页)| T[原生标题]
 ```
 
 ---
@@ -895,6 +905,6 @@ cargo run -p ssh --example local_server -- 2299
 - `terminal.input` 参数是 `impl Into<Cow<'static, [u8]>>`,`String` 需 `.into_bytes()`
 - 依赖来源:`gpui` / `gpui-kit` 都是 **git 依赖**(gpui-kit 需要 main 上的数字字段修复,§3.5);`ssh` crate 的 russh **必须关掉 `aws-lc-rs` 换 `ring`**(§5.2)
 - 标题栏集成三要素:`gpui_kit::init` → `Theme::change(ThemeMode::Dark)` → `WindowOptions` 用 `TitleBar::window_options()`
-- 窗口标题双轨:`window.set_window_title`(原生)+ 标签栏 / 侧边栏显示 `Session::title()`;自绘 `TitleBar` 固定 `Alacrterm`
+- 窗口标题双轨:`AppRoot::render` 按当前标签页调 `window.set_window_title`(原生)+ 标签栏 / 侧边栏显示 `TabPane::name()`;自绘 `TitleBar` 固定 `Alacrterm`
 - SSH 的「已连上」(`Terminal::is_connected`)是**使用同一份参数做别的连接**(SFTP 文件管理器)的前置条件(§3.2 / §5.2)
 - 假 SSH 服务端(`ssh/examples/local_server.rs`)里 **`data` 回调要按通道过滤**:russh 会把**所有**通道的数据都送到 `Handler::data`,不限住的话 sftp 那条通道的协议包会被玩具 shell 当成键盘输入回显回去
