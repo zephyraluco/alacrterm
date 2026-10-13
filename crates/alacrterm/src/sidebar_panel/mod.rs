@@ -12,6 +12,7 @@ use gpui_kit::component::{
     resizable::ResizableState,
 };
 
+use crate::AppRoot;
 use crate::assets::IconName;
 use crate::components::{ACTIVITY_BAR_WIDTH, SidebarRow};
 
@@ -258,6 +259,20 @@ impl Sidebar {
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         activity_bar::left_column(self, cx)
+    }
+}
+
+impl AppRoot {
+    /// 显示 / 折叠侧边栏（`Ctrl+Shift+B`）。
+    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_visible(!sidebar.visible(), cx));
+    }
+
+    /// 打开侧边栏的某个视图（`Ctrl+Shift+E` / `Ctrl+Shift+G`）。
+    pub(crate) fn open_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.open_view(view, cx));
     }
 }
 

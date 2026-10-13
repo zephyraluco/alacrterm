@@ -106,6 +106,8 @@ impl RenderOnce for ActivityBar {
         h_flex()
             .id(self.id)
             .h_full()
+            // 侧边栏自己的 key context（默认 keymap 未使用，留给用户）。
+            .key_context(crate::keymap::SIDEBAR_CONTEXT)
             .when(self.sidebar.is_none(), |this| this.w(ACTIVITY_BAR_WIDTH))
             .when(self.sidebar.is_some(), |this| this.w_full())
             .child(

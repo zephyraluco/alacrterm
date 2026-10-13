@@ -202,6 +202,7 @@ dependencies = [
  "gpui-pre",
  "log",
  "rust-embed",
+ "schemars",
  "serde",
  "serde_json",
  "terminal",

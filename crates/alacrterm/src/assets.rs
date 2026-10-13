@@ -24,6 +24,15 @@ impl RenderOnce for IconName {
 #[include = "icons/**/*"]
 pub struct Assets;
 
+/// 默认按键绑定资产（见 [`crate::keymap`]）。
+///
+/// 单独一个 embed，且只收 `keymaps/default-*.json`——`assets/keymaps/` 下还有一堆
+/// 未使用的 Zed 预设，没必要塞进二进制。
+#[derive(RustEmbed)]
+#[folder = "../../assets"]
+#[include = "keymaps/default-*.json"]
+pub struct KeymapAssets;
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
         Ok(Self::get(path).map(|f| f.data))

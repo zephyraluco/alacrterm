@@ -277,7 +277,9 @@ fn cursor_shape_options() -> Vec<(SharedString, SharedString)> {
 }
 
 /// 改一项渲染参数：更新全局 → 落盘 → 推给会话。
-fn update_render(
+///
+/// 设置窗口与字号快捷键（`alacrterm::IncreaseFontSize` 等）共用这条路径。
+pub(crate) fn update_render(
     root: &WeakEntity<AppRoot>,
     cx: &mut App,
     change: impl FnOnce(&mut RenderSettings),

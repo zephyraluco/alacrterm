@@ -490,7 +490,19 @@ impl InputHandler for TerminalInputHandler {
 
 ### 7.2 特殊键
 
-`TerminalView::on_key_down` → Ctrl+Shift+V 直接读剪贴板 `paste`;其余按键 → `terminal.try_keystroke`(箭头、回车、Ctrl 组合等)→ `to_esc_str` 转义序列 → `terminal.input`(入队 Scroll(Bottom)+ SetSelection(None) 后 `write_to_pty`)。
+按键分两条路,顺序是**先动作、后 listener**(gpui 的按键派发,见 `gpui-architecture.md` §「键盘是动作优先」):
+
+1. **keymap 动作**(context 命中即派发,命中后默认停止传播 ⇒ 走不到下一条):
+   复制 `Ctrl+Shift+C` / 粘贴 `Ctrl+Shift+V` / 清屏 `Ctrl+Shift+K` / 滚动 `Shift+PageUp/PgDown/Home/End/Up/Down` /
+   vi 模式 `Ctrl+Shift+Space`,以及应用级的会话、标签、布局键。
+   绑定在 `assets/keymaps/default-*.json`(见 `terminal-architecture.md` §3.12),处理器在 `alacrterm` 侧,
+   落到 `TerminalView::copy_text` / `paste_text` / `scroll_*` 等;滚动键在 `ALT_SCREEN`(vim 等)里改发转义序列给 PTY。
+2. **key listener**(没被任何动作拦下的键):`TerminalView::on_key_down` → 可打印字符直接返回
+   (交给 `InputHandler` 的 WM_CHAR 路径,避免同一字符处理两次);其余 → `terminal.try_keystroke`(箭头、回车、Ctrl 组合等)
+   → `to_esc_str` 转义序列 → `terminal.input`(入队 Scroll(Bottom)+ SetSelection(None) 后 `write_to_pty`)。
+
+> ⚠️ 这条顺序意味着**任何绑在 `"Terminal"` context 上的键都不会再进 PTY** —— 想改复制粘贴 / 滚动键,
+> 改 keymap JSON,而不是在这里加分支。
 
 ### 7.3 鼠标
 

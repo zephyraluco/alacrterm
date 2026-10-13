@@ -9,6 +9,7 @@ gpui-kit = { workspace = true }
 anyhow.workspace = true
 log.workspace = true
 rust-embed = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 terminal = { workspace = true }
