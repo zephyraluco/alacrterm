@@ -27,7 +27,7 @@
 | `gpui-kit`(`features = ["component"]`) | 标题栏 / Sidebar / Tabs / StatusBar / Settings / Resizable、`icon_named!`、主题系统 |
 | `alacritty_terminal 0.26` | VT 解析、网格模型、PTY 封装(`tty`) |
 | `russh 0.63` + `russh-sftp 3`(`crates/ssh`) | 内建 SSH 客户端(终端通道 + SFTP:浏览远端目录 / 上传 / 下载 / 写回);⚠️ **必须关掉默认的 `aws-lc-rs`** 改用 `ring`,否则 Windows 上要 NASM |
-| `tree-sitter` + 几种 grammar(经 gpui-kit 的 `tree-sitter-*` feature) | 预览窗口里那个简易编辑器的**语法高亮**(bash / python / json / yaml / toml / rust / js / ts / tsx / c / cpp / markdown,见 §3.5.1);⚠️ **故意不**开 `tree-sitter-languages`(全开要拖进三十多个 grammar crate) |
+| `tree-sitter` + 几种 grammar(经 gpui-kit 的 `tree-sitter-*` feature) | 预览窗口里那个编辑器的**语法高亮**(bash / python / json / yaml / toml / rust / js / ts / tsx / c / cpp / markdown,见 §3.5.1);⚠️ **故意不**开 `tree-sitter-languages`(全开要拖进三十多个 grammar crate) |
 | `dirs 7` | 预览缓存目录 / 系统下载目录 |
 | `portable-pty 0.9` | 经 alacritty `tty` 间接使用的跨平台 PTY |
 | `sysinfo 0.39` | 前台进程 / 工作目录 / 标题检测(仅 `crates/terminal`,应用层已不再依赖) |
@@ -139,7 +139,7 @@ crates/
         host_key.rs             # 「未知主机密钥」:首次连接让用户核对指纹
       welcome.rs                # 无会话时中间列的欢迎页
       settings_window.rs        # 独立设置窗口
-      preview_window.rs         # 独立文件预览窗口(文本可改并写回远端 / 图片 / 其他占位;见 §3.5.1)
+      preview_window.rs         # 独立文件预览窗口(一个窗口多个标签;自绘标题栏 + 工具条 + 标签 + 状态栏;文本可改并写回远端;见 §3.5.1)
       format.rs                 # 显示用的小格式化(字节数 / 时长)
       actions.rs                # 自定义 Action + 全局监听器
       assets.rs                 # 图标资产
@@ -283,10 +283,10 @@ fn main() {
 
 三个动作把这一栏从「只读目录树」变成「能用的文件管理器」。它们都建立在 §5.3 那套**传输**上 —— 浏览走一条连接,传输再开一条。
 
-- **打开**(双击文件行 / 行右键「打开」,只对文件):`FilesState::open_file` 先把远端文件下到**本地缓存**(`dirs::cache_dir()/alacrterm/preview/<序号>-<名字>`,序号是 `FilesState::cache_seq`,避免同名文件的两个窗口互相删缓存),下完**按类型分两条路**:
-  - **文本 / 图片 / 其他** ⇒ 开预览窗口(见 §3.5.1)。**先下再看**是为了让预览那一侧只认识「一个本地路径」(图片走 gpui 的图片元素,不必再为「远端」写一套解码)。⚠️ 请求里还要捎上 `SshFs` 句柄与根实体:文本在那个窗口里能改,「保存」要写回远端(`upload_one`),写完还要让本视图把所在目录重读一次(见 §3.5.1)。
+- **打开**(双击文件行 / 行右键「打开」,只对文件):`FilesState::open_file` 先把远端文件下到**本地缓存**(`dirs::cache_dir()/alacrterm/preview/<序号>-<名字>`,序号是 `FilesState::cache_seq`,避免两个标签缓存同名文件时互相删缓存),下完**按类型分两条路**:
+  - **文本 / 图片 / 其他** ⇒ 送给预览窗口(见 §3.5.1):窗口已开就**加一个标签**,没开才开窗。**先下再看**是为了让预览那一侧只认识「一个本地路径」(图片走 gpui 的图片元素,不必再为「远端」写一套解码)。⚠️ 请求里还要捎上 `SshFs` 句柄与根实体:文本在那个窗口里能改,「保存」要写回远端(`upload_one`),写完还要让本视图把所在目录重读一次(见 §3.5.1)。
   - **音频 / 视频** ⇒ **不开窗口**,直接 `App::open_with_system`(`FileKind::handed_to_system` 判的;进程里没有解码器,见 §3.5.1)。那份副本要留给播放器读、应用不知道它什么时候读完,所以**留在缓存目录里不删**,由下次启动统一清(`clear_preview_cache`,在 `main` 里、任何窗口打开之前调一次 —— 那一刻还没有窗口在用它们,剩下的只可能是上次跑留下的;被上一轮播放器占着的文件删不掉,忽略即可)。⚠️ 这条「打开」只推一条 info 通知说明交给了系统,不像预览窗口那样自带反馈。
-  - ⚠️ 序号不能省:两个窗口看不同目录下的同名文件时,共用一份缓存会在关掉其中一个时把另一个正在用的文件删掉。
+  - ⚠️ 序号不能省:两个标签看不同目录下的同名文件时,共用一份缓存会在关掉其中一个时把另一个正在用的文件删掉。
 - **上传**:两种入口,都落到 `FilesState::start_upload`(`locals` 可以是文件也可以是目录,目录递归)。
   1. **拖放**(主入口):把本地文件 / 目录拖进侧边栏的「文件管理器」面板即上传 —— 目标目录不需要瞄,整块面板都是落点。实现在 `sidebar_panel/activity_bar.rs` 的 `files_panel`:平台层把外部拖拽翻译成内部拖拽(`FileDropEvent` → `active_drag` 里放 `ExternalPaths`,见 `gpui_pre::window`),所以只要 `.on_drop::<ExternalPaths>`。⚠️ `on_drop` 是 `InteractiveElement` 的方法,要显式 `use gpui::InteractiveElement as _`;⚠️ 它必须挂在 `context_menu` **之前**(`context_menu` 会把元素包成 `ContextMenu<E>`,那个类型上没这个方法)。
   2. **右键菜单**:「上传文件…」/「上传文件夹…」走系统选择器(`App::prompt_for_paths`,可多选),给不习惯拖放的人。
@@ -387,21 +387,29 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 
 **为什么是独立窗口,而不是 dock 里的一页**:预览正文(文本编辑器 / 图片)与终端是两种东西。塞进 dock 就得把 `TabPane` 从「一堆终端」泛化成「一堆视图」,而终端那条线上每个假设(`focused_view().read(cx).remote_fs()`、标签名取自终端标题、格子布局与焦点…)都得跟着改。独立窗口对现有代码**零改动**,而且大图 / 长文本本来就该有一块自己的地方。开窗模式与 §3.5 的设置窗口完全一样(`WindowKind::Normal` + 自绘 `TitleBar` + 外层包 gpui-kit `Root` + 主窗口关闭即 `quit`)。
 
-- **载荷**是 `PreviewRequest { name, remote_path, local_path, size, fs, app_root }` —— 正文只看**本地路径**(下载由文件管理器负责);另外两件是**文本保存**用的:远端句柄(`fs`,写回 `remote_path`)与根实体(`app_root`,写回成功后让文件管理器重读所在目录)。
+**一个窗口多个标签**:窗口里装一个 `Vec<PreviewTab>`,每个文件一个标签(见模块文档)。⚠️ **不再是一个文件一个窗口** —— `AppRoot::open_preview_window` 发现窗口已开就把请求塞进去加标签(`PreviewWindow::add_request`,同一个远端路径的直接切过去),不再另开窗口;窗口句柄存在 `AppRoot::preview_window`(照 `settings_window`)。标题栏里**不放文件名**(需求),当前文件叫什么在标签条与状态栏上。
+
+- **载荷**是 `PreviewRequest { name, host, remote_path, local_path, size, fs, app_root }` —— 正文只看**本地路径**(下载由文件管理器负责);`host` / `fs` / `app_root` 是界面与**文本保存**用的:状态栏拼「主机:路径」要 `host`(`SshFs::host`,只放主机名不放参数 —— 参数里带着密码),写回远端用 `fs`(写 `remote_path`),写回成功后靠 `app_root` 让文件管理器重读所在目录。每个标签各持一份 `PreviewTab { request, kind, body, close_after_save }`。
 - **按扩展名分派**(`FileKind::of`):文本 / 图片 / 音频 / 视频 / 其他。⚠️ 图片那一类**直接用** `gpui::Img::extensions()` 的清单,免得这里的分类和 gpui 真正支持的解码器悄悄走散。⚠️ **这个窗口只接文本 / 图片 / 其他**:音频与视频由文件管理器下完缓存**直接交给系统默认程序**(见 §3.2「打开 / 上传 / 下载」),`FileKind::handed_to_system` 就是那条分岔的判据(分类清单只此一份,所以判定留在 `FileKind` 上)。
-- **文本是一个简易编辑器**(`Editor` + `EditorState`):行号 + 语法高亮 + 可改,**不是只读**。语言按**扩展名**认(见下面的 `Language`),认不出来当纯文本(`text` 模式:照样有行号 / 选中复制,只是不染色)。⚠️ 超过 `MAX_TEXT_BYTES`(8 MiB)或不是 UTF-8 就**不加载**,改成「用系统默认程序打开」的提示 —— 编辑器的解析 / 布局是全量的,几十 MB 的日志挂上去就动不了了。建好编辑器顺手把焦点给它(打开就能直接敲,Ctrl+S 才有人接)。
+- **窗口是四层**(照普通桌面文本编辑器的摆法,见模块文档那张图):自绘标题栏(只有窗口控制按钮,**不放文件名**、也不嵌菜单栏)/ 工具条 / 标签条 / 正文 + 状态栏;正文 / 状态栏 / 工具条 / 编辑动作都作用在**当前标签**上。
+- **文本是一个编辑器**(`Editor` + `EditorState`):行号 + 语法高亮 + 可改,**不是只读**。语言按**扩展名**认(见下面的 `Language`),认不出来当纯文本(`text` 模式:照样有行号 / 选中复制,只是不染色)。⚠️ 超过 `MAX_TEXT_BYTES`(8 MiB)或不是 UTF-8 就**不加载**,改成一句「太大了 / 不是 UTF-8」的说明 —— 编辑器的解析 / 布局是全量的,几十 MB 的日志挂上去就动不了了。每个标签的编辑器建好顺手把焦点给它(打开就能直接敲,Ctrl+S 才有人接)。
+- **窗口级动作走 `actions.rs` 的 `*Preview*`**(`CopyPreviewRemotePath` / `ClosePreviewWindow` / `TogglePreviewWordWrap` / `GotoPreviewLine`,加上原有的 `SavePreviewFile`),由窗口根节点的 `on_action` 接(见 `PreviewWindow::render`);快捷键绑在 `Preview` key context 上(见 §4.3 与 `assets/keymaps/default-*.json`)。
+- **工具条**(`render_toolbar`)与**标签条**(`render_tab_bar`):工具条是图标按钮、按「文件 / 撤改 / 剪贴 / 查找 / 编辑器」分组(组间 `toolbar_separator` 竖线) —— 保存 / 关闭 | 撤销 重做 | 剪切 复制 粘贴 | 查找 替换 跳转行 | 自动换行 | 复制远端路径。⚠️ 「保存 / 关闭 / 撤销…」那一排**只在当前标签是文本时摆**;「复制远端路径」每个标签都能用,永远在。其中**撤销 / 重做 / 剪切 / 复制 / 粘贴 / 查找 / 替换 不在本窗口实现**:`action_button` 只把 gpui-base 编辑器那几个 action(从 `gpui_kit::component::input` 拿)**派发给当前聚焦的元素**,由编辑器在渲染里挂的那串 `on_action` 接下 —— 这些处理器在 gpui-base 里是 `pub(super)`,跨 crate 直接调不到,派发是唯一路子。⚠️ 派发要落到编辑器身上就得**点按钮不换焦点**:gpui-kit 的 `Button` 在 `on_mouse_down` 里 `prevent_default()`,正是为此(换成别的控件时得自己确认这件事)。⚠️ 窗口级那几枚(保存 / 关闭 / 跳转行 / 自动换行 / 复制路径)走 `cx.listener` **直接调方法**、不绕 action:按钮那层拿得到 `Context<PreviewWindow>`,直说比「派发给当前焦点」少一层不确定性。标签条用 gpui-kit 的 `TabBar` + 每个标签一枚 `Tab`(文件名 + 脏标记前缀 + 关闭按钮后缀):`TabBar::max_width` 给标签宽度封顶、长名字省略中段而**保住关闭按钮**(那两条都有上游单测盯着),自己搭很难不把按钮挤没。点某枚标签 = 切到它(`TabBar::on_click` 给下标);后缀的 × 只关**它自己**(⚠️ `TabBar::on_click` 会盖掉 `Tab` 自己的 `on_click`,所以 × 的关闭手势由它兜住;最后一个标签关掉 = 关窗口)。
+  - **自动换行**是本窗口自己实现的动作:`TextEditing::soft_wrap` 记着当前值(编辑器只在构造时收这个开关、没有读回来的方法),`toggle_soft_wrap` 取反后调 `EditorState::set_soft_wrap`;⚠️ 初值必须与编辑器的默认值一致(默认**开**)。
+  - **跳转行**是另一个:`open_goto_line` 弹一个只填行号的小框(照 `dialog::folder` 的写法,输入框状态在开框**之前**建好;`has_active_dialog` 挡掉连按叠框),`goto_line` 解析后把光标挪到那一行(超范围夹到首 / 末行),并先 `unfold_at` 把盖住目标行的折展平。
+  - ⚠️ 图标是**自有资产**:`assets/icons/*.svg`(lucide)经 `icon_named!` 生成 `IconName`,`Icon::new` 从应用注册的那个 `Assets`(rust-embed)取 —— gpui-kit 自带那一千多枚图标**取不到**(没嵌进来),要用的得先落一份到 `assets/icons/`。
 - **语言表**(`Language`,与 `Cargo.toml` 的 `tree-sitter-*` feature **成对**):`sh/bash/zsh` → bash、`py/pyi` → python、`json/jsonc` → json、`yaml/yml` → yaml、`toml` → toml、`rs` → rust、`js/jsx/mjs` → javascript、`ts/mts` → typescript、`tsx` → tsx、`c/h` → c、`cc/cpp/hpp/…` → cpp、`md/markdown` → markdown;其余(含 `.txt` / `.log` / `.csv` / `Makefile`)→ `text`。⚠️ 每种语言都要在 `crates/alacrterm/Cargo.toml` 里开对应的 feature(gpui-kit 把每个语法编译成一个 feature):**没开不会报错**,只是注册表里没有那棵树、编辑器把它当普通文本画 —— 所以 `every_language_with_a_grammar_is_registered` 那条单测盯着两者别走散。⚠️ 不开 `tree-sitter-languages`(全开)是刻意的:三十多个 grammar crate 会把构建时间拉长,这里只挑常用那几种。
-- **底部状态栏**(`PreviewWindow::render_status_bar`,用 gpui-kit 的 `StatusBar`,与主窗口那条同一个组件 / 同一个高度):左边是**远端路径**(长了省略),右边依次是**语言**(`Language::label`,如 `Unix Shell Script`)/ **编码**(`UTF-8`,文件有 BOM 就 `UTF-8 with BOM`)/ **`Row: n | Col: n | Pos: n`** / **`n lines | n chars`**。⚠️ 后两组的数是**每帧现读**编辑器状态的(`caret` / `counts`,行 / 列 / 位置都从 **1** 起、列与位置按**字符**算):光标一动编辑器就会 `cx.notify()` ⇒ `show_text` 里除了订阅改动事件,还 `cx.observe(&editor, ..)` 借那次通知让本窗口重绘。⚠️ BOM **留在文本里**不做剥离(编辑器当它一个零宽字符)⇒ 存回远端时一模一样。⚠️ 上图那种「远端主机 / 远端系统」两栏没有数据源(`SshFs` 不透出参数),没做。
+- **底部状态栏**(`PreviewWindow::render_status_bar`,用 gpui-kit 的 `StatusBar`,与主窗口那条同一个组件 / 同一个高度):左边一簇(走 `child` 而不是 `left`,中间那段才有地方省略)是**地球图标 + `主机:远端路径`**(长了省略;主机名来自建会话参数)+ 文件大小 + 写回状态;右边依次是**语言**(`Language::label`,如 `Unix Shell Script`)/ **编码**(`UTF-8`,文件有 BOM 就 `UTF-8 with BOM`)/ **`Row: n | Col: n | Pos: n`** / **`n lines | n chars`**。⚠️ 后两组的数是**每帧现读**编辑器状态的(`caret` / `counts`,行 / 列 / 位置都从 **1** 起、列与位置按**字符**算):光标一动编辑器就会 `cx.notify()` ⇒ `show_text` 里除了订阅改动事件,还 `cx.observe(&editor, ..)` 借那次通知让本窗口重绘。⚠️ BOM **留在文本里**不做剥离(编辑器当它一个零宽字符)⇒ 存回远端时一模一样。⚠️ **远端系统(MobaTextEditor 那枚「Linux」)没做**:`SshFs` 是纯 SFTP,要拿远端内核得另开一条远端命令(或从 SSH banner 猜),为一块标签不值当 —— 真要做再单开。
 - **文本保存**(`PreviewWindow::save`):Ctrl+S / 工具条那枚「保存」把编辑器里的内容写回**远端那个路径**。一条链:**抓快照**(`EditorState::value()`)→ 落本地缓存那份(编辑器只活在内存里,`std::fs::write` 走后台执行器)→ `SshFs::upload_one` 交给传输 worker(**不占浏览那条连接**,见 §5.3)。三条容易踩的:
   - **版本号账本**(`Revisions { current, saved }`):`current` 每改一笔 +1,写回成功后把 `saved` 记成**开写时那份快照**的版本号(不是 `current`)⇒ 写回路上用户接着改,「已写回」不会盖住那笔新改动(脏标记该亮还亮,`editing_while_a_write_back_is_in_flight_keeps_the_dirty_mark` 那条单测钉的就是这个);
   - **写回期间不许关窗口**(`on_window_should_close` 见下):`Transfer` 的接收端一丢,worker 就把这次写回当取消 ⇒ 远端可能留下**半截文件**(`create` 是 CREATE|TRUNCATE|WRITE)。所以正在写回时点 X 只弹一句「写完才能关」;
   - **失败不静默**:工具条那行小字变红 + 这个窗口推一条 error 通知,编辑器内容仍在(脏标记也不清)。
-- **关窗口前的确认**(`PreviewWindow::should_close`):窗口在 `new` 里挂 `Window::on_window_should_close`。没改动 ⇒ 放行;正在写回 ⇒ 挡一下(理由见上);有没写回的改动 ⇒ 弹「保存 / 丢弃 / 取消」并**返回 `false` 挡下这一次关闭**。⚠️ `Dialog` 的 ok / cancel 只有两个通道,分不出三个选择 ⇒ 三个按钮各自 `on_click` 收尾(自己 `window.close_dialog` / `remove_window`),`escape`、点遮罩仍走 `on_cancel` = 取消。选「保存」= 置 `close_after_save` 再走同一条写回,写回成功后才由 `finish_save` 收掉窗口;写回失败就不关了(错误摆在那儿,用户自己决定)。⚠️ `Window::remove_window()` 绕过 `on_window_should_close`,所以「丢弃」那条不用再抬一个标志位。
+- **关窗口前的确认**(`PreviewWindow::should_close` / `request_close`):窗口在 `new` 里挂 `Window::on_window_should_close`。⚠️ 判定 (`close_ask`)**只此一份**,两条入口共用:系统那道(`should_close`,拦下来并**返回 `false`**)与窗口内那道(`request_close` —— Ctrl+W / 工具条那枚关闭 / 标签上的 ×)。⚠️ 后者**不能**直接 `window.remove_window()`:那条路绕过 `on_window_should_close`,没写回的改动会无声丢掉。没改动 ⇒ 放行;正在写回 ⇒ 挡一下(理由见上);有没写回的改动 ⇒ 弹「保存 / 丢弃 / 取消」。⚠️ `Dialog` 的 ok / cancel 只有两个通道,分不出三个选择 ⇒ 三个按钮各自 `on_click` 收尾(自己 `window.close_dialog` / `remove_window`),`escape`、点遮罩仍走 `on_cancel` = 取消。选「保存」= 置 `close_after_save` 再走同一条写回,写回成功后才由 `finish_save` 收掉窗口;写回失败就不关了(错误摆在那儿,用户自己决定)。⚠️ `Window::remove_window()` 绕过 `on_window_should_close`,所以「丢弃」那条不用再抬一个标志位。
 - **文件管理器跟着刷新**:写回成功后 `refresh_parent_dir` 取 `remote_path` 的父目录,`AppRoot::reload_files_dir` → `FilesState::reload_dir` 把树里那一层重读一次(文件大小会对上)。⚠️ 预览窗口的写回**不进**侧边栏那份「传输」列表(它在自己的窗口里报进度),所以这条刷新得自己来。
 - **图片**:`img(local_path)` + `ObjectFit::ScaleDown`(等比缩到装得下,**小图不放大**;`Contain` 会把 16×16 的图标拉成满屏)。
-- **其他类型**(含音频 / 视频,虽然它们不到这个窗口):只摆「这个类型没有内嵌预览」+ 工具条那两枚动作(「复制远端路径」与「用系统程序打开」)。进程里没有任何音视频解码器(gpui-pre 只做图片),内嵌播放要么用 Windows Media Foundation 自己写一层 unsafe 的 COM,要么引来 ffmpeg —— 所以音频 / 视频干脆不在这儿,由文件管理器直接开系统程序(见 §3.2)。
+- **其他类型**(含音频 / 视频,虽然它们不到这个窗口):只摆「这个类型没有内嵌预览」这句说明,工具条上只剩「复制远端路径」那一枚。进程里没有任何音视频解码器(gpui-pre 只做图片),内嵌播放要么用 Windows Media Foundation 自己写一层 unsafe 的 COM,要么引来 ffmpeg —— 所以音频 / 视频干脆不在这儿,由文件管理器直接开系统程序(见 §3.2)。
 - ⚠️ **缓存文件在窗口 `Drop` 时删掉**:它是「打开」时临时下的那份,不是工作副本。改过的内容靠「保存」写回远端;关窗口那一下会先确认(见上),所以走到 `Drop` 的要么已经写回、要么是用户明确选了「丢弃」。⚠️ 交给系统程序的那份**不由窗口管**(没有窗口),留到下次启动统一清(见 §3.2)。
-- ⚠️ 一个文件一个窗口(不复用):「同一个远端路径」不代表内容没变,复用会让用户以为看的是刚下的那份。⚠️ 同一路径开两个窗口时**两边都改**是没定义的:后保存的那次覆盖先保存的(gpui 侧不做文件锁)。
+- ⚠️ **一个窗口多个标签**(不复用窗口):打开一个早已在另一个标签里开着的路径会**切过去**(见 `PreviewWindow::add_request`)。⚠️ 同一路径开两个标签时**两边都改**是没定义的:后保存的那次覆盖先保存的(gpui 侧不做文件锁)。
 
 ### 3.6 状态栏(`status_bar.rs`)
 
@@ -565,6 +573,11 @@ config/keymap.json                                  # 可选用户文件(候选�
 | 键位 | 动作 |
 | --- | --- |
 | `Ctrl+S` | `SavePreviewFile` 把改过的文本写回远端(macOS 是 `Cmd+S`) |
+| `Ctrl+W` | `ClosePreviewWindow` 关窗口(有没写回的改动会先问一句;macOS 是 `Cmd+W`) |
+| `Ctrl+G` | `GotoPreviewLine` 跳转行(macOS 是 `Cmd+G`) |
+| `Alt+Z` | `TogglePreviewWordWrap` 自动换行开关 |
+
+⚠️ 上表只列**本应用自己绑的**键。编辑器还自带一套(gpui-base 的 `Input` context,由 `gpui_kit::init` → `gpui_base::init` 注册):`Ctrl+Z` / `Ctrl+Y` 撤销重做、`Ctrl+X` / `Ctrl+C` / `Ctrl+V` 剪切复制粘贴、`Ctrl+A` 全选、`Ctrl+F` 查找、`Ctrl+H` 替换、`Ctrl+]` / `Ctrl+[` 缩进。工具条点的是**同一批 action**(见 §3.5.1)。
 
 ⚠️ `Ctrl+C` 保持**不绑定**(留给 SIGINT);「有选区才复制」需要拿到原始 keystroke,而 action 处理器拿不到 ⇒ 复制用 `Ctrl+Shift+C`。
 
@@ -573,7 +586,7 @@ config/keymap.json                                  # 可选用户文件(候选�
 | context | 打在哪 | 谁用 |
 | --- | --- | --- |
 | `Terminal` | `TerminalView::render` 根 div(`terminal_view/lib.rs::TERMINAL_KEY_CONTEXT`) | 默认 keymap:压掉 Tab、复制粘贴、滚动、vi 模式 |
-| `Preview` | `preview_window.rs` 的窗口根节点(`keymap::PREVIEW_CONTEXT`) | 默认 keymap:`Ctrl+S` 写回远端 |
+| `Preview` | `preview_window.rs` 的窗口根节点(`keymap::PREVIEW_CONTEXT`) | 默认 keymap:写回远端 / 关标签 / 跳转行 / 自动换行 |
 | `Dock` | `tab_bar.rs` 标签栏根节点(`keymap::DOCK_CONTEXT`) | 留给用户(默认表未用) |
 | `Sidebar` | `components::ActivityBar` 整列根节点(`keymap::SIDEBAR_CONTEXT`) | 留给用户(默认表未用) |
 | `Dialog` | gpui-kit 的 `Dialog`(只有 `keyboard` 打开时) | gpui-kit(`escape`/`enter`)+ 默认表的 `!Dialog` |
@@ -595,9 +608,10 @@ config/keymap.json                                  # 可选用户文件(候选�
 - ⚠️ **动作处理器拿不到原始 keystroke**:滚动键在 `ALT_SCREEN`(vim 等全屏 TUI)里要原样转发给 PTY,
   但 `Action` 里没有按键信息 ⇒ `TerminalView::scroll_action` 自己造 CSI 序列
   (`shift-pageup` = `CSI 5 ~` 等)
-- ⚠️ `SavePreviewFile` 是**唯一不走 `AppRoot` 的动作**:预览窗口是窗口级的(一个文件一个窗口),
-  全局监听器拿不到「是哪个窗口」⇒ 由 `PreviewWindow::render` 的 `.on_action(..)` 自己接
-  (打在同一个根节点的 `Preview` key context 上,见 §3.5.1)
+- ⚠️ 预览窗口那几个动作(`SavePreviewFile` / `CopyPreviewRemotePath` / `ClosePreviewWindow` /
+  `TogglePreviewWordWrap` / `GotoPreviewLine`)是**唯一不走 `AppRoot` 的一类**:预览窗口是窗口级的
+  (一个窗口里由它自己管多个标签),全局监听器拿不到「是哪个窗口」⇒ 由 `PreviewWindow::render` 的
+  `.on_action(..)` 自己接(打在同一个根节点的 `Preview` key context 上,见 §3.5.1)
 - 字号动作(`IncreaseFontSize` / `DecreaseFontSize` / `ResetFontSize`)复用设置窗口那条路径
   (§3.5 的三步):`settings_window::update_render`
 - `SearchTerminal` 只是**注册了动作占位**(处理器打一行提示),默认 keymap 里没有绑定 —— 终端内查找的 UI 还没做
@@ -840,7 +854,7 @@ graph LR
   - ⚠️ **取消是共享的原子标志(`CancelToken`),不是一条消息**:worker 跑起来就占住了自己那条通道,用消息取消恰恰在「最需要取消」的时候送不进去。置位后 worker 在**下一个分块边界**放弃(不会中断一次进行中的往返)。
   - ⚠️ 宿主把 `Transfer::events` 丢掉 = 取消(worker 发现没人要结果就停),所以窗口 / 行被关掉时不必专门清理。
 - 线程模型与 `session.rs` 同一套(自带 OS 线程 + current-thread 运行时);跨边界只用**执行器无关**的通道:浏览走 `tokio::mpsc`(请求)+ `futures::oneshot`(应答),传输走 `futures::mpsc`(请求 + 进度 / 结果 —— 结果不再单开一条 oneshot,`Done` 就是通道里的最后一个事件)。发送失败(线程已退出)会**清掉句柄重试一次**。
-- API:浏览 `home_dir()`(远端家目录)/ `list_dir(path)`(一层,排序 = 目录在前、名字不区分大小写)/ `is_dir(path)` / `stat(path)`;传输 `upload(locals, remote_dir)` / `download(remotes, local_dir)` / `download_one(remote, local_file)` / `upload_one(local_file, remote_file)`。错误统一翻成一句中文(`远端没有这个路径` / `拒绝访问` / `响应超时` / `传输已取消` / …)。
+- API:浏览 `home_dir()`(远端家目录)/ `list_dir(path)`(一层,排序 = 目录在前、名字不区分大小写)/ `is_dir(path)` / `stat(path)`;传输 `upload(locals, remote_dir)` / `download(remotes, local_dir)` / `download_one(remote, local_file)` / `upload_one(local_file, remote_file)`;另有 `host()`(只放主机名,给预览窗口状态栏拼「主机:路径」用 —— ⚠️ **不要**改成把 `SshParams` 整个透出去,那里面带着密码)。错误统一翻成一句中文(`远端没有这个路径` / `拒绝访问` / `响应超时` / `传输已取消` / …)。
 - ⚠️ `upload_one` 与 `upload` 的区别是**不改名、不拼目录**:远端路径由调用方给全,同名远端文件被**覆盖 / 截断**(`create` = CREATE|TRUNCATE|WRITE)。它是 `download_one` 的反向,给预览窗口的「保存」用(见 §3.5.1)——那条路必须写回**打开时那个路径**。
 - **`RemoteEntry` 带 `size`**:界面靠它显示大小 / 传给预览窗口;目录那点大小(4096 之类)没有意义,在 `list_dir` 里直接归零。
 - **传输的实现**:先把清单摊平(目录递归,**父目录排在子目录前面**)再开传 ⇒ 进度条一开始就知道总数 / 总字节数,文件名也显示得出来。文件用 `SftpSession::open` / `create` + 64 KiB 分块搬。⚠️ 写完必须 `File::close()`:它才会把在途的写等回来并发 `CLOSE`,只靠 `Drop` 不等在途写,远端那份可能是残的。⚠️ 进度**按字节累积到 256 KiB 才上报一次**(一个 1 GiB 的文件有 16384 个分块,比屏幕刷新还密就没有意义了)。

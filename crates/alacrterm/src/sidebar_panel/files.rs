@@ -574,6 +574,7 @@ impl FilesState {
         } else {
             TransferDone::Preview(PreviewRequest {
                 name: name.clone(),
+                host: fs.host().to_string(),
                 remote_path: remote,
                 local_path: local,
                 size,

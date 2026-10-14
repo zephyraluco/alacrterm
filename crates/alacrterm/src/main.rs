@@ -98,6 +98,8 @@ struct AppRoot {
     pending_session_group: Option<WeakEntity<TabGroup>>,
     /// 设置窗口句柄。
     settings_window: Option<WindowHandle<Root>>,
+    /// 文件预览窗口句柄(一个窗口装多个标签,见 [`crate::preview_window`])。
+    preview_window: Option<WindowHandle<Root>>,
     /// 「背景」焦点。
     background_focus: FocusHandle,
 }
@@ -136,6 +138,7 @@ impl AppRoot {
             dock_layout_sub: None,
             pending_session_group: None,
             settings_window: None,
+            preview_window: None,
             background_focus: cx.focus_handle(),
         };
         this.dock_layout_sub = Some(cx.subscribe_in(
