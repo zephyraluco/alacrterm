@@ -57,7 +57,6 @@ actions!(
         ResetFontSize,
         // 预览窗口（窗口自己接，见 `preview_window.rs` 的 `Render::on_action`）
         SavePreviewFile,
-        CopyPreviewRemotePath,
         // 关**当前标签**（最后一个标签关掉 = 关窗口）
         ClosePreviewWindow,
         TogglePreviewWordWrap,

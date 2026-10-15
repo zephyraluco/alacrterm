@@ -29,7 +29,7 @@
 //!
 //! ```text
 //! 自绘标题栏   窗口控制(右端)
-//! 工具条       保存 关闭 | 撤销 重做 | 剪切 复制 粘贴 | 查找 替换 跳转行 | 自动换行 | 复制远端路径
+//! 工具条       保存 关闭 | 撤销 重做 | 剪切 复制 粘贴 | 查找 替换 跳转行 | 自动换行
 //! 标签条       文件名 ●  × | 文件名 ●  × | …
 //! 正文         编辑器 / 图片 / 占位说明(当前标签的)
 //! 状态栏       主机:远端路径  大小  写回状态 … 语言 | 编码 | Row·Col·Pos | 行数·字符数
@@ -40,7 +40,7 @@
 //!   没有编辑器,摆了也没东西可编辑)。
 //! - **工具条里那些编辑动作不是本窗口实现的**(撤销 / 重做 / 剪切 / 复制 / 粘贴 / 查找 /
 //!   替换):它们派发 gpui-base 编辑器自带的 action,由编辑器自己接(见 [`action_button`])。
-//!   窗口级那几个动作(保存 / 复制远端路径 / 关闭 / 自动换行 / 跳转行)才由本窗口实现,
+//!   窗口级那几个动作(保存 / 关闭 / 自动换行 / 跳转行)才由本窗口实现,
 //!   注册在 `actions.rs`。
 //!
 //! ## 什么在应用内、什么交给系统
@@ -59,7 +59,7 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt as _;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render,
     SharedString, Styled as _, StyledImage as _, Subscription, WeakEntity, Window, WindowBounds,
     WindowKind, WindowOptions, div, img, px, size,
@@ -83,7 +83,7 @@ use terminal::{SshFs, TransferEvent};
 
 use crate::AppRoot;
 use crate::actions::{
-    ClosePreviewWindow, CopyPreviewRemotePath, GotoPreviewLine, SavePreviewFile,
+    ClosePreviewWindow, GotoPreviewLine, SavePreviewFile,
     TogglePreviewWordWrap,
 };
 use crate::assets::IconName;
@@ -112,7 +112,7 @@ pub(crate) struct PreviewRequest {
     pub(crate) name: SharedString,
     /// 远端主机名 —— 状态栏左侧那条「主机:路径」用(见 [`PreviewWindow::render_status_bar`])。
     pub(crate) host: String,
-    /// 远端路径(「复制远端路径」用;文本保存时写回的就是它)。
+    /// 远端路径(文本保存时写回的就是它)。
     pub(crate) remote_path: String,
     /// 已经下到本地的缓存文件。
     pub(crate) local_path: PathBuf,
@@ -1015,14 +1015,6 @@ impl PreviewWindow {
         cx.notify();
     }
 
-    /// 把**当前标签**的远端路径放进剪贴板。
-    fn copy_remote_path(&self, cx: &App) {
-        let Some(tab) = self.active() else {
-            return;
-        };
-        cx.write_to_clipboard(ClipboardItem::new_string(tab.request.remote_path.clone()));
-    }
-
     /// 关标签 / 关窗口时点了确认框的「保存」。
     ///
     /// 作用范围按 `scope` 分两档:
@@ -1065,7 +1057,7 @@ impl PreviewWindow {
 
     /// 工具条:图标按钮,按「文件 / 撤改 / 剪贴 / 查找 / 编辑器」分组,组间一条竖线。
     ///
-    /// ⚠️ 除了「保存 / 关闭 / 跳转行 / 自动换行 / 复制远端路径」,其余按钮**不是本窗口实现
+    /// ⚠️ 除了「保存 / 关闭 / 跳转行 / 自动换行」,其余按钮**不是本窗口实现
     /// 的**:它们只把 gpui-base 编辑器那几个 action(`gpui_kit::component::input`)派发给
     /// **当前聚焦的元素**,由编辑器的动作处理器接下(见 [`action_button`] 与 [`EditorState`]
     /// 渲染里那串 `on_action`)。派发要落到编辑器身上,前提是点按钮不换焦点 —— gpui-kit 的
@@ -1076,7 +1068,7 @@ impl PreviewWindow {
     /// 派发也会到,但那是运气)。
     ///
     /// ⚠️ 「保存 / 关闭 / 撤销…」那一排**只在当前标签是文本时摆**(图片 / 其他没有编辑器,
-    /// 摆了也没东西可编辑);「复制远端路径」是每个标签都能用的,永远在。
+    /// 摆了也没东西可编辑):当前标签不是文本时工具条是空的(只剩那条底边)。
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let text = match self.active().map(|tab| &tab.body) {
             Some(Body::Text(text)) => Some(text),
@@ -1163,16 +1155,7 @@ impl PreviewWindow {
                 );
         }
 
-        bar.child(
-            Button::new("preview-copy-path")
-                .ghost()
-                .xsmall()
-                // ⚠️ 不用 `IconName::Copy`:那一枚已经是「复制选中内容」的编辑动作了,同一个工具条上
-                // 两枚一样的图标分不清谁是谁。
-                .icon(IconName::ClipboardCopy)
-                .tooltip("复制远端路径")
-                .on_click(cx.listener(|this, _, _, cx| this.copy_remote_path(cx))),
-        )
+        bar
     }
 
     /// 标签条:**一个文件一枚标签**(见模块文档),标签上是文件名 + 关闭按钮。
@@ -1374,9 +1357,6 @@ impl Render for PreviewWindow {
             .key_context(PREVIEW_CONTEXT)
             .track_focus(&self.root_focus)
             .on_action(cx.listener(|this, _: &SavePreviewFile, window, cx| this.save(window, cx)))
-            .on_action(cx.listener(|this, _: &CopyPreviewRemotePath, _, cx| {
-                this.copy_remote_path(cx)
-            }))
             .on_action(
                 cx.listener(|this, _: &ClosePreviewWindow, window, cx| {
                     this.request_close_self(window, cx)
