@@ -1,20 +1,35 @@
 //! 「文件管理器」视图:只供远端(SSH)会话的目录树,入口 [`FilesState`]。
 //! 树摊平成一行一项交给侧边栏虚拟列表,摊平与行骨架走 [`super::shared`]。
 //!
-//! ## 三个动作
+//! ## 八个动作
 //!
-//! - **打开**(双击文件行 / 行右键):先把远端文件下到本地缓存([`FilesState::open_file`])。
-//!   下完之后按类型分两条路:文本 / 图片 / 其他交给 [`crate::preview_window`] 那个独立窗口
-//!   (先下再看是为了让预览只管一个本地路径);**音频 / 视频直接交给系统默认程序** —— 应用里
-//!   没有解码器,见 [`FileKind`]。
-//! - **上传**(把本地文件拖进侧边栏 / 右键「上传文件…」):落到当前选中项所在的远端目录。
-//! - **下载**(行右键):另存为,或者直接进系统下载目录。
+//! 入口是面板**顶部那一行工具栏**(`sidebar_panel::activity_bar::files_toolbar`,照 MobaXterm
+//! 的摆法:按钮在上、路径框在下),加上两套右键菜单。
+//!
+//! - **跳目录**(路径框 / 跟着终端走 / 工具栏「上一目录」,都走 [`FilesState::navigate_to`]):
+//!   先问远端是不是目录,是才换根。
+//! - **打开 / 编辑**(双击文件行 / 行右键「打开」/ 工具栏「编辑」):先把远端文件下到本地缓存
+//!   ([`FilesState::open_file`])。下完之后按类型分两条路:文本 / 图片 / 其他交给
+//!   [`crate::preview_window`] 那个独立窗口(先下再看是为了让预览只管一个本地路径);
+//!   **音频 / 视频直接交给系统默认程序** —— 应用里没有解码器,见 [`FileKind`]。
+//! - **下载**(工具栏「下载」/ 行右键「另存为…」= [`FilesState::download_as`],**路径问用户**;
+//!   行右键「下载到下载目录」/ 工具栏「更多」里的同名项 = [`FilesState::download_to_download_dir`]):
+//! - **上传**(拖进侧边栏 / 右键「上传文件…」/ 工具栏「上传」):落到当前选中项所在的远端目录。
+//! - **新建文件夹 / 新建文件**(工具栏;名字走 [`crate::dialog::name`]):建在**当前根目录**下。
+//! - **重命名**(工具栏;名字对话框预填旧名):只改名字,不挪位置。
+//! - **删除**(工具栏;先弹确认):目录**整棵递归**(远端那一侧见 `ssh::fs` 的 `remove`)。
+//!
+//! 建 / 删 / 改名这三类都是**一步就完**的远端调用(没有进度),所以不进传输列表 —— 成功了
+//! 重读一遍当前目录就算反馈。
 //!
 //! ## 传输进度
 //!
 //! 上传 / 下载都是 [`SshFs`] 的 `Transfer`(见 `crates/ssh/src/fs.rs`):进度与结果走同一条
 //! `futures` 通道。这里把每条传输摊成一行([`FilesItem::Transfer`])摆在路径框下面,读通道的
-//! 任务负责推进那一行、传完推一条通知、并重读受影响的那个目录。
+//! 任务负责推进那一行、传完重读受影响的那个目录。
+//!
+//! ⚠️ **成功不推通知**:进度行消失 + 列表重读就是反馈(传上去的文件会自己出现在树里),
+//! 弹 toast 只会盖住用户正在看的东西;失败才推(见 [`FilesState::report_error`])。
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -54,6 +69,16 @@ type FilePath = Vec<usize>;
 /// 拼接远端路径。
 fn join_dir(dir: &str, name: &str) -> String {
     format!("{}/{}", dir.trim_end_matches('/'), name)
+}
+
+/// 上一级目录；`/`（或第一层）没有上一级就返回 `None`。
+fn parent_dir(path: &str) -> Option<String> {
+    let (parent, _) = path.trim_end_matches('/').rsplit_once('/')?;
+    Some(if parent.is_empty() {
+        "/".to_string()
+    } else {
+        parent.to_string()
+    })
 }
 
 /// 把终端报来的目录展开成远端**绝对路径**；认不出（家目录还不知道）就给 `None`。
@@ -253,6 +278,9 @@ impl TransferState {
 }
 
 /// 传输跑完之后要做什么。
+///
+/// ⚠️ 这里**不再带通知文本**了:成功一律静默(进度行消失即反馈),失败由
+/// [`FilesState::report_error`] 统一报。
 enum TransferDone {
     /// 打开预览窗口(文本 / 图片 / 其他下完缓存后走这条)。
     Preview(PreviewRequest),
@@ -260,6 +288,22 @@ enum TransferDone {
     OpenExternally(PathBuf),
     /// 只推一条通知。
     Nothing,
+}
+
+/// 「文件管理器」顶部工具栏那几枚按钮要的判据（见 `sidebar_panel::activity_bar::files_toolbar`）。
+///
+/// 每帧现取一次（[`FilesState::status`]），所以「跳目录了 / 选中项变了 / 会话断了」按钮
+/// 就跟着变灰。
+#[derive(Clone)]
+pub(super) struct FilesStatus {
+    /// 会话可用（远端已连上、而且根目录已知）：为假时整套按钮全灰。
+    pub(super) ready: bool,
+    /// 根目录还有上一级（`/` 就没有）。
+    pub(super) can_go_up: bool,
+    /// 选中的那个条目叫什么（重命名预填 / 删除确认用）。`None` = 没选中。
+    pub(super) selected: Option<SharedString>,
+    /// 选中的是个目录（「下载」与「删除」提示语要它）。
+    pub(super) selected_is_dir: bool,
 }
 
 /// 「文件管理器」视图的状态。
@@ -768,6 +812,166 @@ impl FilesState {
         }
     }
 
+    /// 跳到上一级目录（状态栏那枚按钮；根目录是 `/` 时什么也不做）。
+    ///
+    /// 走的是与路径框、`follow_terminal` 同一条路（[`Self::navigate_to`]：先问远端是不是目录，
+    /// 是才跳），所以这里的 `parent_dir` 只是个字符串切分，切出来的东西由远端把关。
+    pub(super) fn navigate_up(&mut self, cx: &mut Context<Self>) {
+        let Some(parent) = self.root.as_deref().and_then(parent_dir) else {
+            return;
+        };
+        self.navigate_to(&parent, cx);
+    }
+
+    /// 「下载」那枚按钮：把**当前选中项**下下来，**路径问用户**（没选中就什么也不做）。
+    ///
+    /// 走的就是行右键菜单那两项的同一条路（[`Self::download_as`]）：文件弹系统「另存为」、
+    /// 目录弹「选择下载到哪个目录」再把整棵下下来。⚠️ 不要改成 `download_to_download_dir`
+    /// （不问路径直落系统下载目录）—— 那是行右键菜单里另一项的事。
+    pub(super) fn download_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        self.download_as(path, cx);
+    }
+
+    /// 「编辑」那枚按钮 / 「打开」菜单项：选中的是文件就 [`Self::open_file`]，是目录就
+    /// 当作点它一下（切换展开）。
+    pub(super) fn open_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        let Some(is_dir) = self.node(&path).map(|node| node.is_dir) else {
+            return;
+        };
+        if is_dir {
+            // `activate_row` 对目录是「切换展开」，`expanded` 那个字段它不看。
+            self.activate_row(path, RowKind::Dir { expanded: false }, cx);
+        } else {
+            self.open_file(path, cx);
+        }
+    }
+
+    // --------------------------------------------------------- 新建 / 重命名 / 删除
+
+    /// 在当前根目录下新建一个文件夹（名字来自「新建文件夹」对话框）。
+    pub(super) fn create_dir(&mut self, name: String, cx: &mut Context<Self>) {
+        let (Some(fs), Some(root)) = (self.fs.clone(), self.root.clone()) else {
+            return;
+        };
+        // ⚠️ 名字里带 `/` 会让它落到别的目录去，直接挡掉（与新建文件夹的语义不符）。
+        if name.contains('/') {
+            self.report_error(cx, format!("名字里不能有 / ：{name}"));
+            return;
+        }
+        let path = join_dir(&root, &name);
+        self.spawn_remote_edit(name.into(), async move { fs.mkdir(path).await }, cx);
+    }
+
+    /// 在当前根目录下新建一个空文件（名字来自「新建文件」对话框）。
+    pub(super) fn create_file(&mut self, name: String, cx: &mut Context<Self>) {
+        let (Some(fs), Some(root)) = (self.fs.clone(), self.root.clone()) else {
+            return;
+        };
+        if name.contains('/') {
+            self.report_error(cx, format!("名字里不能有 / ：{name}"));
+            return;
+        }
+        let path = join_dir(&root, &name);
+        self.spawn_remote_edit(name.into(), async move { fs.create_file(path).await }, cx);
+    }
+
+    /// 把选中的这一项改名（新名字来自「重命名」对话框）。
+    ///
+    /// 移到自己原来的名字上就当没改（对话框里直接按了确认）。⚠️ 改名后**清掉选中**：
+    /// `selected` 存的是下标链，重读之后那个下标已经是别的条目了。
+    pub(super) fn rename_selected(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        let Some(node) = self.node(&path) else {
+            return;
+        };
+        let (Some(fs), Some(dir)) = (self.fs.clone(), parent_dir(&node.path)) else {
+            return;
+        };
+        if name.contains('/') {
+            self.report_error(cx, format!("名字里不能有 / ：{name}"));
+            return;
+        }
+        let from = node.path.clone();
+        let to = join_dir(&dir, &name);
+        if from == to {
+            return;
+        }
+        self.selected = None;
+        self.rows.bump();
+        self.spawn_remote_edit(name.into(), async move { fs.rename(from, to).await }, cx);
+    }
+
+    /// 删掉选中的这一项（目录**整棵递归**；确认对话框在工具栏那边弹）。
+    ///
+    /// ⚠️ 走的是**传输通道**（与上传 / 下载同一条，不是 [`Self::spawn_remote_edit`]）:
+    /// 一棵装满东西的子树删起来可能很久，这样才有**进度行**（已删几个 / 共几个，带取消）,
+    /// 而且不会把浏览那条连接占住。
+    pub(super) fn remove_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        let Some(node) = self.node(&path) else {
+            return;
+        };
+        let (Some(fs), Some(root)) = (self.fs.clone(), self.root.clone()) else {
+            return;
+        };
+        let (label, remote, is_dir) = (node.name.clone(), node.path.clone(), node.is_dir);
+        self.selected = None;
+        self.rows.bump();
+        let transfer = fs.remove(remote, is_dir);
+        // 删完重读当前根目录（那一行得从树上消失）。
+        self.spawn_transfer(label, Some(root), transfer, TransferDone::Nothing, cx);
+    }
+
+    /// 跑一个「改远端」的短操作：成功了重读当前目录，失败了推一条错误通知。
+    ///
+    /// **新建文件夹 / 新建文件 / 重命名**三条走这里 —— 它们都是**单次往返**的远端调用,
+    /// 快到不存在「占住浏览连接」的问题,所以不进传输列表(也不该排在正在跑的大文件后面)。
+    /// ⚠️ **删除不走这里**(它可能很久,走传输通道;见 [`Self::remove_selected`])。
+    fn spawn_remote_edit(
+        &mut self,
+        label: SharedString,
+        task: impl std::future::Future<Output = Result<(), SshError>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let task = cx.background_spawn(task);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = task.await;
+                let _ = this.update(&mut cx, |this, cx| match result {
+                    // 成功了就重读当前目录:新条目 / 少掉的条目 / 改过的名字这一下就对上了。
+                    Ok(()) => this.refresh(cx),
+                    Err(error) => {
+                        this.report_error(cx, format!("{label} 操作失败:{error}"));
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 推一条错误通知（让 [`crate::AppRoot`] 转给窗口）与一条日志。
+    ///
+    /// ⚠️ 成功那一路**不推**通知（见 [`Self::on_transfer_done`] 与这里同一个取舍）:
+    /// 列表自己重读一遍就是反馈,弹 toast 只会盖住用户正在看的东西。失败必须说 ——
+    /// 不说的话用户不知道要重试。
+    fn report_error(&self, cx: &mut App, message: String) {
+        log::warn!("{message}");
+        let _ = self
+            .app_root
+            .update(cx, |root, cx| root.notify(Notification::error(message), cx));
+    }
+
     // --------------------------------------------------------- 传输
 
     /// 起一条传输:立刻摆一行进度,再后台读通道推进那一行。
@@ -855,7 +1059,10 @@ impl FilesState {
         true
     }
 
-    /// 传完了(或被取消 / 失败):收掉那一行,说一声,再把受影响的目录重读一次。
+    /// 传完了(或被取消 / 失败):收掉那一行,再把受影响的目录重读一次。
+    ///
+    /// ⚠️ **成功不推通知**:进度行消失 + 列表重读一遍就是反馈(传上去的文件会自己出现在树里),
+    /// 弹 toast 只会盖住用户正在看的东西。失败必须说 —— 不说用户不知道要重试。
     fn on_transfer_done(
         &mut self,
         id: u64,
@@ -870,37 +1077,20 @@ impl FilesState {
         };
         let label = transfer.label;
         match result {
-            Ok(()) => {
-                let note = match done {
-                    // 预览窗口本身就是反馈,不用再弹一条通知。
-                    TransferDone::Preview(request) => {
-                        let _ = self
-                            .app_root
-                            .update(cx, |root, cx| root.open_preview_window(request, cx));
-                        None
-                    }
-                    // 系统程序在应用外面开,给一条通知说明这次「打开」落在哪个文件上
-                    // (缓存目录里的那份,不是用户的下载目录)。
-                    TransferDone::OpenExternally(path) => {
-                        cx.open_with_system(&path);
-                        Some(Notification::info(format!("已交给系统默认程序打开:{label}")))
-                    }
-                    TransferDone::Nothing => {
-                        Some(Notification::success(format!("{label} 传输完成")))
-                    }
-                };
-                if let Some(note) = note {
-                    let _ = self.app_root.update(cx, |root, cx| root.notify(note, cx));
+            Ok(()) => match done {
+                // 预览窗口本身就是反馈。
+                TransferDone::Preview(request) => {
+                    let _ = self
+                        .app_root
+                        .update(cx, |root, cx| root.open_preview_window(request, cx));
                 }
-            }
+                // 系统程序在应用外面开。
+                TransferDone::OpenExternally(path) => cx.open_with_system(&path),
+                // 下载 / 上传完成:什么都不用做。
+                TransferDone::Nothing => {}
+            },
             Err(SshError::Cancelled) => {}
-            Err(error) => {
-                let message = format!("{label} 传输失败:{error}");
-                log::warn!("{message}");
-                let _ = self
-                    .app_root
-                    .update(cx, |root, cx| root.notify(Notification::error(message), cx));
-            }
+            Err(error) => self.report_error(cx, format!("{label} 传输失败:{error}")),
         }
         if let Some(dir) = refresh {
             self.reload_dir(&dir, cx);
@@ -913,9 +1103,7 @@ impl FilesState {
             return;
         };
         let message = format!("{} 传输中断:远端文件系统线程已退出", transfer.label);
-        let _ = self
-            .app_root
-            .update(cx, |root, cx| root.notify(Notification::error(message), cx));
+        self.report_error(cx, message);
     }
 
     /// 取消一条传输(点进度行右边的「×」)。
@@ -951,6 +1139,18 @@ impl FilesState {
             return;
         };
         self.spawn_load(fs, dir.to_string(), LoadTarget::Dir(path), cx);
+    }
+
+    /// 状态栏 / 工具栏那几枚按钮要的判据（见 [`FilesStatus`]）。
+    pub(super) fn status(&self) -> FilesStatus {
+        let selected = self.selected.as_deref().and_then(|path| self.node(path));
+        FilesStatus {
+            // 根目录还没问到时就当不可用：上传没处落、刷新也没得刷。
+            ready: self.fs.is_some() && self.root.is_some(),
+            can_go_up: self.root.as_deref().and_then(parent_dir).is_some(),
+            selected: selected.map(|node| node.name.clone()),
+            selected_is_dir: selected.is_some_and(|node| node.is_dir),
+        }
     }
 
     /// 侧边栏虚拟列表的全部内容项。
@@ -1290,7 +1490,7 @@ fn row_element(ix: usize, row: &FileRow, selected: bool, cx: &mut App) -> ListIt
 
 #[cfg(test)]
 mod tests {
-    use super::{FileNode, find_dir_in};
+    use super::{FileNode, find_dir_in, join_dir, parent_dir};
     use gpui::SharedString;
 
     fn dir(name: &str, path: &str, children: Option<Vec<FileNode>>) -> FileNode {
@@ -1341,5 +1541,25 @@ mod tests {
         // 文件不算命中(即使路径一样)。
         let with_file = vec![file("home", "/home")];
         assert_eq!(find_dir_in(&with_file, "/home"), None);
+    }
+
+    /// 状态栏那枚「上一目录」:根目录 `/` 没有上一级(所以按不了),其余往上一层层切。
+    #[test]
+    fn parent_dir_stops_at_the_root() {
+        assert_eq!(parent_dir("/"), None);
+        assert_eq!(parent_dir(""), None);
+        assert_eq!(parent_dir("//"), None);
+        assert_eq!(parent_dir("/home"), Some("/".to_string()));
+        assert_eq!(parent_dir("/home/me"), Some("/home".to_string()));
+        // 尾部的分隔符不算一层(路径框里手打 `/home/me/` 也该退到 `/home`)。
+        assert_eq!(parent_dir("/home/me/"), Some("/home".to_string()));
+    }
+
+    /// 上一目录之后 `join_dir` 要能把名字拼回同一个路径(两个函数是配对的)。
+    #[test]
+    fn parent_dir_round_trips_with_join_dir() {
+        let child = join_dir("/home/me", "work");
+        assert_eq!(child, "/home/me/work");
+        assert_eq!(parent_dir(&child), Some("/home/me".to_string()));
     }
 }

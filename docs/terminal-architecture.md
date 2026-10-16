@@ -14,7 +14,7 @@
 - 终端核心:去掉 Zed `settings` 依赖 / 主题系统 / 搜索 UI,保留事件循环、4ms 批量事件、选择复制、vi mode、超链接、鼠标协议、进程标题检测
 - 渲染由 gpui 的 `StyledText` / `paint_quad` 逐 cell 驱动,与 Alacritty 网格通过 `Content` 快照解耦(§4.2)
 - `TerminalBuilder::new(working_directory, target, env, cx) -> Task<Result<TerminalBuilder>>`:`target` 决定本地 PTY 还是远端 russh(见 §5.2);就绪后经 `subscribe(cx)` 接上事件
-- 多会话外壳:**最左一条整列** = 48px 图标栏(VS Code 式活动栏:每枚图标 = 一个视图,底部「设置」;点图标切换 / 折叠侧边栏)+ 侧边栏面板(默认折叠),再往右是中间 dock 会话区(自绘标签栏 + 终端),会话可全部关掉(全关显示欢迎页,**启动时也是这个状态**——不自动开终端);**状态栏每列各一条**(gpui-kit 同一个 `StatusBar`、同一个 28px 高,见 §3.6):侧边栏面板下沿一条(折叠时不摆)、中间列终端区下方一条(**没有终端就不摆**);两侧都在时它们同高同底,看上去就是窗底一条连续的条——最左那 48px 图标栏仍**一路铺到窗口底部**(照 VS Code),那两枚新建按钮已进「会话」视图的右键菜单
+- 多会话外壳:**最左一条整列** = 48px 图标栏(VS Code 式活动栏:每枚图标 = 一个视图,底部「设置」;点图标切换 / 折叠侧边栏)+ 侧边栏面板(默认折叠),再往右是中间 dock 会话区(自绘标签栏 + 终端),会话可全部关掉(全关显示欢迎页,**启动时也是这个状态**——不自动开终端);**状态栏每列各一条但都是空条**(gpui-kit 同一个 `StatusBar`、同一个 28px 高,见 §3.6):侧边栏面板下沿一条(折叠时不摆)、中间列终端区下方一条(**没有终端就不摆**);两侧都在时它们同高同底,看上去就是窗底一条连续的条——最左那 48px 图标栏仍**一路铺到窗口底部**(照 VS Code)。**文件管理器**的组织照 MobaXterm:面板标题栏下面一条**工具栏**(上一目录 / 下载 / 上传 / 刷新 / 新建文件夹 / 新建文件 / 删除 / 重命名 / 编辑),再往下才是路径框与目录树
 - 远程连接:走**内建 SSH 客户端**(`crates/ssh`,基于 russh),不调用外部 `ssh` 命令。「新建会话」对话框收集 IP / 端口 / 名称 / 用户名 / 密码,**只往侧边栏的会话列表里加一条记录**(IP / 名称 / 用户名必填);双击那条记录才按它开终端(密码参与认证但只存在内存记录里);首次连接未知主机弹**「未知主机密钥」**对话框让用户核对指纹
 - 独立设置窗口 + 自绘标题栏;Action 风格右键菜单
 - 会话显示名:用户填的名称优先,否则回退终端 OSC 标题;进程结束只标记「已断开」(标签与内容保留)、不退出应用
@@ -44,12 +44,12 @@
 graph TB
     subgraph app层[crates/alacrterm]
         MAIN[main.rs<br/>AppRoot:共享状态/布局装配]
-        SBAR[status_bar.rs<br/>每列底部状态栏(空条:侧边栏 + 中间列各一条)]
+        SBAR[status_bar.rs<br/>每列底部状态栏(都是空条)]
         SIDE[sidebar_panel/<br/>最左整列:图标栏 + 侧边栏]
         COMP[components/<br/>活动栏 / 侧边栏(自绘)]
         TPANEL[terminal_panel.rs<br/>标签页生命周期 + TabPane 分屏]
         TABBAR[tab_bar.rs<br/>自绘标签栏]
-        DIALOG[dialog/<br/>新建会话 / 新建文件夹 / 主机密钥]
+        DIALOG[dialog/<br/>新建会话 / 新建文件夹 / 输入名字 / 主机密钥]
         SETWIN[settings_window.rs]
         ACT[actions.rs]
     end
@@ -120,10 +120,10 @@ crates/
       main.rs                   # 入口 + AppRoot(根视图:跨组件共享状态 + 布局装配)
       terminal_panel.rs         # 标签页生命周期 + SessionRequest + TabPane(dock 面板)
       tab_bar.rs                # 自绘标签栏
-      status_bar.rs             # 每列底部的状态栏(空条);STATUS_BAR_HEIGHT
+      status_bar.rs             # 每列底部的空状态栏;STATUS_BAR_HEIGHT
       sidebar_panel/            # 最左整列:图标栏 + 侧边栏(§3.2)
         mod.rs                  # Sidebar 实体(当前视图/折叠/宽度 + Render) + SidebarView + SidebarContent
-        activity_bar.rs         # 把整列装配到本应用:每个视图一枚图标 + 底部「设置」 + 当前视图的面板(§3.2)
+        activity_bar.rs         # 把整列装配到本应用:每个视图一枚图标 + 底部「设置」 + 当前视图的面板 + 文件管理器顶部工具栏(§3.2)
         header.rs               # 面板标题栏(当前视图的标题 + 「…」菜单)
         shared.rs               # 两棵树共用:行骨架 / 缩进 / 省略号标签 / RowCache / 拖拽预览卡片
         sessions.rs             # SessionsState(记录模型 + 文件夹树 + 增删改 + 摊平成 SessionsItem)
@@ -136,6 +136,7 @@ crates/
         mod.rs                  # 共同约定(表单实体先建 / 页脚自拼 / on_ok 兜底校验)
         connection.rs           # 「新建会话」:只加一条 SSH 记录
         folder.rs               # 「新建文件夹」:会话列表分组
+        name.rs                 # 「输入名字」:文件管理器的新建文件夹 / 新建文件 / 重命名共用
         host_key.rs             # 「未知主机密钥」:首次连接让用户核对指纹
       welcome.rs                # 无会话时中间列的欢迎页
       settings_window.rs        # 独立设置窗口
@@ -219,7 +220,7 @@ fn main() {
 
 - **最左整列**(`sidebar_panel` + `components`):**图标栏在左(48px)、侧边栏面板在右** —— 侧边栏是活动栏的一个成员(`ActivityBar::sidebar`),两块都由 `components/` 里自有的组件画(见下一条)。整列的装配在 `sidebar_panel/activity_bar.rs` 的 `left_column`:每个可用视图一枚 `ActivityBarItem`(图标 24px,由「名义尺寸 32px × 0.75」得出)、底部一枚「设置」(贴底,派发全局 `OpenSettings`),折叠时**一枚都不亮**且不挂侧边栏面板。点某一枚 = 让侧边栏显示这个视图,再点**正在显示**的那枚 = 折叠侧边栏(`Sidebar::toggle_view`),照 VS Code 折叠不另设开关。视图只有 `Sessions`(会话)与 `Files`(文件管理器)两种,同一时刻只摆一个;⚠️ **「文件管理器」只对远端(SSH)会话摆出来**:根视图每帧按**键盘焦点所在**的那一格终端是不是远端调 `Sidebar::set_files_enabled`(见 §3.3「当前标签页」那条),为假时该视图的**图标与内容一起不摆**(当前选中的视图不动,会话换回远端时它自己回来);本地目录用系统自己的文件管理器打开就好,应用里再摆一份既多余、又只能看到本机目录。
 - **活动栏**(`components/activitybar.rs` 的 `ActivityBar` / `ActivityBarItem`):一列 48px 见方的图标按钮,顶部一组、底部一组贴着列沿,列底色取 `title_bar`(与标题栏同色),**右缘一条 `sidebar_border` 竖线**(与侧边栏面板 / 中间列的分界)。⚠️ 结构用 gpui-kit **base** 的 `h_flex` / `v_flex` / `div` + gpui `Styled` 搭,只有两件 base 没有的小东西复用 `component`:图标用 `Icon`(尺寸要显式给,`svg()` 不吃父元素颜色)、悬停提示用按钮自带的 `.tooltip()`(base 的 tooltip 只给弹层内容、触发器要自己接线)。每枚活动项:图标**一律同色**(不按选中 / 未选中压暗或提亮),当前项只靠一条 2px 左端指示条(`primary`)区分;悬停 / 按下有底色(`secondary_hover` / `secondary_active`)。
-- **侧边栏面板**(`components/sidebar.rs` 的 `Sidebar` / `SidebarRow`):自绘的侧边栏外壳 —— 顶部固定标题栏 + 下方可滚动的行列表 + 底部状态栏槽(`Sidebar::status_bar`,固定高、不随内容滚动,与 `header` 槽对称)。外观照 `component::sidebar`(底色 `tokens.sidebar`、`sidebar_border` 画在右侧、标题栏 `pt_3` + `px_3`、内容 `px_3` + `gap_y_3`、列表首尾各留呼吸空间),实现**优先用 base**:`v_flex` / `div` + gpui 的 `list`(`ListState`,按可见区间要行)+ base 的 `Scrollbar`(`ListState` 自己就实现了 base 的 `ScrollbarHandle`),不依赖 `component::Sidebar`。⚠️ 行会被列表反复取用 ⇒ 行类型要实现 `SidebarRow`(`Clone` + `render(&mut App)`);本应用的行类型是 `SidebarContent`(`SessionsItem` / `FilesItem` 两个枚举)。⚠️ 标题行必须显式 `.h(PANEL_HEADER_HEIGHT)`(28px),否则空 flex 容器会塌成 0。
+- **侧边栏面板**(`components/sidebar.rs` 的 `Sidebar` / `SidebarRow`):自绘的侧边栏外壳 —— 顶部固定标题栏 + **工具栏槽**(`Sidebar::toolbar`,标题栏与列表之间那条,只有「文件管理器」挂) + 下方可滚动的行列表 + 底部状态栏槽(`Sidebar::status_bar`)。三个槽都固定高、不随内容滚动。外观照 `component::sidebar`(底色 `tokens.sidebar`、`sidebar_border` 画在右侧、标题栏 `pt_3` + `px_3`、内容 `px_3` + `gap_y_3`、列表首尾各留呼吸空间),实现**优先用 base**:`v_flex` / `div` + gpui 的 `list`(`ListState`,按可见区间要行)+ base 的 `Scrollbar`(`ListState` 自己就实现了 base 的 `ScrollbarHandle`),不依赖 `component::Sidebar`。⚠️ 行会被列表反复取用 ⇒ 行类型要实现 `SidebarRow`(`Clone` + `render(&mut App)`);本应用的行类型是 `SidebarContent`(`SessionsItem` / `FilesItem` 两个枚举)。⚠️ 标题行必须显式 `.h(PANEL_HEADER_HEIGHT)`(28px),否则空 flex 容器会塌成 0。
 - **面板标题栏**(`Sidebar::render_header`,见 `sidebar_panel/header.rs`):挂在侧边栏面板的 `header` 槽(固定、不随内容滚动),摆当前视图的标题 + 右端「…」菜单(`Button` + `DropdownMenu`,菜单 = 每个可用视图一项、勾选当前那个,点一下就切过去)。
 
 #### 会话列表(文件夹树:记录 + 拖放)
@@ -240,7 +241,7 @@ fn main() {
 - **选中**:`SessionsState::selected`(行点击设置),不跟当前终端挂钩(「当前会话」由标签栏体现)。⚠️ `ListItem` 默认的 `list_active` 选中底色太淡(主题把它压到 6% 不透明度),分不出悬停 ⇒ [`config::change_theme`] 里关掉 `list.active_highlight`,改用 `accent`(与侧边栏里选中的条目同色),配 `font_medium` + `sidebar_accent_foreground` 文字色。
 - **右键菜单**挂在**行元素自己**身上(`ContextMenuExt::context_menu`,⚠️ 必须放链尾;记录行 / 文件夹行各一套);**列表为空**时改摆 `SessionsItem::Empty`(gpui-kit `Empty` 组件,`sidebar_panel::empty_state`)。
 - `Sidebar::children` 只吃单一类型 ⇒ 两个视图的行用 `SidebarContent` 枚举统一,实现 `SidebarRow`(`render` 直接转调 `SessionsItem` / `FilesItem::render`);行列表按索引懒渲染,行类型必须 `Clone`。`Sidebar` 面板的 id 带当前视图名(列表状态按 id 缓存)。
-- **侧边栏有自己的底部状态栏**(`Sidebar::status_bar`,由 `left_column` 挂 `status_bar::empty_status_bar()`,见 §3.6):贴在面板下沿、只占**侧边栏**宽度(不含那 48px 图标栏 —— 图标栏仍一路铺到窗口底部,照 VS Code 的摆法);**折叠时不摆**(`left_column` 在 `active` 为 `None` 时早就返回了)。没有主窗口级的那条了:原来那两枚新建按钮已进「会话」视图的右键菜单(见上)。侧边栏宽度与那一组 `ResizableState` 都在 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 把第 0 个面板钉回「图标栏 + 侧边栏宽度」;拖拽后的整列宽度由 `Sidebar::set_panel_width` 折算回侧边栏宽度)。⚠️ **侧边栏没有最小 / 最大宽度**:分栏面板的 `size_range` 是 `图标栏宽(48px)..Pixels::MAX`;拖到贴着图标栏(宽度 ≤ `SIDEBAR_COLLAPSE_WIDTH` = 24px,再窄连一行图标都放不下)时**直接收起侧边栏**,且**保留收起前那一档宽度**(下次展开回到它,不是一条几像素的缝)。**侧边栏默认折叠**(`visible: false`):展开 / 折叠都靠**图标栏的图标** —— 点某枚即显示那个视图,再点当前那枚即折叠(`sidebar_panel::activity_bar`)。⚠️ 折叠 / 展开会让分栏组整块进出渲染树,而面板尺寸存在共享的 `ResizableState` 里 —— 所以 `Sidebar::show` / `set_visible` 会清掉 `split_width`,让下一帧的 `pin_width` 重新把面板钉回期望宽度(否则收起时那次拖拽留下的窄尺寸会在展开时留在面板状态里)。
+- **侧边栏有自己的底部状态栏**(`Sidebar::status_bar`,由 `left_column` 摆,见 §3.6):贴在面板下沿、只占**侧边栏**宽度(不含那 48px 图标栏 —— 图标栏仍一路铺到窗口底部,照 VS Code 的摆法);**折叠时不摆**(`left_column` 在 `active` 为 `None` 时早就返回了)。两个视图共用同一条**空条**。没有主窗口级的那条了:原来那两枚新建按钮已进「会话」视图的右键菜单(见上)。侧边栏宽度与那一组 `ResizableState` 都在 `Sidebar` 实体里(每帧在 `AppRoot::render` 开头调 `Sidebar::pin_width` 把第 0 个面板钉回「图标栏 + 侧边栏宽度」;拖拽后的整列宽度由 `Sidebar::set_panel_width` 折算回侧边栏宽度)。⚠️ **侧边栏没有最小 / 最大宽度**:分栏面板的 `size_range` 是 `图标栏宽(48px)..Pixels::MAX`;拖到贴着图标栏(宽度 ≤ `SIDEBAR_COLLAPSE_WIDTH` = 24px,再窄连一行图标都放不下)时**直接收起侧边栏**,且**保留收起前那一档宽度**(下次展开回到它,不是一条几像素的缝)。**侧边栏默认折叠**(`visible: false`):展开 / 折叠都靠**图标栏的图标** —— 点某枚即显示那个视图,再点当前那枚即折叠(`sidebar_panel::activity_bar`)。⚠️ 折叠 / 展开会让分栏组整块进出渲染树,而面板尺寸存在共享的 `ResizableState` 里 —— 所以 `Sidebar::show` / `set_visible` 会清掉 `split_width`,让下一帧的 `pin_width` 重新把面板钉回期望宽度(否则收起时那次拖拽留下的窄尺寸会在展开时留在面板状态里)。
 - **中间列** = 终端区(有会话 = dock,没有 = 欢迎页)+ 它下面那条**状态栏**(只在有标签页时摆,见 §3.6)。**无会话时整块 dock 换成欢迎页**(`welcome`:内容居中、列宽 `max_w(420px)`,「新建终端」(直接开一个本地终端)/「打开设置」两行操作)——**启动时就是这个状态**(不自动开会话)。
 - **一组分栏**:`main-split` = **最左整列** | 中间列(面板宽度按下标存在 `ResizableState`;整列是第 0 个面板 `SIDEBAR_PANEL_INDEX`,宽度 = 48px 图标栏 + 侧边栏宽度;它的 `size_range` = `48px..Pixels::MAX`,即**侧边栏本身不限宽**,能拖多宽由窗口宽度与中间列自己的下限决定)。折叠时不摆分栏组(整列只剩图标栏,没有可拖的缝)。
 - **终端区 = dock,只用 center**(侧边栏不进 dock):每个**标签页**一块 `TabPane`(一个标签页 = 标签栏上的一枚标签),`add_panel_view(.., DockPlacement::Center, ..)` 挂入;`AppRoot::build_dock` 里 `set_locked(false)`。面板覆写 `title_bar(false)` / `inner_padding(false)` / `zoomable(false)` / `zoom_control() -> None`,`closable` 为真。⚠️ 注册必须走 `panel_handle`(裸 `Entity<P>` 时 skin 取不到表现层 trait,标签会退化成只写 `panel_name` 的标题栏)。
@@ -256,8 +257,8 @@ fn main() {
 - **接线**(`TabGroupContext` 是只读快照):点标签 → `select_tab(ix, ..)`;拖 → `on_drag(group.drag_panel(ix, cx)?)` + 自绘 `TabDragPreview`;落点 → `drag_over::<DragPanel>(..)` + `on_drop` 调 `group.drop_panel(drag.clone(), Some(ix), true, ..)`;中键 → 关标签页。
 - **关标签页三条路**:标签 `×` / 中键 / 侧边栏右键菜单(按下标)。前两条走 [`AppRoot::close_panel_id`](`AppRoot::close_panel_id`)(按面板 id 找下标);不走 dock 的 `TabGroup::close_panel`(它拒绝关最后一块面板,而本应用要支持全关到欢迎页)。
 - **标签表是 dock 的镜像**:`AppRoot::tabs` 顺序 = `dock.layout(Center).panels()`,成员 = dock 里还在的面板,由 `sync_tabs_with_dock` 在 `DockEvent::LayoutChanged` 与新建 / 关闭后同步。
-- **状态栏**(`status_bar::empty_status_bar`,gpui-kit 的 `StatusBar`):**空条**,**每列各一条**(各自独占自己那一列、不横跨整窗):中间列的在终端区下方(**只在有标签页时摆**:`AppRoot::render` 里 `has_tabs` 为真才 `.child(..)`),侧边栏的在面板下沿(**折叠时不摆**,见上一条)。两条同高同底 ⇒ 都在时看上去就是窗底一条连续的条,只有最左 48px 图标栏把它一切为二(照 VS Code)。⚠️ 侧边栏可见性**只由图标栏的图标**改变(状态栏里没有「展开」入口)。
-- **状态栏高度**(`status_bar::STATUS_BAR_HEIGHT` = 28px):两条都是定高(`.h(..)` + `.flex_none()`,不会被同容器里那个 `flex_1` 兄弟压扁),宽 = 各自那一列的宽,都是空条(没有任何按钮)。
+- **状态栏**(`status_bar::empty_status_bar`):**每列各一条,都是空条**(各自独占自己那一列、不横跨整窗):中间列的在终端区下方(**只在有标签页时摆**:`AppRoot::render` 里 `has_tabs` 为真才 `.child(..)`),侧边栏的在面板下沿(**折叠时不摆**,见上一条)。两条同高同底 ⇒ 都在时看上去就是窗底一条连续的条,只有最左 48px 图标栏把它一切为二(照 VS Code)。⚠️ 侧边栏可见性**只由图标栏的图标**改变(状态栏里没有「展开」入口)。⚠️ 文件管理器的按钮**不在**这里:它们在自己面板顶部的工具栏上(见下节)。
+- **状态栏高度**(`status_bar::STATUS_BAR_HEIGHT` = 28px):两条都是定高(`.h(..)` + `.flex_none()`,不会被同容器里那个 `flex_1` 兄弟压扁),宽 = 各自那一列的宽。⚠️ 28px 减掉组件自己的 `py_1` = **内容高只有 20px** ⇒ 往里放东西得用 **xsmall**(20px)的控件(「文件管理器」那四枚图标按钮就是这个尺寸;gpui-kit `Button` 默认 20px 起步,再大就会把内容顶出去)。
 - **主体里两条竖线**(分工不同,别再各画一条):
   1. **图标列右缘那条**(`components/activitybar.rs`):`border_r_1` + 主题 `sidebar_border`,即图标列与侧边栏面板的分界(照 VS Code 的 `activityBar.border`);折叠态只有图标列在,它同时也是图标列与中间列的分界。
   2. **侧边栏面板与中间列之间那条 = 分栏拖拽条自己画的**:**不再覆盖外观**(删掉了早期的 `with_handle_appearance(crate::invisible_resize_handle())`),用 gpui-kit 组件的默认外观(`component::resizable::render_resize_handle`):静止是一条 `border` 色的 hairline,指针移上来会长成一条 `radius_full` 的**胶囊条**(颜色 `muted_foreground`,长度 / 不透明度随 Idle→Hovered→Pressed→Dragging 递进:0→20px/35%→28px/60%→44px/90%)—— 与 dock 里的分隔条同一套。⚠️ 因此**侧边栏面板自己不要再画 `border_r_1`**(会与 hairline 并排成两根线);热区 / `cursor_col_resize` 光标 / 拖动改宽都仍归 `gpui_base` 的 `ResizeHandle` 管。⚠️ 换主题必须走 `config::change_theme(mode, cx)`。
@@ -286,20 +287,46 @@ fn main() {
 - 摊平结果与行骨架走共用模块 `sidebar_panel/shared.rs`(`RowCache` 缓存 + `row_shell` / `row_content` / `ellipsis_label` / `indent`):侧边栏每帧都会来要一次行清单,不缓存就会每帧 `O(总节点数)`。
 - ⚠️ 文件树**不再自己实现 `Render`** ⇒ 它的 `cx.notify()` 落不到窗口上(`App::notify` 只失效「正在渲染该实体」的窗口),所以 `Sidebar::new` 用 `cx.observe(&files, ..)` 把变化转成侧边栏自己的重绘。
 
-##### 打开 / 上传 / 下载
+##### 工具栏 / 打开 / 上传 / 下载 / 新建 / 删除 / 重命名
 
-三个动作把这一栏从「只读目录树」变成「能用的文件管理器」。它们都建立在 §5.3 那套**传输**上 —— 浏览走一条连接,传输再开一条。
+这几个动作把这一栏从「只读目录树」变成「能用的文件管理器」。**入口是面板顶部那一行工具栏**
+（`activity_bar::files_toolbar`,照 MobaXterm 的摆法:**按钮在上、路径框在下**;挂在 `Sidebar::toolbar`
+槽上,即面板标题栏与列表之间）,再加两套右键菜单。
+
+工具栏九枚（靠左一字排开，中间两条细竖线分成三组），全部是 **xsmall ghost 图标按钮**：
+
+| 按钮 | 图标 | 动作 | 什么时候可按 |
+| --- | --- | --- | --- |
+| 上一目录 | `ArrowUp` | `FilesState::navigate_up`（`parent_dir` 切出上一级,再走跟路径框同一个 `navigate_to`:先问远端是不是目录,是才跳） | 根目录不是 `/` |
+| 下载 | `Download` | `FilesState::download_selected` = 当前**选中项**走 `download_as`（**路径问用户**：文件弹「另存为…」、目录弹「选择下载到哪个目录」;提示语跟着类型走） | 有选中项 |
+| 上传 | `Upload` | 「上传文件…」（`upload_via_dialog`,`false` = 只问文件） | 会话可用（`status.ready`） |
+| 刷新 | `Replace` | `FilesState::refresh`（重读根目录） | 同上 |
+| 新建文件夹 | `FolderPlus` | 名字对话框 → `FilesState::create_dir` | 同上 |
+| 新建文件 | `File` | 名字对话框 → `FilesState::create_file` | 同上 |
+| 删除 | `Delete` | 确认对话框 → `FilesState::remove_selected` | 有选中项 |
+| 重命名 | `CaseSensitive` | 名字对话框（**预填旧名**）→ `FilesState::rename_selected` | 有选中项 |
+| 编辑 | `FileText` | `FilesState::open_selected`（文件 → 打开;目录 → 展开 / 收起） | 有选中项 |
+
+- ⚠️ **判据每帧现取**(`FilesState::status` → `FilesStatus { ready, can_go_up, selected, selected_is_dir }`):跳目录 / 改选中项 / 断会话都会让相应的按钮变灰,不需要额外订阅。`selected` 是名字(`SharedString`),同时给「重命名预填」与「删除确认」用。
+- ⚠️ **尺寸**:全部 `.ghost().xsmall()`(20px)。工具栏这一行与标题栏同高,普通尺寸的按钮(≥20px 外还有 padding)会把整行撑开、把下面的列表挤小。
+- ⚠️ **只做最常用那一种**:「下载」只下**选中项**(且**路径一定问**)、「上传」只问文件、「重命名」不挪位置、「删除」对目录是**整棵递归**(确认对话框里会说清)。上传文件夹 / 下载到下载目录 / 复制远端路径都在**行右键菜单**里(见下)。不摆「更多」这类下拉:工具栏就九枚一目了然的动作按钮,其余进右键菜单。
+- 「上一目录」的越界判断在本地(`parent_dir` 只是字符串切分),真的跳不跳由远端把关 —— 与路径框、`follow_terminal` 同一条 `navigate_to`。
+- **新建 / 重命名 / 删除**都是**一步就完**的远端调用(`ssh::fs` 的 `mkdir` / `create_file` / `remove` / `rename`,没有进度),所以不进传输列表:成功了 `refresh` 重读一遍当前目录就算反馈;失败推一条错误通知(见 `FilesState::report_error`)。⚠️ 名字里带 `/` 会在本地就挡掉(否则新建会落到别的目录去)。⚠️ 重命名 / 删除之后**清掉选中**:`selected` 存的是下标链,重读之后那个下标已经是别的条目了。
+- **删除是危险操作**:`confirm_remove`(`activity_bar`)先弹一个确认对话框(目录那一路的文案会说明「里面的内容会一起删掉」),确认按钮用 `danger` 变体。
+
 
 - **打开**(双击文件行 / 行右键「打开」,只对文件):`FilesState::open_file` 先把远端文件下到**本地缓存**(`dirs::cache_dir()/alacrterm/preview/<序号>-<名字>`,序号是 `FilesState::cache_seq`,避免两个标签缓存同名文件时互相删缓存),下完**按类型分两条路**:
   - **文本 / 图片 / 其他** ⇒ 送给预览窗口(见 §3.5.1):窗口已开就**加一个标签**,没开才开窗。**先下再看**是为了让预览那一侧只认识「一个本地路径」(图片走 gpui 的图片元素,不必再为「远端」写一套解码)。⚠️ 请求里还要捎上 `SshFs` 句柄与根实体:文本在那个窗口里能改,「保存」要写回远端(`upload_one`),写完还要让本视图把所在目录重读一次(见 §3.5.1)。
-  - **音频 / 视频** ⇒ **不开窗口**,直接 `App::open_with_system`(`FileKind::handed_to_system` 判的;进程里没有解码器,见 §3.5.1)。那份副本要留给播放器读、应用不知道它什么时候读完,所以**留在缓存目录里不删**,由下次启动统一清(`clear_preview_cache`,在 `main` 里、任何窗口打开之前调一次 —— 那一刻还没有窗口在用它们,剩下的只可能是上次跑留下的;被上一轮播放器占着的文件删不掉,忽略即可)。⚠️ 这条「打开」只推一条 info 通知说明交给了系统,不像预览窗口那样自带反馈。
+  - **音频 / 视频** ⇒ **不开窗口**,直接 `App::open_with_system`(`FileKind::handed_to_system` 判的;进程里没有解码器,见 §3.5.1)。那份副本要留给播放器读、应用不知道它什么时候读完,所以**留在缓存目录里不删**,由下次启动统一清(`clear_preview_cache`,在 `main` 里、任何窗口打开之前调一次 —— 那一刻还没有窗口在用它们,剩下的只可能是上次跑留下的;被上一轮播放器占着的文件删不掉,忽略即可)。⚠️ 这条「打开」**不推通知**(系统自己把窗口弹出来了就是反馈)。
   - ⚠️ 序号不能省:两个标签看不同目录下的同名文件时,共用一份缓存会在关掉其中一个时把另一个正在用的文件删掉。
-- **上传**:两种入口,都落到 `FilesState::start_upload`(`locals` 可以是文件也可以是目录,目录递归)。
+- **上传**:三种入口,都落到 `FilesState::start_upload`(`locals` 可以是文件也可以是目录,目录递归)。
   1. **拖放**(主入口):把本地文件 / 目录拖进侧边栏的「文件管理器」面板即上传 —— 目标目录不需要瞄,整块面板都是落点。实现在 `sidebar_panel/activity_bar.rs` 的 `files_panel`:平台层把外部拖拽翻译成内部拖拽(`FileDropEvent` → `active_drag` 里放 `ExternalPaths`,见 `gpui_pre::window`),所以只要 `.on_drop::<ExternalPaths>`。⚠️ `on_drop` 是 `InteractiveElement` 的方法,要显式 `use gpui::InteractiveElement as _`;⚠️ 它必须挂在 `context_menu` **之前**(`context_menu` 会把元素包成 `ContextMenu<E>`,那个类型上没这个方法)。
   2. **右键菜单**:「上传文件…」/「上传文件夹…」走系统选择器(`App::prompt_for_paths`,可多选),给不习惯拖放的人。
+  3. **工具栏那枚「上传」**:同上,只问文件(见上面那张表)。
 - **上传落到哪个目录** = `FilesState::upload_target_dir()`:**选中目录 ⇒ 它本身;选中文件 ⇒ 它的父目录;什么都没选 ⇒ 当前根目录**。
-- **下载**(行右键,文件目录都有):`download_as` 走系统对话框(文件 = **另存为** `prompt_for_new_path`,目录 = 选目标目录 `prompt_for_paths` + `fs.download` 整棵下);`download_to_download_dir` 不问直接落到 `dirs::download_dir()`。⚠️ 单个文件落到下载目录时用 `unique_path` 自动改名(`name (1).ext`),**绝不覆盖**用户已有的文件;走「另存为」时重名交给系统自己问,应用里不偷偷改名。
-- **传输行**:每条在跑的传输摊成一行(`FilesItem::Transfer`),摆在路径框下面、树上面(有东西在传时它最该被看到),显示名字 + 进度条 + 「取消」。进度数据来自 `Transfer::events`,由 `FilesState::spawn_transfer` 起的任务读:`Progress` 推进那一行,`Done` 收尾(收掉行 → 预览窗口 or 通知 → 重读受影响的目录);⚠️ 通道在 `Done` 之前断掉 = worker 线程没了,`on_transfer_lost` 也要收掉那一行并报错,否则它会永远挂在界面上。⚠️ 取消是「**先收掉行再置位**」:行没了之后 `on_transfer_done` 会早退,所以取消不会弹「传输失败」。
+- **下载**(行右键,文件目录都有**两项**;工具栏那枚「下载」= 里面的 `download_as`):`download_as` 走系统对话框(文件 = **另存为** `prompt_for_new_path`,目录 = 选目标目录 `prompt_for_paths` + `fs.download` 整棵下);`download_to_download_dir` 不问直接落到 `dirs::download_dir()`。⚠️ 单个文件落到下载目录时用 `unique_path` 自动改名(`name (1).ext`),**绝不覆盖**用户已有的文件;走「另存为」时重名交给系统自己问,应用里不偷偷改名。
+- **传输行**:每条在跑的传输摊成一行(`FilesItem::Transfer`),摆在路径框下面、树上面(有东西在传时它最该被看到),显示名字 + 进度条 + 「取消」。进度数据来自 `Transfer::events`,由 `FilesState::spawn_transfer` 起的任务读:`Progress` 推进那一行,`Done` 收尾(收掉行 → 预览窗口 or 交给系统 → 重读受影响的目录);⚠️ 通道在 `Done` 之前断掉 = worker 线程没了,`on_transfer_lost` 也要收掉那一行并报错,否则它会永远挂在界面上。⚠️ 取消是「**先收掉行再置位**」:行没了之后 `on_transfer_done` 会早退,所以取消不会弹「传输失败」。
+- ⚠️ **成功了不推通知**:进度行消失 + 列表重读就是反馈(传上去的文件会自己出现在树里),弹 toast 只会盖住用户正在看的东西;失败才推(`FilesState::report_error`,传丢的那条、`on_transfer_lost`、以及建 / 删 / 改名的失败都走它)。`TransferDone` 只决定「完了还要不要顺手干点什么」(开预览窗口 / 交给系统程序),不再带通知文本。
 - ⚠️ 换会话(`FilesState::sync`)会清掉传输行,但在途的传输**不会**停(它们活在 worker 那条连接上)。这是有意的取舍:会话已经换了,行留着也没处显示。
 
 ### 3.3 标签页模型(`TabPane` / `SessionRequest`)
@@ -333,7 +360,7 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 - ⚠️ **「当前标签页」`active` 的权威是键盘焦点**,不是 dock 报的那枚:dock 按**每个标签组**的显示标签各回调一次 `set_active`(gpui-kit `crates/base/src/dock/tab_group.rs` 的 `reconcile_active`,dock 被拖成两组时两组都会把自己那枚报成当前),所以 `AppRoot::render` 每帧找**真正持有焦点**的终端校正 `active`(`TabPane::is_focused` = 本页任意一格持有焦点),焦点不在任何终端里(点侧边栏 / 设置、窗口失焦)时保持原值 —— 否则一点自己的文件树,「文件管理器」就会跳到另一个标签页上。焦点落进终端会 `cx.notify()`,而根视图 `observe` 着每台 `TerminalView` ⇒ 这一帧的渲染必定跟在焦点变化之后(见 §3.2 文件管理器)。⚠️ 窗口标题也因此改由 `AppRoot::render` 统一设置(以前是每台终端在自己 `render` 里 `set_window_title`,一页多格时会互相抢)。
 - 进程结束(本地 shell 退出 / SSH 断开):只标记 `exited` 并 `notify`,标签与终端内容保留(断开原因写在网格里,见 §5.2),用户自己决定关掉还是重开(§5)。
 
-### 3.4 对话框(`dialog/connection.rs` / `dialog/folder.rs` / `dialog/host_key.rs`)
+### 3.4 对话框(`dialog/*.rs`)
 
 **「新建会话」**(`dialog/connection.rs`)
 
@@ -347,6 +374,12 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 
 - 触发:侧边栏「会话」视图的**空白处 / 面板标题右键**「新建文件夹」(`NewFolder{parent: None}`)、文件夹行右键「新建子文件夹」(`NewFolder{parent: Some(path)}`)
 - 只有一个「名称」输入框:空名字禁用「创建」,`on_ok` 里再兜一次;创建后追加到目标目录末尾并展开它
+
+**「输入名字」**(`dialog/name.rs`,文件管理器共用)
+
+- 触发:文件管理器工具栏的**新建文件夹 / 新建文件 / 重命名**三枚按钮 —— 三个动作要的都是「一个名字」,形态完全一样(只有标题 / 占位符 / 确认按钮三个字不同),所以只有一个 [`open_name_dialog`](`crate::dialog::name::open_name_dialog`) 而不是三个对话框
+- 只有一个「名称」输入框:空白名禁用确认按钮,`on_ok` 里再兜一次;`initial` 有值时预填(**重命名**用:旧名字摆在那儿让用户接着改)
+- ⚠️ 与其它对话框不同,它是**自由函数**而不是 `AppRoot` 的方法:触发点(工具栏按钮)手里有 `&mut Window` 与 `&mut App`,而 `WindowExt::open_dialog` 正好只要这两样 —— 不需要绕到根实体去
 
 **「未知主机密钥」**(`dialog/host_key.rs`)
 
@@ -420,9 +453,10 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 
 ### 3.6 状态栏(`status_bar.rs`)
 
-- **每列一条**(`status_bar::empty_status_bar`,高度 `STATUS_BAR_HEIGHT` = 28px):**中间列**那条在终端区下方(宽 = 中间列宽,**只在有标签页时摆**——欢迎页时整条不存在);**侧边栏**那条在面板下沿(宽 = 侧边栏宽,由 `Sidebar::status_bar` 槽挂上,**折叠时不摆**)。两条都是 gpui-kit 的 `StatusBar`(底色 / 上边框 / 字号都由组件给),都是**空条**;两条同高同底 ⇒ 都在时看上去就是窗底一条连续的条,只有最左那条 48px 图标栏(仍铺到底)把它断开(照 VS Code)。
+- **每列一条,都是空条**(高度 `STATUS_BAR_HEIGHT` = 28px,两条都是 gpui-kit 的 `StatusBar` —— 底色 / 上边框 / 字号都由组件给):**中间列**那条在终端区下方(宽 = 中间列宽,**只在有标签页时摆**——欢迎页时整条不存在);**侧边栏**那条在面板下沿(宽 = 侧边栏宽,由 `Sidebar::status_bar` 槽挂上,**折叠时不摆**)。两条同高同底 ⇒ 都在时看上去就是窗底一条连续的条,只有最左那条 48px 图标栏(仍铺到底)把它断开(照 VS Code)。
+- ⚠️ **文件管理器的按钮不在状态栏里**:它们在自己面板**顶部的工具栏**上(照 MobaXterm;见 §3.2「文件管理器」)。侧边栏那条状态栏留空是为了以后放会话 / 连接信息,不再挂动作按钮(28px 高的一条最多只容得下 xsmall 控件,见下)。
 - ⚠️ **中间那条曾放会话指标**(连接状态 / 连接目标 / 进程 CPU / 内存 / 系统网络速率,每 1.5s 采样),整块已按需求移除,连同 `status_metrics.rs` 采样任务(`start_metrics_sampling` / `SystemMonitor` / `SessionMetrics`)与 `alacrterm` 的 `sysinfo` 依赖。⇒ 不要为了「再加一个指标」把它装回来;真要加,注意那次每 1.5s 的 `cx.notify()` 会让**整棵树**重建(§9 的优化清单)。
-- ⚠️ 状态栏高度是钉死的(`StatusBar` 自身按内容撑高):以后要往这条空条里放东西,带图标的按钮得显式 `h(px(16.))`(gpui-kit `Button` 最小 20px,会把条撑高)。
+- ⚠️ **条高是钉死的**(`.h(28)` + `.flex_none()`):28px 减掉 `StatusBar` 自己的 `py_1` = **内容高只有 20px** ⇒ 要往里放东西只能用 **xsmall**(20px)控件,再大就会把内容顶出去(`.h(28)` 压不住)。
 
 ### 3.7 右键菜单与 Action(`actions.rs`)
 
@@ -862,14 +896,17 @@ graph LR
   - ⚠️ **取消是共享的原子标志(`CancelToken`),不是一条消息**:worker 跑起来就占住了自己那条通道,用消息取消恰恰在「最需要取消」的时候送不进去。置位后 worker 在**下一个分块边界**放弃(不会中断一次进行中的往返)。
   - ⚠️ 宿主把 `Transfer::events` 丢掉 = 取消(worker 发现没人要结果就停),所以窗口 / 行被关掉时不必专门清理。
 - 线程模型与 `session.rs` 同一套(自带 OS 线程 + current-thread 运行时);跨边界只用**执行器无关**的通道:浏览走 `tokio::mpsc`(请求)+ `futures::oneshot`(应答),传输走 `futures::mpsc`(请求 + 进度 / 结果 —— 结果不再单开一条 oneshot,`Done` 就是通道里的最后一个事件)。发送失败(线程已退出)会**清掉句柄重试一次**。
-- API:浏览 `home_dir()`(远端家目录)/ `list_dir(path)`(一层,排序 = 目录在前、名字不区分大小写)/ `is_dir(path)` / `stat(path)`;传输 `upload(locals, remote_dir)` / `download(remotes, local_dir)` / `download_one(remote, local_file)` / `upload_one(local_file, remote_file)`;另有 `host()`(只放主机名,给预览窗口状态栏拼「主机:路径」用 —— ⚠️ **不要**改成把 `SshParams` 整个透出去,那里面带着密码)。错误统一翻成一句中文(`远端没有这个路径` / `拒绝访问` / `响应超时` / `传输已取消` / …)。
+- API:浏览 `home_dir()`(远端家目录)/ `list_dir(path)`(一层,排序 = 目录在前、名字不区分大小写)/ `is_dir(path)` / `stat(path)`;短写操作 `mkdir(path)` / `create_file(path)`(建空文件:**已存在就失败**,靠 `OpenFlags::EXCLUDE` —— ⚠️ 别改成 `session.create()`,它带 `TRUNCATE`,会把用户的文件默默清空)/ `rename(from, to)`(都是 `BoxFuture`,走浏览那条请求 / 应答);递归删除 `remove(path, is_dir)`(**返回 `Transfer`**,走传输通道,有进度与取消);传输 `upload(locals, remote_dir)` / `download(remotes, local_dir)` / `download_one(remote, local_file)` / `upload_one(local_file, remote_file)`;另有 `host()`(只放主机名,给预览窗口状态栏拼「主机:路径」用 —— ⚠️ **不要**改成把 `SshParams` 整个透出去,那里面带着密码)。错误统一翻成一句中文(`远端没有这个路径` / `拒绝访问` / `响应超时` / `传输已取消` / …)。
 - ⚠️ `upload_one` 与 `upload` 的区别是**不改名、不拼目录**:远端路径由调用方给全,同名远端文件被**覆盖 / 截断**(`create` = CREATE|TRUNCATE|WRITE)。它是 `download_one` 的反向,给预览窗口的「保存」用(见 §3.5.1)——那条路必须写回**打开时那个路径**。
 - **`RemoteEntry` 带 `size`**:界面靠它显示大小 / 传给预览窗口;目录那点大小(4096 之类)没有意义,在 `list_dir` 里直接归零。
 - **传输的实现**:先把清单摊平(目录递归,**父目录排在子目录前面**)再开传 ⇒ 进度条一开始就知道总数 / 总字节数,文件名也显示得出来。文件用 `SftpSession::open` / `create` + 64 KiB 分块搬。⚠️ 写完必须 `File::close()`:它才会把在途的写等回来并发 `CLOSE`,只靠 `Drop` 不等在途写,远端那份可能是残的。⚠️ 进度**按字节累积到 256 KiB 才上报一次**(一个 1 GiB 的文件有 16384 个分块,比屏幕刷新还密就没有意义了)。
 - ⚠️ **状态错误不丢连接**(没有这个路径 / 没权限只是那一条路径的事),只有 IO / 超时 / 协议错误才丢连接让下次重连。⚠️ 传输那侧的读写接口返回的是 `io::Error`,要用 `get_ref().downcast_ref::<SftpError>()` 把原错误取回来才分得出这两类(`File` 内部是 `io::Error::new` 裹着 SftpError);写失败那一路只带一句服务端的文本,取不回来就按「连接不可靠」处理。
 - ⚠️ 上传目录时**指向目录的符号链接不递归**(指回上层目录的链接会让遍历转不出来),只记一条 debug 日志。
 - ⚠️ 未知主机 + 这条连接**没有确认通道** ⇒ 直接失败并提示「请先打开这台主机的终端会话,在那里信任它的主机密钥」(不能干等)。
-- ⚠️ 要加新的远端写操作(删除 / 重命名 / 新建文件夹)请沿用同一套「传输请求 + 事件通道」的形状,不要往浏览那条请求 / 应答上挂长任务。
+- ⚠️ **新的远端写操作该走哪条通道,看它有多长**:
+  - **单次往返**的(建目录 / 建文件 / 改名)挂**浏览**那条请求 / 应答 —— 它们快到不存在「把浏览卡住」的问题,而且**不该排在正在跑的大文件传输后面**(用户刚建个文件夹,却因为后台在下 2 GiB 文件而等几分钟,比多占一次往返难受得多)。
+  - **可能很久**的挂**传输**那条(现在只有递归删除:一棵装满东西的子树可能上千个条目)。走那边顺带拿到进度行与取消,而且不阻塞浏览。代价是与上传 / 下载排队(传输 worker 一次只跑一个)。
+  - 判断标准是**它会不会遍历 / 搬很多字节**,不是「它算不算写操作」。
 
 ### 5.4 远端当前目录:`Terminal::remote_directory`(OSC 7 + 标题)
 

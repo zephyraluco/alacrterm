@@ -1,4 +1,4 @@
-//! 侧边栏面板:顶部标题栏 + 下方可滚动的内容列表 + 底部状态栏。
+//! 侧边栏面板:顶部标题栏 + 工具栏 + 下方可滚动的内容列表 + 底部状态栏。
 
 use std::rc::Rc;
 
@@ -12,6 +12,8 @@ use gpui_kit::component::ActiveTheme as _;
 
 const CONTENT_PADDING: gpui::Pixels = px(12.);
 const HEADER_PADDING: gpui::Pixels = px(12.);
+/// 工具栏与下方列表之间的空隙。
+const TOOLBAR_GAP: gpui::Pixels = px(8.);
 const LIST_OVERDRAW_RATIO: f32 = 0.3;
 
 /// 侧边栏里的一行。
@@ -25,6 +27,8 @@ pub(crate) trait SidebarRow: Clone + 'static {
 pub(crate) struct Sidebar<E: SidebarRow> {
     id: ElementId,
     header: Option<AnyElement>,
+    /// 标题栏下面那一行工具条（「文件管理器」的图标按钮就摆这儿）。
+    toolbar: Option<AnyElement>,
     status_bar: Option<AnyElement>,
     rows: Vec<E>,
 }
@@ -34,6 +38,7 @@ impl<E: SidebarRow> Sidebar<E> {
         Self {
             id: id.into(),
             header: None,
+            toolbar: None,
             status_bar: None,
             rows: Vec::new(),
         }
@@ -42,6 +47,12 @@ impl<E: SidebarRow> Sidebar<E> {
     /// 顶部标题栏。
     pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
         self.header = Some(header.into_any_element());
+        self
+    }
+
+    /// 标题栏下面那一行工具条（固定、不随内容滚动）。
+    pub(crate) fn toolbar(mut self, toolbar: Option<AnyElement>) -> Self {
+        self.toolbar = toolbar;
         self
     }
 
@@ -90,6 +101,16 @@ impl<E: SidebarRow> RenderOnce for Sidebar<E> {
                         .px(HEADER_PADDING)
                         .gap_2()
                         .child(header),
+                )
+            })
+            // 工具栏:标题栏与列表之间那条(只有「文件管理器」才挂)。
+            .when_some(self.toolbar, |this, toolbar| {
+                this.child(
+                    v_flex()
+                        .id(format!("{id}-toolbar"))
+                        .px(CONTENT_PADDING)
+                        .pb(TOOLBAR_GAP)
+                        .child(toolbar),
                 )
             })
             .child(
