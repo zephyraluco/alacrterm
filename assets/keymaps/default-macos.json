@@ -60,5 +60,15 @@
       "shift-down": "alacrterm::ScrollLineDown",
       "ctrl-shift-space": "alacrterm::ToggleViMode"
     }
+  },
+  {
+    // 预览窗口（`preview_window.rs`）：Cmd+S 把改过的文本写回远端，其余是窗口级的动作。
+    "context": "Preview",
+    "bindings": {
+      "cmd-s": "alacrterm::SavePreviewFile",
+      "cmd-w": "alacrterm::ClosePreviewWindow",
+      "cmd-g": "alacrterm::GotoPreviewLine",
+      "alt-z": "alacrterm::TogglePreviewWordWrap"
+    }
   }
 ]

@@ -8,7 +8,9 @@
 //! - 远端字节 → [`SshEvent::Data`];
 //! - 本地字节 → 远端(服务端把它回显成 `REPLY:<行>`);
 //! - 窗口尺寸变更(服务端回 `SIZE:<cols>x<rows>`);
-//! - 远端退出码 → [`SshEvent::Closed::exit_status`]。
+//! - 远端退出码 → [`SshEvent::Closed::exit_status`];
+//! - SFTP:列目录 / 元数据,以及上传 → 下载的往返与**单个文件写回**(`upload_one`,预览窗口的
+//!   「保存」走的就是它)。
 //!
 //! 服务端本身在 `examples/local_server.rs` —— 那份同时也能手工跑起来玩(见它的模块文档)。
 
@@ -349,6 +351,288 @@ async fn filesystem_lists_the_remote_directory() {
     );
 
     let _ = std::fs::remove_file(&known_hosts);
+}
+
+/// 传输(上传 / 下载):把本地文件传上去,再下回来,内容要一模一样。
+///
+/// 同时覆盖:`Transfer` 的进度事件、`Done(Ok)` 收尾、`stat` 报出来的大小,以及
+/// 「中间那条**第二条连接**」也真的能建起来(见 `crates/ssh/src/fs.rs` 的模块文档)。
+///
+/// ⚠️ 这里的「远端」就是本机(`local_server` 的服务端跑在同一个进程里),所以:
+/// - 远端路径直接取 `temp_dir()`,测试数据不会落到仓库目录里;
+/// - **源目录与目标目录必须分开**,否则上传会把源文件自己截断(同一个文件);
+/// - 收尾用 `std::fs` 直接删 —— [`SshFs`] 不提供删除远端文件的接口(本次只做读 + 上传下载)。
+#[tokio::test]
+async fn filesystem_upload_download_round_trip() {
+    use ssh::{RemoteEntry, SshFs};
+
+    let port = local_server::serve().await.expect("起本地服务端");
+    let known_hosts = temp_known_hosts("fs-transfer");
+
+    let mut params = SshParams::new("127.0.0.1", port, "tester");
+    params.auth = SshAuth::Password(PASSWORD.to_string());
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+
+    let fs = SshFs::new(params);
+    let _ = fs.home_dir().await.expect("取家目录");
+
+    // 本地源目录 / 远端目标目录分开,名字保持独立。
+    let name = "alacrterm-transfer-test.bin";
+    let source_dir = std::env::temp_dir().join("alacrterm-transfer-src");
+    let remote_dir_path = std::env::temp_dir().join("alacrterm-transfer-dst");
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let _ = std::fs::remove_dir_all(&remote_dir_path);
+    std::fs::create_dir_all(&source_dir).expect("建本地源目录");
+    std::fs::create_dir_all(&remote_dir_path).expect("建远端目标目录");
+
+    let remote_dir = remote_dir_path.to_string_lossy().to_string();
+    let remote_file = format!("{remote_dir}/{name}");
+
+    // 本地源文件:比一个分块(64 KiB)大,好让进度上报真的被累加 / 节流过。
+    let source = source_dir.join(name);
+    let payload: Vec<u8> = (0..(200 * 1024u32)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&source, &payload).expect("写本地源文件");
+
+    let mut upload = fs.upload(vec![source.clone()], remote_dir.clone());
+    let uploaded = drive(&mut upload).await;
+    assert!(uploaded.is_ok(), "上传应当成功:{uploaded:?}");
+
+    // 远端真的有了,而且大小对得上。
+    let meta = fs.stat(remote_file.clone()).await.expect("取远端元数据");
+    assert!(!meta.is_dir, "刚传上去的应当是文件");
+    assert_eq!(meta.size, payload.len() as u64, "远端大小应当与本地一致");
+
+    // 列目录里也要带上它,并且 `size` 是真实的(界面靠它显示大小)。
+    let entries: Vec<RemoteEntry> = fs.list_dir(remote_dir.clone()).await.expect("列目录");
+    let listed = entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .expect("列表里应当有刚传上去的文件");
+    assert_eq!(
+        listed.size,
+        payload.len() as u64,
+        "列表里的大小应当是文件大小"
+    );
+
+    // 下回本地另一个路径,逐字节比对。
+    let target = std::env::temp_dir().join("alacrterm-transfer-target.bin");
+    let _ = std::fs::remove_file(&target);
+    let mut download = fs.download_one(remote_file.clone(), target.clone());
+    let downloaded = drive(&mut download).await;
+    assert!(downloaded.is_ok(), "下载应当成功:{downloaded:?}");
+    assert_eq!(
+        std::fs::read(&target).expect("读回下载的文件"),
+        payload,
+        "下回来的内容应当与传上去的一模一样"
+    );
+
+    let _ = std::fs::remove_file(&target);
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let _ = std::fs::remove_dir_all(&remote_dir_path);
+    let _ = std::fs::remove_file(&known_hosts);
+}
+
+/// 目录上传:整棵子树都要过去(远端该建的目录要建出来)。
+#[tokio::test]
+async fn filesystem_uploads_a_directory_recursively() {
+    use ssh::SshFs;
+
+    let port = local_server::serve().await.expect("起本地服务端");
+    let known_hosts = temp_known_hosts("fs-upload-dir");
+
+    let mut params = SshParams::new("127.0.0.1", port, "tester");
+    params.auth = SshAuth::Password(PASSWORD.to_string());
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+
+    let fs = SshFs::new(params);
+    let _ = fs.home_dir().await.expect("取家目录");
+
+    // 本地源树 / 远端目标目录分开(见上一个测试的说明)。
+    let local_root = std::env::temp_dir().join("alacrterm-upload-src");
+    let remote_root_path = std::env::temp_dir().join("alacrterm-upload-dst");
+    let _ = std::fs::remove_dir_all(&local_root);
+    let _ = std::fs::remove_dir_all(&remote_root_path);
+    std::fs::create_dir_all(local_root.join("nested")).expect("建本地目录");
+    std::fs::create_dir_all(&remote_root_path).expect("建远端目标目录");
+    std::fs::write(local_root.join("a.txt"), b"top level").expect("写 a.txt");
+    std::fs::write(local_root.join("nested").join("b.txt"), b"nested level").expect("写 b.txt");
+
+    let remote_root = remote_root_path.to_string_lossy().to_string();
+    let mut upload = fs.upload(vec![local_root.clone()], remote_root.clone());
+    let uploaded = drive(&mut upload).await;
+    assert!(uploaded.is_ok(), "整棵目录上传应当成功:{uploaded:?}");
+
+    // 远端那两层的文件都在,内容也对(远端就是本机,所以这里的断言是真的在查「远端」)。
+    for (relative, expected) in [("a.txt", "top level"), ("nested/b.txt", "nested level")] {
+        let remote = remote_root_path
+            .join("alacrterm-upload-src")
+            .join(relative);
+        let meta = fs
+            .stat(remote.to_string_lossy().to_string())
+            .await
+            .expect("远端文件应当存在");
+        assert_eq!(meta.size, expected.len() as u64, "{remote:?} 大小不对");
+        assert_eq!(
+            std::fs::read_to_string(&remote).expect("读远端文件"),
+            expected,
+            "{remote:?} 内容不对"
+        );
+    }
+
+    // 收尾:远端那棵、本地那棵都删掉。
+    let _ = std::fs::remove_dir_all(&remote_root_path);
+    let _ = std::fs::remove_dir_all(&local_root);
+    let _ = std::fs::remove_file(&known_hosts);
+}
+
+/// 单个文件写回(`upload_one`):按**指定路径**写,覆盖 / 截断同名远端文件。
+///
+/// 预览窗口的「保存」走的就是这条 —— 要写回的正是打开时那个远端路径,不能改名、也不能落到
+/// 别的目录(那是 `upload` 的语义)。
+#[tokio::test]
+async fn filesystem_writes_back_a_single_file() {
+    use ssh::SshFs;
+
+    let port = local_server::serve().await.expect("起本地服务端");
+    let known_hosts = temp_known_hosts("fs-write-back");
+
+    let mut params = SshParams::new("127.0.0.1", port, "tester");
+    params.auth = SshAuth::Password(PASSWORD.to_string());
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+
+    let fs = SshFs::new(params);
+    let _ = fs.home_dir().await.expect("取家目录");
+
+    // 本地那份(界面上对应「缓存文件」)/ 远端目标目录分开(见第一个传输测试的说明)。
+    let local_dir = std::env::temp_dir().join("alacrterm-writeback-src");
+    let remote_dir_path = std::env::temp_dir().join("alacrterm-writeback-dst");
+    let _ = std::fs::remove_dir_all(&local_dir);
+    let _ = std::fs::remove_dir_all(&remote_dir_path);
+    std::fs::create_dir_all(&local_dir).expect("建本地目录");
+    std::fs::create_dir_all(&remote_dir_path).expect("建远端目标目录");
+
+    let local = local_dir.join("notes.txt");
+    let edited = "改过之后的内容\n";
+    std::fs::write(&local, edited).expect("写本地文件");
+
+    // 远端先摆一份**更长**的旧内容:写回必须把多出来的那截截掉(`create` 是
+    // CREATE|TRUNCATE|WRITE,不然文件尾部会留上一版的内容)。
+    let remote_path = remote_dir_path.join("notes.txt");
+    std::fs::write(&remote_path, "旧的、比新内容长得多的内容\n".repeat(64)).expect("写远端旧文件");
+    let remote = remote_path.to_string_lossy().to_string();
+
+    let mut write_back = fs.upload_one(local.clone(), remote.clone());
+    let written = drive(&mut write_back).await;
+    assert!(written.is_ok(), "写回应当成功:{written:?}");
+
+    assert_eq!(
+        std::fs::read_to_string(&remote_path).expect("读远端文件"),
+        edited,
+        "远端内容应当是写回的那一份"
+    );
+    let meta = fs.stat(remote.clone()).await.expect("取远端元数据");
+    assert_eq!(
+        meta.size,
+        edited.len() as u64,
+        "远端大小应当是写回后的大小"
+    );
+
+    // 目标目录不存在时要给一句可读的失败,而不是静默成功。
+    let missing = format!(
+        "{}/no-such-dir-1a2b3c/notes.txt",
+        std::env::temp_dir().to_string_lossy().replace('\\', "/")
+    );
+    let mut failed = fs.upload_one(local, missing);
+    let message = drive(&mut failed)
+        .await
+        .expect_err("往不存在的目录里写应当失败")
+        .to_string();
+    assert!(
+        message.contains("远端没有这个路径"),
+        "失败原因应当可读,实际:{message}"
+    );
+
+    let _ = std::fs::remove_dir_all(&local_dir);
+    let _ = std::fs::remove_dir_all(&remote_dir_path);
+    let _ = std::fs::remove_file(&known_hosts);
+}
+
+/// 取消:请求取消之后,`Done` 要给 [`SshError::Cancelled`],而不是装作成功。
+#[tokio::test]
+async fn cancelled_transfer_reports_cancelled() {
+    use ssh::{SshError, SshFs};
+
+    let port = local_server::serve().await.expect("起本地服务端");
+    let known_hosts = temp_known_hosts("fs-cancel");
+
+    let mut params = SshParams::new("127.0.0.1", port, "tester");
+    params.auth = SshAuth::Password(PASSWORD.to_string());
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+
+    let fs = SshFs::new(params);
+    let _ = fs.home_dir().await.expect("取家目录");
+
+    // 源目录 / 目标目录分开(见第一个传输测试的说明)。
+    let source_dir = std::env::temp_dir().join("alacrterm-cancel-src");
+    let remote_dir_path = std::env::temp_dir().join("alacrterm-cancel-dst");
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let _ = std::fs::remove_dir_all(&remote_dir_path);
+    std::fs::create_dir_all(&source_dir).expect("建本地源目录");
+    std::fs::create_dir_all(&remote_dir_path).expect("建远端目标目录");
+
+    // 够大,保证「取消」一定发生在传完之前:开传之前就已经置位了,所以第一个分块边界就会停。
+    let source = source_dir.join("alacrterm-cancel-test.bin");
+    std::fs::write(&source, vec![7u8; 8 * 1024 * 1024]).expect("写本地源文件");
+
+    let remote_dir = remote_dir_path.to_string_lossy().to_string();
+    let mut upload = fs.upload(vec![source.clone()], remote_dir.clone());
+    upload.cancel.cancel();
+    let result = drive(&mut upload).await;
+    assert!(
+        matches!(result, Err(SshError::Cancelled)),
+        "取消之后应当报 Cancelled,实际是 {result:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let _ = std::fs::remove_dir_all(&remote_dir_path);
+    let _ = std::fs::remove_file(&known_hosts);
+}
+
+/// 把一条传输跑到结束,返回 `Done` 里的结果。
+///
+/// 顺带断言:进度里的字节数是**单调不减**的、不超过总数,文件数也不超过总数 —— 界面上的
+/// 进度条与「第 n/m 个」就靠这几条不跳。
+async fn drive(transfer: &mut ssh::Transfer) -> Result<(), ssh::SshError> {
+    use ssh::TransferEvent;
+
+    let mut last_bytes = 0;
+    while let Some(event) = transfer.events.next().await {
+        match event {
+            TransferEvent::Progress(progress) => {
+                assert!(
+                    progress.bytes_done >= last_bytes,
+                    "进度字节数不该倒退:{} -> {}",
+                    last_bytes,
+                    progress.bytes_done
+                );
+                assert!(
+                    progress.bytes_total == 0 || progress.bytes_done <= progress.bytes_total,
+                    "已传字节数不该超过总数:{progress:?}"
+                );
+                assert!(
+                    progress.files_done <= progress.files_total,
+                    "已传文件数不该超过总数(目录不能算进 files_done):{progress:?}"
+                );
+                last_bytes = progress.bytes_done;
+            }
+            TransferEvent::Done(result) => return result,
+        }
+    }
+    panic!("通道在 Done 之前就断了");
 }
 
 /// [`SshFs`] 那条连接没有确认通道:未知主机必须**直接失败并说清怎么办**,不能干等。

@@ -39,7 +39,8 @@
 //! ## 远端文件系统
 //!
 //! [`SshFs`](crate::SshFs) 另开一条连接走 SFTP 子系统(见 [`fs`] 模块文档里的取舍),
-//! 由 [`SshSession::fs`] 取到,用于远端目录浏览。它是**懒连接**:不用就不连。
+//! 由 [`SshSession::fs`] 取到,用于远端目录浏览与文件上传 / 下载,以及把预览窗口里改过的
+//! 文本写回远端(见 [`SshFs::upload_one`])。它是**懒连接**:不用就不连。
 
 mod auth;
 mod error;
@@ -49,7 +50,7 @@ mod params;
 mod session;
 
 pub use error::SshError;
-pub use fs::{RemoteEntry, SshFs};
+pub use fs::{CancelToken, RemoteEntry, RemoteMeta, SshFs, Transfer, TransferEvent, TransferProgress};
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
 pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize};
 pub use session::{SshEvent, SshSession};

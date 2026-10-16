@@ -55,6 +55,12 @@ actions!(
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
+        // 预览窗口（窗口自己接，见 `preview_window.rs` 的 `Render::on_action`）
+        SavePreviewFile,
+        // 关**当前标签**（最后一个标签关掉 = 关窗口）
+        ClosePreviewWindow,
+        TogglePreviewWordWrap,
+        GotoPreviewLine,
         // 预留：终端内查找（UI 未实现，默认 keymap 里没有绑定）
         SearchTerminal,
     ]

@@ -3,6 +3,7 @@ mod mappings;
 mod alacritty;
 mod backend;
 mod pty_info;
+mod shell_integration;
 
 use anyhow::{Context as _, Result, bail};
 use log::trace;
@@ -44,7 +45,10 @@ use crate::backend::{INITIAL_PTY_SIZE, TerminalBackend};
 
 /// 远端会话用的类型（连接参数、主机密钥确认、远端文件系统）从 [`ssh`] crate 透出 ——
 /// 视图层与应用层不必自己依赖 `ssh`。
-pub use ssh::{HostKeyDecision, HostKeyPrompt, RemoteEntry, SshAuth, SshFs, SshParams};
+pub use ssh::{
+    CancelToken, HostKeyDecision, HostKeyPrompt, RemoteEntry, RemoteMeta, SshAuth, SshError, SshFs,
+    SshParams, Transfer, TransferEvent, TransferProgress,
+};
 
 use gpui::{
     App, AppContext as _, BackgroundExecutor, Bounds, ClipboardItem, Context, EventEmitter, Hsla,
@@ -65,6 +69,7 @@ use crate::alacritty::{
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
+use crate::shell_integration::{DirectoryScanner, Report};
 
 /// Cooperative yield to the async executor so other tasks (e.g. rendering)
 /// can make progress. Replaces `futures_lite::future::yield_now`.
@@ -1046,6 +1051,9 @@ impl TerminalBuilder {
                 backend,
                 ssh_events,
                 ssh_pending: None,
+                remote_cwd: None,
+                osc7_seen: false,
+                directory_scanner: DirectoryScanner::default(),
                 resized_once: false,
                 ssh_status_shown: false,
                 // 本地：PTY 建好就算可用；远端：等 `SshEvent::Connected`（见 `is_connected`）。
@@ -1195,6 +1203,18 @@ pub struct Terminal {
     ssh_events: Option<UnboundedReceiver<SshEvent>>,
     /// 终端按真实尺寸重排之前攒下的远端输出（见 [`Terminal::feed_remote_bytes`]）。
     ssh_pending: Option<Vec<u8>>,
+    /// 远端 shell 上报的当前目录（见 [`crate::shell_integration`] 的两个来源）。
+    ///
+    /// **只有远端会话**可能有：[`Terminal::working_directory`] 取的是本地 PTY 前台进程的
+    /// cwd，远端没有本地进程可采样，所以那条路恒为 `None` —— 远端目录只能由远端 shell
+    /// 自己说出来。
+    remote_cwd: Option<String>,
+    /// 已经收到过**精确**的 OSC 7 上报吗（见 [`Self::remote_cwd`]）。
+    ///
+    /// 收到过就不再用标题那条启发式路子盖它（见 [`Self::feed_remote_bytes`]）。
+    osc7_seen: bool,
+    /// OSC 扫描器（跨块状态，见 [`crate::shell_integration::DirectoryScanner`]）。
+    directory_scanner: DirectoryScanner,
     /// 是否已经按真实尺寸重排过一次（见 [`Terminal::feed_remote_bytes`]）。
     resized_once: bool,
     /// 屏幕上是否正摆着一行 SSH 进度（远端一开口就擦掉，见 [`Terminal::process_ssh_event`]）。
@@ -1325,9 +1345,25 @@ impl Terminal {
     /// [`TerminalBuilder::new`]），此时写进去的东西会被随后的第一次重排顶出可视区
     /// （alacritty `Grid::grow_lines` 在没历史行时会把已有内容整体上滚）。所以先攒着，
     /// 等第一次按真实尺寸重排时再一次性补写。
+    ///
+    /// 这里也是**远端目录的唯一入口**：远端 shell 说的两种话（精确的 OSC 7、以及
+    /// 塞在窗口标题里的 cwd）都只能在我们把字节交给模拟器**之前**认出来
+    /// （[`crate::shell_integration`] 里解释了为什么模拟器那条路不行）。
+    /// 攒着不写的那一段同样要扫 —— 远端第一条上报往往就在里面。
     fn feed_remote_bytes(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
+        }
+
+        match self.directory_scanner.feed(bytes) {
+            // OSC 7 是精确值，拿它当准（之后标题那条不再覆盖）。
+            Some(Report::Osc7(dir)) => {
+                self.remote_cwd = Some(dir);
+                self.osc7_seen = true;
+            }
+            // 标题只是启发式（可能是 `~` 打头的，应用层展开），别盖掉精确值。
+            Some(Report::Title(dir)) if !self.osc7_seen => self.remote_cwd = Some(dir),
+            _ => {}
         }
 
         if !self.resized_once {
@@ -2514,6 +2550,16 @@ impl Terminal {
     /// 这个会话是否可用了（本地会话恒为真；远端会话要等连接建立）。
     pub fn is_connected(&self) -> bool {
         self.connected
+    }
+
+    /// 远端 shell 说出来的当前目录（OSC 7 或窗口标题，见 [`crate::shell_integration`]）；
+    /// 没说到过就是 `None`。
+    ///
+    /// 与 [`Self::working_directory`] 的区别：那个取**本地** PTY 前台进程的 cwd，远端恒为
+    /// `None`；这个只有远端会话才可能有。文件管理器靠它「跟着终端走」。
+    /// ⚠️ 可能是 `~` / `~/x`（标题那条路缩写了家目录），展开在应用层做。
+    pub fn remote_directory(&self) -> Option<&str> {
+        self.remote_cwd.as_deref()
     }
 
     fn register_task_finished(

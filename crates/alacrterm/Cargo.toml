@@ -5,8 +5,28 @@ edition = "2024"
 
 [dependencies]
 gpui = { workspace = true }
-gpui-kit = { workspace = true }
+# 预览窗口的文本编辑器要语法高亮(见 src/preview_window.rs 的 `Language`):gpui-kit 把每个
+# 语法做成一个 feature,这里只开**常用那几种** —— 全开(`tree-sitter-languages`)会拖进三十
+# 多个 grammar crate,构建时间明显变长。⚠️ 增删语言要**同时**改 `Language::of` 与这张清单。
+gpui-kit = { workspace = true, features = [
+    # 基础 + JSON:gpui-kit 把 json 语法并进了 `tree-sitter`(它自己不单列 tree-sitter-json)。
+    "tree-sitter",
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-javascript",
+    "tree-sitter-markdown",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
 anyhow.workspace = true
+dirs.workspace = true
+# 读传输进度通道(见 sidebar_panel/files.rs);`futures` 本来就在 workspace 依赖里。
+futures.workspace = true
 log.workspace = true
 rust-embed = { workspace = true }
 schemars = { workspace = true }
