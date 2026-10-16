@@ -560,6 +560,121 @@ async fn filesystem_writes_back_a_single_file() {
     let _ = std::fs::remove_file(&known_hosts);
 }
 
+/// 临时工作目录(绝对路径;服务端的 `resolve` 对绝对路径原样用)。
+fn temp_dir(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("alacrterm-ssh-test-{name}"));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("建临时工作目录");
+    path
+}
+
+/// 新建 / 改名 / 删除:文件管理器工具栏那几枚按钮走的四条路。
+///
+/// - `mkdir` / `create_file` / `rename` 是**单次往返**的短操作(走浏览那条请求 / 应答);
+/// - `remove` 走**传输**那条通道(目录要递归、可能有进度与取消)。
+#[tokio::test]
+async fn filesystem_creates_renames_and_removes() {
+    use ssh::SshFs;
+
+    let port = local_server::serve().await.expect("起本地服务端");
+    let known_hosts = temp_known_hosts("fs-edit");
+
+    let mut params = SshParams::new("127.0.0.1", port, "tester");
+    params.auth = SshAuth::Password(PASSWORD.to_string());
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+
+    let fs = SshFs::new(params);
+    let _ = fs.home_dir().await.expect("取家目录");
+
+    let root = temp_dir("fs-edit-work");
+    // 服务端那边的路径用 `/` 分隔(它只把绝对路径原样交给 std::fs,Windows 也吃得下 `/`)。
+    let at = |name: &str| {
+        format!(
+            "{}/{}",
+            root.to_string_lossy().replace('\\', "/"),
+            name
+        )
+    };
+
+    // ---- 新建文件夹 ----
+    let dir = at("logs");
+    fs.mkdir(dir.clone()).await.expect("建目录");
+    assert!(
+        fs.is_dir(dir.clone()).await.expect("看新建的目录"),
+        "mkdir 之后它应当是个目录"
+    );
+
+    // 再建一次要失败(而不是静默成功)—— 界面那边靠这条错误提示。
+    let again = fs.mkdir(dir.clone()).await;
+    assert!(again.is_err(), "同名目录再建一次应当失败:{again:?}");
+
+    // ---- 新建空文件 ----
+    let file = at("notes.txt");
+    fs.create_file(file.clone()).await.expect("建空文件");
+    let meta = fs.stat(file.clone()).await.expect("取新建文件元数据");
+    assert!(!meta.is_dir, "新建的应当是文件");
+    assert_eq!(meta.size, 0, "新建的文件应当是空的");
+
+    // 已存在时也要失败(不然会把用户的东西清空)。
+    assert!(
+        fs.create_file(file.clone()).await.is_err(),
+        "同名文件再建一次应当失败"
+    );
+
+    // ---- 改名 ----
+    let renamed = at("renamed.txt");
+    fs.rename(file.clone(), renamed.clone())
+        .await
+        .expect("改名");
+    assert!(
+        fs.stat(renamed.clone()).await.is_ok(),
+        "改名之后新名字应当存在"
+    );
+    assert!(
+        fs.stat(file).await.is_err(),
+        "改名之后旧名字不该还在"
+    );
+
+    // ---- 删除一个文件 ----
+    let mut remove_file = fs.remove(renamed.clone(), false);
+    drive(&mut remove_file).await.expect("删文件");
+    assert!(fs.stat(renamed).await.is_err(), "删完不该还在");
+
+    // ---- 递归删一棵树 ----
+    let tree = at("tree");
+    fs.mkdir(tree.clone()).await.expect("建树根");
+    for nested in ["tree/one.txt", "tree/two.txt"] {
+        fs.create_file(at(nested)).await.expect("建树里的文件");
+    }
+    fs.mkdir(at("tree/deep")).await.expect("建子目录");
+    fs.create_file(at("tree/deep/three.txt"))
+        .await
+        .expect("建子目录里的文件");
+
+    let mut remove_tree = fs.remove(tree.clone(), true);
+    drive(&mut remove_tree).await.expect("递归删目录");
+    assert!(
+        fs.stat(tree).await.is_err(),
+        "递归删除之后整棵树都不该在(包括子目录里的文件)"
+    );
+
+    // ---- 删一个不存在的东西:要给一句可读的失败 ----
+    let mut missing = fs.remove(at("gone"), false);
+    let message = drive(&mut missing)
+        .await
+        .expect_err("删不存在的路径应当失败")
+        .to_string();
+    println!("错误:{message}");
+    assert!(
+        message.contains("远端没有这个路径"),
+        "失败原因应当可读,实际:{message}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&known_hosts);
+}
+
 /// 取消:请求取消之后,`Done` 要给 [`SshError::Cancelled`],而不是装作成功。
 #[tokio::test]
 async fn cancelled_transfer_reports_cancelled() {

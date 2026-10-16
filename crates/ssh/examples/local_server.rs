@@ -33,8 +33,9 @@
 //! [SshFs](ssh::SshFs) 走的是**另开一条连接**的 sftp 子系统。
 //!
 //! 支持的范围:`realpath` / `stat` / `lstat` / `opendir` / `readdir` / `close`(浏览)与
-//! `open` / `read` / `write` / `mkdir` / `remove` / `rmdir`(上传下载)。没有的
-//! (`rename` / `symlink` / `setstat` …)一律回 `SSH_FX_OP_UNSUPPORTED`。
+//! `open` / `read` / `write` / `mkdir` / `remove` / `rmdir` / `rename`(上传下载与文件管理器的
+//! 新建 / 删 / 改名)。没有的(`symlink` / `setstat` / `chmod` …)一律回
+//! `SSH_FX_OP_UNSUPPORTED`。
 
 #![allow(dead_code)] // 被测试 `#[path]` 包进来时 `main` 是多余的
 
@@ -370,6 +371,15 @@ impl russh_sftp::server::Handler for FsSession {
         let path = resolve(&filename);
         let read = pflags.contains(OpenFlags::READ);
         let write = pflags.contains(OpenFlags::WRITE);
+        // ⚠️ `EXCLUDE`(与 `CREATE` 一起用)= 「文件已存在则**失败**」。客户端的
+        // `create_file`(新建空文件)靠它做到不覆盖 —— 不实现的话那个测试会静默变成
+        // 「把用户的文件清空」。(真 sshd 的 sftp-server 实现了它。)
+        if write && pflags.contains(OpenFlags::CREATE) && pflags.contains(OpenFlags::EXCLUDE) {
+            let exists = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
+            if exists {
+                return Err(StatusCode::Failure.into());
+            }
+        }
         let mut options = std::fs::OpenOptions::new();
         options.read(read).write(write);
         if write && pflags.contains(OpenFlags::CREATE) {
@@ -489,12 +499,23 @@ impl russh_sftp::server::Handler for FsSession {
     }
 
     async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
-        std::fs::remove_file(resolve(&filename)).map_err(|_| StatusCode::Failure)?;
+        std::fs::remove_file(resolve(&filename)).map_err(status_for)?;
         Ok(ok(id))
     }
 
     async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
-        std::fs::remove_dir(resolve(&path)).map_err(|_| StatusCode::Failure)?;
+        std::fs::remove_dir(resolve(&path)).map_err(status_for)?;
+        Ok(ok(id))
+    }
+
+    /// 改名 / 移动(`std::fs::rename` 与 POSIX 的 `rename(2)` 同一套语义:目标存在就替掉它)。
+    async fn rename(
+        &mut self,
+        id: u32,
+        oldpath: String,
+        newpath: String,
+    ) -> Result<Status, Self::Error> {
+        std::fs::rename(resolve(&oldpath), resolve(&newpath)).map_err(|_| StatusCode::Failure)?;
         Ok(ok(id))
     }
 }
@@ -506,6 +527,18 @@ fn ok(id: u32) -> Status {
         status_code: StatusCode::Ok,
         error_message: "Ok".to_string(),
         language_tag: "en-US".to_string(),
+    }
+}
+
+/// 本地 IO 失败 → SFTP 状态码。
+///
+/// 至少把「没有这个路径」分出来:客户端那边靠它翻成「远端没有这个路径」这句人话(其余一律
+/// 是通用的失败,只透出英文原文)。真 sshd 的 sftp-server 也是这么分的。
+fn status_for(error: std::io::Error) -> StatusCode {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => StatusCode::NoSuchFile,
+        std::io::ErrorKind::PermissionDenied => StatusCode::PermissionDenied,
+        _ => StatusCode::Failure,
     }
 }
 

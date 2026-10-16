@@ -41,7 +41,7 @@ use futures::future::BoxFuture;
 use russh::client;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as SftpError;
-use russh_sftp::protocol::StatusCode;
+use russh_sftp::protocol::{OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender as TokioSender, unbounded_channel};
@@ -160,6 +160,11 @@ enum TransferKind {
         local_file: PathBuf,
         remote_file: String,
     },
+    /// 删除一个文件或目录(目录**递归**)。
+    ///
+    /// 与其它几个不同,它不搬任何字节 —— 但依旧走这条通道:一棵装满东西的子树删起来可能
+    /// 很久,得让它有进度与取消,也不能把浏览那条连接占住(见 [`SshFs::remove`])。
+    Remove { path: String, is_dir: bool },
 }
 
 /// 一台 SSH 主机上的远端文件系统。
@@ -247,6 +252,51 @@ impl SshFs {
                 Reply::Meta(meta) => Ok(meta),
                 _ => Err(unexpected()),
             }
+        })
+    }
+
+    /// 建一个目录。父目录必须已经存在(不递归建中间那几层)。
+    ///
+    /// 与 [`Self::remove`] 不同,它是**单次往返**的短操作,所以走浏览那条请求 / 应答 ——
+    /// 建个目录不该排在正在跑的大文件传输后面(见模块文档里两个 worker 的分工)。
+    pub fn mkdir(&self, path: impl Into<String>) -> BoxFuture<'static, Result<(), SshError>> {
+        expect(self.send(RequestKind::Mkdir(path.into())), unit)
+    }
+
+    /// 建一个**空文件**。已存在同名文件时失败(不覆盖 —— 覆盖该走传输)。同样是短操作。
+    pub fn create_file(&self, path: impl Into<String>) -> BoxFuture<'static, Result<(), SshError>> {
+        expect(self.send(RequestKind::CreateFile(path.into())), unit)
+    }
+
+    /// 重命名 / 移动。同样是短操作(单次往返)。
+    ///
+    /// ⚠️ 目标**存在时由服务端决定**:POSIX 的 `rename(2)` 会直接替掉它,这里不做存在性检查
+    /// (重名要不要拦由界面那边决定)。
+    pub fn rename(
+        &self,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> BoxFuture<'static, Result<(), SshError>> {
+        expect(
+            self.send(RequestKind::Rename {
+                from: from.into(),
+                to: to.into(),
+            }),
+            unit,
+        )
+    }
+
+    /// 删除一个文件或目录。`is_dir` 为真时**递归**把整棵子树删掉。
+    ///
+    /// ⚠️ **走传输 worker 而不是浏览 worker**:一个装满东西的目录可能要删上千个条目,
+    /// 挂在浏览那条上会把「展开目录」卡住。走传输那边顺带拿到两样东西:一行进度(已删几个 /
+    /// 共几个)与**取消**。代价是它会与上传 / 下载排队(传输 worker 一次只跑一个)。
+    ///
+    /// ⚠️ `is_dir` 由调用方给:树上那一行是文件还是目录早就知道了,不必再问远端一次。
+    pub fn remove(&self, path: impl Into<String>, is_dir: bool) -> Transfer {
+        self.send_transfer(TransferKind::Remove {
+            path: path.into(),
+            is_dir,
         })
     }
 
@@ -366,6 +416,14 @@ fn unexpected() -> SshError {
     SshError::Sftp("远端文件系统的应答与请求对不上".to_string())
 }
 
+/// 「这一步没数据要回」那种应答(建 / 删 / 改名)。
+fn unit(reply: Reply) -> Result<(), SshError> {
+    match reply {
+        Reply::Done => Ok(()),
+        _ => Err(unexpected()),
+    }
+}
+
 /// 把应答通道包成 [`BoxFuture`],并套一层「线程没了」的兜底。
 fn expect<T: 'static>(
     receiver: oneshot::Receiver<Result<Reply, SshError>>,
@@ -399,6 +457,12 @@ enum RequestKind {
     IsDir(String),
     /// 这个路径的元数据。
     Stat(String),
+    /// 建一个目录。
+    Mkdir(String),
+    /// 建一个空文件。
+    CreateFile(String),
+    /// 重命名 / 移动。
+    Rename { from: String, to: String },
 }
 
 enum Reply {
@@ -406,6 +470,8 @@ enum Reply {
     Entries(Vec<RemoteEntry>),
     IsDir(bool),
     Meta(RemoteMeta),
+    /// 建 / 删 / 改名这类没有返回值的操作。
+    Done,
 }
 
 /// 一次传输请求。没有应答通道:进度与结果都走 `events`(见 [`TransferEvent`])。
@@ -486,6 +552,21 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
                     size: attributes.len(),
                 })
             }),
+            RequestKind::Mkdir(path) => session.create_dir(path).await.map(|()| Reply::Done),
+            // ⚠️ **不能**用 `session.create(..)`:它带 `TRUNCATE`,同名文件会被::静默清空成一个
+            // 空文件。建文件要的是「已存在就失败」,那正是 `EXCLUDE` 的语义
+            // (SFTPv3 规定它得与 `CREATE` 一起用)。
+            RequestKind::CreateFile(path) => {
+                let flags = OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE;
+                match session.open_with_flags(path, flags).await {
+                    // 建完立刻关:不关的话 handle 会一直占着(远端有上限)。
+                    Ok(file) => file.close().await.map_err(SftpError::from).map(|()| Reply::Done),
+                    Err(error) => Err(error),
+                }
+            }
+            RequestKind::Rename { from, to } => {
+                session.rename(from, to).await.map(|()| Reply::Done)
+            }
         };
 
         match outcome {
@@ -700,6 +781,12 @@ async fn run_transfer(
     events: &futures_mpsc::UnboundedSender<TransferEvent>,
     cancel: &CancelToken,
 ) -> Result<(), TransferFailure> {
+    // 删除不搬字节,所以在「摊清单 + Job 循环」那套之前就分出去(它自己那套清单是
+    // 「先子后父」,与上传 / 下载完全相反,合在一起只会互相干扰)。
+    if let TransferKind::Remove { path, is_dir } = kind {
+        return remove_tree(session, path, *is_dir, events, cancel).await;
+    }
+
     let uploading = matches!(
         kind,
         TransferKind::Upload { .. } | TransferKind::UploadOne { .. }
@@ -738,6 +825,8 @@ async fn run_transfer(
                 is_dir: false,
             }]
         }
+        // 删除在函数开头就分流走了 —— 它没有「搬字节」的清单。
+        TransferKind::Remove { .. } => unreachable!("删除不会走到 Job 清单这一路"),
     };
 
     let mut reporter = Reporter::new(events, cancel, &jobs);
@@ -978,6 +1067,93 @@ impl<'a> Reporter<'a> {
             .unbounded_send(TransferEvent::Progress(progress))
             .map_err(|_| TransferFailure::cancelled())
     }
+}
+
+/// 删除一棵树(或者一个文件):先把要删的摊成清单,再一个个删。
+///
+/// 摊清单是为了两件事:**进度有个总数**(与上传 / 下载同一种体验:界面能显示「3/12 个」),
+/// 以及**每删一个都能看一眼取消标志**(删一棵大树可能跑很久,不能不给用户留退路)。
+async fn remove_tree(
+    session: &SftpSession,
+    path: &str,
+    is_dir: bool,
+    events: &futures_mpsc::UnboundedSender<TransferEvent>,
+    cancel: &CancelToken,
+) -> Result<(), TransferFailure> {
+    let mut targets: Vec<(String, bool)> = Vec::new();
+    collect_removals(session, path, is_dir, &mut targets, cancel).await?;
+
+    let label = path.rsplit('/').next().unwrap_or(path).to_string();
+    let total = targets.len() as u64;
+    for (ix, (target, is_dir)) in targets.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(TransferFailure::cancelled());
+        }
+        let outcome = if *is_dir {
+            session.remove_dir(target).await
+        } else {
+            session.remove_file(target).await
+        };
+        outcome.map_err(TransferFailure::from_sftp)?;
+        // 发不出去 = 宿主把行收掉了(取消了)⇒ 按取消算。
+        events
+            .unbounded_send(TransferEvent::Progress(TransferProgress {
+                label: label.clone(),
+                files_done: ix as u64 + 1,
+                files_total: total,
+                bytes_done: 0,
+                bytes_total: 0,
+            }))
+            .map_err(|_| TransferFailure::cancelled())?;
+    }
+    Ok(())
+}
+
+/// 递归摊出要删的清单:深度优先,**子在前、父在后**。
+///
+/// ⚠️ 顺序不能反:目录要等它空了才删得掉,服务端会拿 `DIR_NOT_EMPTY` 拒绝。
+/// ⚠️ **符号链接不跟进去**:`read_dir` 对链接报的是它**指向**的类型,照着递归会把链接那头
+/// 的东西删掉。所以链接本身按「一个文件」处理(只摘链接)。
+async fn collect_removals(
+    session: &SftpSession,
+    path: &str,
+    is_dir: bool,
+    out: &mut Vec<(String, bool)>,
+    cancel: &CancelToken,
+) -> Result<(), TransferFailure> {
+    if !is_dir {
+        out.push((path.to_string(), false));
+        return Ok(());
+    }
+    let entries = session
+        .read_dir(path)
+        .await
+        .map_err(TransferFailure::from_sftp)?;
+    for entry in entries {
+        let name = entry.file_name();
+        // 有些服务端会把 `.` 与 `..` 也列出来 —— 删它们等于删自己和父目录。
+        if name == "." || name == ".." {
+            continue;
+        }
+        if cancel.is_cancelled() {
+            return Err(TransferFailure::cancelled());
+        }
+        let file_type = entry.file_type();
+        let child = join_path(path, &name);
+        if file_type.is_symlink() {
+            out.push((child, false));
+        } else {
+            Box::pin(collect_removals(session, &child, file_type.is_dir(), out, cancel)).await?;
+        }
+    }
+    // 子都排好了,才轮到目录自己。
+    out.push((path.to_string(), true));
+    Ok(())
+}
+
+/// 在远端路径后面接一个名字(两边都是 POSIX 路径)。与界面那边的 `join_dir` 同一套规则。
+fn join_path(dir: &str, name: &str) -> String {
+    format!("{}/{}", dir.trim_end_matches('/'), name)
 }
 
 /// 远端建目录;已经有了就直接用(往已有目录里上传是常态)。
