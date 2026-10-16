@@ -240,8 +240,19 @@ impl Render for AppRoot {
         } else {
             None
         };
-        self.files
-            .update(cx, |files, cx| files.sync(fs, window, cx));
+        // 终端自己说出来的当前目录（见 `terminal::shell_integration`：精确的 OSC 7，
+        // 或 Ubuntu 默认 `PS1` 放在窗口标题里的 `\w`）。
+        // 只有会话可用时才拿：连上之前远端还没开口，拿到的只会是上一轮的残留。
+        let directory = if fs.is_some() {
+            active.and_then(|tab| tab.read(cx).remote_directory(cx))
+        } else {
+            None
+        };
+        self.files.update(cx, |files, cx| {
+            files.sync(fs, window, cx);
+            // 远端终端在哪儿，文件管理器就在哪儿（用户手动跳走、shell 没动时不动）。
+            files.follow_terminal(directory.as_deref(), cx);
+        });
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_files_enabled(remote, cx));
 

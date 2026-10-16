@@ -56,6 +56,23 @@ fn join_dir(dir: &str, name: &str) -> String {
     format!("{}/{}", dir.trim_end_matches('/'), name)
 }
 
+/// 把终端报来的目录展开成远端**绝对路径**；认不出（家目录还不知道）就给 `None`。
+///
+/// 终端有两条来源（见 `terminal::shell_integration`）：精确的 OSC 7 一定是绝对路径，
+/// 而**窗口标题**那条会把家目录缩成 `~`（那是 bash `\w` 的行为，Debian / Ubuntu 默认
+/// `PS1` 就是这个）。`~` 本身要家目录才展开得了，而家目录只有这里（SFTP）问得到。
+fn expand_home(directory: &str, home: Option<&str>) -> Option<String> {
+    match (directory, home) {
+        ("~", Some(home)) => Some(home.to_string()),
+        (directory, Some(home)) => directory
+            .strip_prefix("~/")
+            .map(|rest| join_dir(home, rest))
+            .or_else(|| Some(directory.to_string())),
+        // 家目录还不知道：绝对路径照用，`~` 那条等下一帧（家目录问回来得很快）。
+        (directory, None) => directory.starts_with('/').then(|| directory.to_string()),
+    }
+}
+
 /// 预览缓存的落地目录:`<系统缓存>/alacrterm/preview`。
 ///
 /// 用缓存目录而不是 `temp_dir()`:有些平台会在开窗口的当口清理临时目录,而缓存目录至少
@@ -256,6 +273,14 @@ pub(crate) struct FilesState {
     selected: Option<FilePath>,
     path_input: Entity<InputState>,
     path_input_pending: bool,
+    /// 上一次「跟着终端走」跟着的那个目录（见 [`FilesState::follow_terminal`]）。
+    ///
+    /// 即「终端上一次报的目录」:shell 每次画提示符都会报一遍同一个目录,靠它去重;
+    /// 用户在路径框里跳到别处、而 shell 没动时,也不会被拽回去。
+    followed: Option<String>,
+    /// 远端家目录:终端报的目录可能是 `~` / `~/x`(见
+    /// [`FilesState::follow_terminal`]),展开要用它。问到之前为 `None`。
+    home: Option<String>,
     nav_seq: u64,
     generation: u64,
     rows: RowCache<FileRow>,
@@ -291,6 +316,8 @@ impl FilesState {
             selected: None,
             path_input,
             path_input_pending: false,
+            followed: None,
+            home: None,
             nav_seq: 0,
             generation: 0,
             rows: RowCache::default(),
@@ -313,10 +340,44 @@ impl FilesState {
         }
         self.fs = fs;
         self.root = None;
+        // 换了会话就忘了「上次跟到哪儿」与旧会话的家目录:新会话的目录跟旧会话没关系。
+        self.followed = None;
+        self.home = None;
         // ⚠️ 传输行清掉,但在途的那些传输**不会**停(它们活在 worker 的那条连接上)。这是
         // 有意取舍:会话已经换掉了,行摆着也没处显示;worker 那边下次请求自然会用到新连接。
         self.transfers.clear();
         self.reset(window, cx);
+    }
+
+    /// 跟着终端走：远端 shell 报了个新目录就跳过去。
+    ///
+    /// 数据源是终端自己说出来的当前目录（见 `terminal::shell_integration`：精确的 OSC 7，
+    /// 或 Ubuntu 默认 `PS1` 放在**窗口标题**里的 `\w`）。每帧都会调一次（见
+    /// [`crate::AppRoot::render`]），所以这里得是幂等的：
+    ///
+    /// - `self.root == directory` 时什么也不做（绝大多数帧都属于这种情况）；
+    /// - 报的是**同一个**目录、但用户已经手动跳到别处时也不动（`followed` 去重）——
+    ///   跟着走的意思是「shell `cd` 了我也 `cd`」，不是「把用户拽回 shell 那儿」；
+    /// - 真的换了目录才跳，并记住它。
+    ///
+    /// ⚠️ 标题那条来源会把家目录缩成 `~`（`\w` 的行为），所以这里先展开（见
+    /// [`expand_home`]）；家目录还没问到就先不动，等下一帧。
+    pub(crate) fn follow_terminal(&mut self, directory: Option<&str>, cx: &mut Context<Self>) {
+        let Some(directory) = directory else {
+            return;
+        };
+        let Some(directory) = expand_home(directory, self.home.as_deref()) else {
+            return;
+        };
+        let directory = directory.as_str();
+        if self.fs.is_none()
+            || self.root.as_deref() == Some(directory)
+            || self.followed.as_deref() == Some(directory)
+        {
+            return;
+        }
+        self.followed = Some(directory.to_string());
+        self.navigate_to(directory, cx);
     }
 
     /// 输入框改动 / 回车时跳转。
@@ -417,6 +478,12 @@ impl FilesState {
                     }
                     match home {
                         Ok(home) => {
+                            this.home = Some(home.clone());
+                            // 终端已经报过目录、并且已经跳过去了(见 `follow_terminal`):
+                            // 别拿家目录盖回来 —— 两条路都是异步的,谁先回来不一定。
+                            if this.root.is_some() {
+                                return;
+                            }
                             this.root = Some(home);
                             this.reset_no_window(cx);
                         }

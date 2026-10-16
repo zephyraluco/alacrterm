@@ -502,6 +502,19 @@ impl TerminalView {
             .is_some_and(|terminal| terminal.read_with(cx, |terminal, _| terminal.is_connected()))
     }
 
+    /// 远端 shell 说出来的当前目录（见 `terminal::shell_integration`）；本地会话或
+    /// 没说到过时为 `None`。
+    ///
+    /// 这是「文件管理器跟着终端走」的数据源。远端没有本地进程可采样，目录只能由远端
+    /// shell 自己说（精确的 OSC 7，或 Ubuntu 默认 `PS1` 放在窗口标题里的 `\w`）。
+    /// ⚠️ 可能是 `~` / `~/x`（标题那条路缩写了家目录），展开由应用层做。
+    pub fn remote_directory(&self, cx: &App) -> Option<String> {
+        self.terminal.as_ref().and_then(|terminal| {
+            terminal
+                .read_with(cx, |terminal, _| terminal.remote_directory().map(str::to_string))
+        })
+    }
+
     /// 会话进程是否已结束（本地 shell 退出 / ssh 连接断开等）。
     pub fn has_exited(&self) -> bool {
         self.exited

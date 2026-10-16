@@ -266,8 +266,15 @@ fn main() {
 
 > 状态在 `sidebar_panel/files.rs` 的 `FilesState` 实体里(远端句柄 + 根目录 + 目录项缓存 + 展开状态 + 摊平后的行清单);渲染交给 `SidebarContent::Files(FilesItem)` —— **一行一项**摆进侧边栏面板的行列表。侧边栏起来是「会话」,点图标栏那枚图标切过来,**且只对远端会话可见**(见 §3.2)。
 
-- **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步两件事:可用性(`Sidebar::set_files_enabled(remote)`)与**数据源**(当前标签页的 `SshFs` 句柄,即当前格子的 `TerminalView::remote_fs(cx)`)。⚠️ 这里的「当前」= **键盘焦点所在**的那一格终端(见 §3.3「当前标签页」):dock 的「当前标签」在有多个标签组时每个组都会报一枚,跟着它走会让树跳到用户没在用的那个标签页上。
-- **数据源是 SFTP**(`ssh::SshFs`,见 §5.3):起始根目录 = 远端家目录(`home_dir()`);远端 shell 的 `cd` 拿不到(要改远端 prompt),所以根目录**不跟随终端**,由用户自己跳。
+- **只在远端会话下摆出来**:本地目录用系统自己的文件管理器打开就好。`AppRoot::render` 每帧同步三件事:可用性(`Sidebar::set_files_enabled(remote)`)、**数据源**(当前标签页的 `SshFs` 句柄,即当前格子的 `TerminalView::remote_fs(cx)`)与**终端当前目录**(`TerminalView::remote_directory(cx)`,见下一条)。⚠️ 这里的「当前」= **键盘焦点所在**的那一格终端(见 §3.3「当前标签页」):dock 的「当前标签」在有多个标签组时每个组都会报一枚,跟着它走会让树跳到用户没在用的那个标签页上。
+- **数据源是 SFTP**(`ssh::SshFs`,见 §5.3):起始根目录 = 远端家目录(`home_dir()`)。
+- **根目录跟着终端走**(`FilesState::follow_terminal`):终端在哪儿,文件管理器就在哪儿 —— 数据源是**终端自己说出来的当前目录**(OSC 7 或窗口标题,见 §5.4),由 `AppRoot::render` 每帧从「当前格子」取一次(`Some(目录)` 才动),再交给 `follow_terminal`。它是幂等的,靠 `FilesState::followed` 记「上次跟到哪儿」:
+  - 报的目录与当前根相同 ⇒ 什么都不做(绝大多数帧都是这种);
+  - 报的是**跟过的那个**目录、而用户已经手动跳到别处 ⇒ 也不动 —— 跟着走的意思是「shell `cd` 了我也 `cd`」,不是「把用户拽回 shell 那儿」;
+  - 真的换了目录才 `navigate_to`(与路径输入框同一条路:先 `is_dir` 问远端,不是目录就当没看见)。⚠️ 标题那条来源会把家目录缩成 `~`,所以还得先过 `expand_home`(家目录缓存在 `FilesState::home`)。
+  - ⚠️ **家目录那条路要防慢到**:`spawn_home` 与 `follow_terminal` 都是异步的,谁先回来不一定 —— 家目录回来时若 `root` 已经有值就不摆(见 `spawn_home` 里的判据),否则会把刚跟过去的目录顶回家。
+  - 换会话(`sync`)会把 `followed` 清空:新会话的目录跟旧会话没关系。
+- 根目录还拿不到时(`is_dir` 没回来 / 远端没上报),一切照旧:**显示家目录**,由用户自己跳。上报是**尽力而为**的(§5.4:只有认得出的 shell 会发、只有远端会话有),拿不到就不该影响浏览。
 - ⚠️ **必须等会话连上再给句柄**(`TerminalView::is_connected`):连上之前主机密钥可能还没确认,而 SFTP 那条连接**没有确认通道**(`ClientHandler::new` 传 `None`)⇒ 只会失败。判断放在句柄那一层,`FilesState::sync` 自己只比较 `Option<SshFs>`(`Arc::ptr_eq`)。
 - **按需加载**:展开一个还没读过的目录时 `FilesState::spawn_load` 用 `background_spawn` 调 `list_dir`(一层),回填前核对**代次**(`generation`,换根目录 / 换会话时 +1 ⇒ 在途结果直接丢掉)。排序由 `SshFs` 负责:目录在前、名字不区分大小写。
 - **展开的目录还没读回来时**,摊平会在它后面插一行「加载中…」占位(`RowKind::Loading`),这样它看起来仍是可展开的父节点。
@@ -318,9 +325,9 @@ type SessionPath = Vec<usize>;   // 记录树里条目位置的下标链(见 §3
 ```
 
 - **代码位置与归属**(没有单独的 `session.rs`):`SessionRequest` 与运行时面板 `TabPane` 同在 `terminal_panel.rs`(终端实例那条线,分屏树在 `pane_layout.rs`);`SessionEntry` / `SessionFolder` / `SessionRecord` / `SessionPath` 与**视图状态 `SessionsState`** 同在 `sidebar_panel/sessions.rs`(记录那条线:数据 + 增删改 + 拖放 + 树同步);`main.rs` 只留程序入口 + 根视图 `AppRoot`(跨组件共享状态 + 装配)。
-- **连接目标直接复用 `TerminalTarget`**(`terminal::TerminalTarget`):`SessionRequest` 只需 `name` + `target`,不必再自己造一个枚举。标签页里只留一个 `is_remote` 布尔(`TabPane`),因为「文件管理器只服务远端会话」只需要这一位。
-- **标题与 `is_remote` 都跟着当前格子**:`TabPane::name(cx)` = 用户填的名字 或 **当前聚焦格子**的终端 OSC 标题(`breadcrumb_text`,不是 shell 的 `title_override` ⇒ 自定义名称必须自己存);`remote_fs` / `is_connected` 也取当前格子(文件管理器列的就是用户正在看的那台)。
-- 新建统一走 `AppRoot::spawn_session(SessionRequest)`:`TerminalView::new(None, target, host_key, settings, ..)` 是**唯一入口**(本地 / 远端只差 `target`,见 §3.8);之后包成 `TabPane`(内含一格)挂进 dock,再 `move_panel` 到该进的标签组(§3.2)。`AppRoot::split_active_session(axis, ..)` 走另一条:给**当前标签页**加一格(新格子固定是本地 shell,与旧的分屏行为一致)。
+- **连接目标直接复用 `TerminalTarget`**(`terminal::TerminalTarget`):`SessionRequest` 只需 `name` + `target`,不必再自己造一个枚举。标签页存的就是**它自己那份 `TerminalTarget`**(`TabPane::target`,`is_remote()` = `target.is_ssh()`):分屏时要照本页的会话再起一台(见下条),一个布尔不够。
+- **标题 / `is_remote` / `remote_fs` / `remote_directory` 都跟着当前格子**:`TabPane::name(cx)` = 用户填的名字 或 **当前聚焦格子**的终端 OSC 标题(`breadcrumb_text`,不是 shell 的 `title_override` ⇒ 自定义名称必须自己存);`remote_fs` / `is_connected` / `remote_directory`(终端报的当前目录,§5.4)也取当前格子(文件管理器列的就是用户正在看的那台)。
+- 新建统一走 `AppRoot::spawn_session(SessionRequest)`:`AppRoot::new_terminal(working_directory, target, host_key, settings, ..)` 是**唯一入口**(本地 / 远端只差 `target`,见 §3.8;`working_directory` 给了就用它当起始目录)。`AppRoot::split_active_session(axis, ..)` 走另一条:`TabPane::split_params(cx)` 取本页的 `target` 与**当前格子**的工作目录 ⇒ **分屏沿用同一个会话**(远端还是那台主机,本地还是同一个 shell,并且尽量从当前目录开始),而不是另起一个本地终端。
 - ⚠️ **两条线不要混**:`SessionsState::entries`(会话记录:配置,§3.2 会话列表)与 `AppRoot::tabs`(终端实例:dock 面板)彼此独立 —— 记录可以 0 个终端,终端也可以不属于任何记录(标签栏 `+` 开的本地终端)。
 - 生命周期:`close_tab`(→ `DockArea::remove_panel`)、`close_panel_id`(标签 `×` / 中键)、`close_active_session`(关当前格子,最后一格时转成 `close_tab`)、`sync_tabs_with_dock`;下标访问一律先 `get()`(允许标签表为空)。dock 点标签会回调面板的 `set_active`,它用 `AppRoot::defer_after_update` 回写 `active`。
 - ⚠️ **「当前标签页」`active` 的权威是键盘焦点**,不是 dock 报的那枚:dock 按**每个标签组**的显示标签各回调一次 `set_active`(gpui-kit `crates/base/src/dock/tab_group.rs` 的 `reconcile_active`,dock 被拖成两组时两组都会把自己那枚报成当前),所以 `AppRoot::render` 每帧找**真正持有焦点**的终端校正 `active`(`TabPane::is_focused` = 本页任意一格持有焦点),焦点不在任何终端里(点侧边栏 / 设置、窗口失焦)时保持原值 —— 否则一点自己的文件树,「文件管理器」就会跳到另一个标签页上。焦点落进终端会 `cx.notify()`,而根视图 `observe` 着每台 `TerminalView` ⇒ 这一帧的渲染必定跟在焦点变化之后(见 §3.2 文件管理器)。⚠️ 窗口标题也因此改由 `AppRoot::render` 统一设置(以前是每台终端在自己 `render` 里 `set_window_title`,一页多格时会互相抢)。
@@ -787,7 +794,7 @@ graph LR
 - **本地进程信息的缺失是「后端」表达的**:只有 `TerminalBackend::Pty` 变体里才有 `PtyProcessInfo` ⇒ `Terminal::pid` / `title` / `working_directory` 等一律走 `self.backend.local_process_info()?`。⚠️ 不要给远端会话造一个「假 PTY」:unix 的 `tcgetpgrp(0)` / `killpg(0, ..)` 操作的是**本进程的进程组**(会杀到自己),`Drop` 里的 `terminate_child_process` 会直接拿它开刀 —— 后端枚举从源头就不会走到那儿(见 §5.2)。
 - `emit_title_changed_if_changed`(每次 `Wakeup` 触发):后台用 `sysinfo` 刷新进程信息,比较 `cwd` / `name` 变化后才发 `Event::TitleChanged`
 - Windows 特判:`shell_program == title` 时忽略 shell 自身的 OSC 标题事件(否则 breadcrumb 会显示 `pwsh.exe` 路径)
-- **已移除的 shell 集成**(曾占一整个 `platform.rs`,文件整体 `#![cfg(windows)]`):PowerShell 的 `cd`(`Set-Location`)只改 `$PWD`、**不动进程的当前目录**,所以曾靠启动 PowerShell(`pwsh` / `powershell`,且用户没自带参数)时追加 `-NoExit -EncodedCommand <base64(UTF-16LE 脚本)>` 注入一段 prompt 包装:画提示符前发一条 `ESC ] 2 ; alacrterm-cwd:<路径> BEL`,再由 `Terminal` 从标题里解析出来。**整段已删除**(文件管理器不再跟随本地终端目录):`Terminal::working_directory()` 只剩 PTY 前台进程 cwd 一个来源(`client_side_working_directory`),`Event::PwshPathChanged` 与 `Terminal::shell_reported_cwd` 都不再有;`ShellParams::new` 也不再给 PowerShell 追加参数。留在 `#[cfg(windows)]` 里的只有「忽略 shell 自身的 OSC 标题」与 `resolve_path`(`SearchPathW`,判 `shell_program`)。
+- **已移除的本地 shell 集成**(曾占一整个 `platform.rs`,文件整体 `#![cfg(windows)]`):PowerShell 的 `cd`(`Set-Location`)只改 `$PWD`、**不动进程的当前目录**,所以曾靠启动 PowerShell(`pwsh` / `powershell`,且用户没自带参数)时追加 `-NoExit -EncodedCommand <base64(UTF-16LE 脚本)>` 注入一段 prompt 包装:画提示符前发一条 `ESC ] 2 ; alacrterm-cwd:<路径> BEL`,再由 `Terminal` 从标题里解析出来。**整段已删除**(文件管理器不跟随**本地**终端目录):`Terminal::working_directory()` 只剩 PTY 前台进程 cwd 一个来源(`client_side_working_directory`),`Event::PwshPathChanged` 与 `Terminal::shell_reported_cwd` 都不再有;`ShellParams::new` 也不再给 PowerShell 追加参数。留在 `#[cfg(windows)]` 里的只有「忽略 shell 自身的 OSC 标题」与 `resolve_path`(`SearchPathW`,判 `shell_program`)。⚠️ **远端那条是有的,但换了机制**(§5.4):不注入任何东西,只认远端 shell 自己发的 OSC 7 与**窗口标题**里的 cwd —— 标题那条正是上面这段的老思路,只不过这次不需要动 shell。本地没跟着做,因为本地 cwd 采得到(`PtyProcessInfo`)。
 
 ---
 
@@ -825,6 +832,7 @@ graph LR
 - **独立 crate、独立线程**:`crates/ssh` 自带一个 OS 线程(线程内跑 current-thread tokio 运行时),跨边界只有两条**执行器无关**的通道(命令 `tokio::mpsc`、事件 `futures::mpsc`)⇒ 宿主不需要 tokio,`ssh` 也不需要知道 gpui。
 - **认证顺序**(照 OpenSSH):ssh-agent → 私钥文件(`~/.ssh/id_{ed25519,ecdsa,rsa}`,RSA 要 `best_supported_rsa_hash`)→ **密码**(仅当 `SshAuth::Password` 给了密码)。全都失败才报 `SshError::Auth{tried, reason}`(`reason` 是排查的唯一线索)。密码来源就是「新建会话」对话框填的那一个(**只在内存记录里,不落盘**)。
 - **连接参数**:`SshParams`(host / port / user / auth / host_key / term / key_files / known_hosts);`SshAuth` **手写 `Debug`** 不打印密码。
+- ⚠️ **会话怎么起就是个「不能动」的地方**:终端一律用 `request_shell`(让 sshd 自己去起登录 shell)。一度改成带 shell 集成的 `exec` 去拿远端 cwd,实测把 MOTD / `Last login` 弄丢了 —— 原因与取舍见 §5.4。
 - **失败不让建终端失败**:连不上 / 认证失败 / 主机密钥被拒都只从事件流里报出来,会话以「已断开」留在标签页(网格里写着原因)。
 
 ### 5.2 连什么(`TerminalTarget`)与谁搬字节(`TerminalBackend`)
@@ -836,7 +844,7 @@ graph LR
 | 谁写 `term` | alacritty 的 `EventLoop` 自己读 PTY 并写入 | **没人** ⇒ `Terminal::process_ssh_event` 亲手 `advance` |
 | 本地进程信息 | `Arc<PtyProcessInfo>`（pid / 前台进程 / cwd） | 没有 ⇒ `local_process_info()` 返回 `None` |
 | 写输入 / 改尺寸 / 关连接 | `PtySender`（alacritty notifier） | `SshSession::{write, resize, disconnect}` |
-| 远端目录 | 无（走 `working_directory()`） | `SshFs`（SFTP，见 §5.3） |
+| 远端目录 | 无（走 `working_directory()`） | 两条路：`SshFs`（SFTP，见 §5.3）浏览 + 终端自己说出来的 cwd（OSC 7 / 标题，见 §5.4） |
 
 - `TerminalBackend` 枚举就是抽象本身：`write` / `resize` / `shutdown` / `local_process_info() -> Option<..>` / `remote_fs() -> Option<SshFs>`。⚠️ **不要**为「统一输入口」再抽一层 trait + `Box<dyn>`——枚举分派已经够，而且 `local_process_info` 的 `Option` 正是「远端没有本地进程」的准确表达。
 - **远端字节的坑（两个）**：
@@ -862,6 +870,42 @@ graph LR
 - ⚠️ 上传目录时**指向目录的符号链接不递归**(指回上层目录的链接会让遍历转不出来),只记一条 debug 日志。
 - ⚠️ 未知主机 + 这条连接**没有确认通道** ⇒ 直接失败并提示「请先打开这台主机的终端会话,在那里信任它的主机密钥」(不能干等)。
 - ⚠️ 要加新的远端写操作(删除 / 重命名 / 新建文件夹)请沿用同一套「传输请求 + 事件通道」的形状,不要往浏览那条请求 / 应答上挂长任务。
+
+### 5.4 远端当前目录:`Terminal::remote_directory`(OSC 7 + 标题)
+
+「文件管理器跟着终端走」(§3.2)要知道终端**现在在哪个目录**。本地伸手可得(采本地进程,§4.5);远端没有本地进程可采样,只能靠**远端 shell 自己说**。它一共会说两种话,我们**只读不改**:
+
+**1. OSC 7**(`ESC ] 7 ; file://host/path BEL`,精确)
+
+- ⚠️ **必须自己扫**(`crates/terminal/src/shell_integration.rs` 的 `Osc7Scanner`):`alacritty_terminal` / `vte` 只认 OSC 0/1/2/4/8/10/11/12/52 这一批,OSC 7 在 `Handler` / `EventListener` 上**没有任何回调**(`vte 0.15` 的 `Handler` 里根本没有 working directory)⇒ 模拟器拿不到的信息,只能在我们把字节喂给模拟器**之前**先扫一遍(`Terminal::feed_remote_bytes` 的入口处)。
+- 扫描器是**跨块**的状态机(远端字节以任意边界到达,一条 OSC 7 完全可能被切成两块);只认 `file://` 且**必须是绝对路径**,别的 OSC 原样跳过,载荷超 64 KiB 就丢弃(OSC 8/52 的载荷可以是任意大)。路径按 URL 规则解码(`%20` → 空格)。
+- ⚠️ 攒着不写的那一段(`ssh_pending`,见 §5.2)也要扫 —— 远端第一条上报往往就在里面。
+- 事实标准(iTerm2 / kitty / VSCode / oh-my-zsh / Starship 都发),但 **stock bash 默认不发**:想让远端发**精确**的 OSC 7,把下面这段加进远端 `~/.bashrc` 即可(也是我们**不**替用户塞进去的原因,见下):
+
+  ```sh
+  PROMPT_COMMAND='__rc=$?; __d=${PWD//\%/%25}; __d=${__d// /%20}; printf "\033]7;file://%s%s\007" "${HOSTNAME:-localhost}" "$__d"; unset __d; (exit $__rc)'
+  ```
+
+  ⚠️ 两个坑:把 `$?` 还回去(`PROMPT_COMMAND` 里每条命令都会改写它,不还的话「提示符里显示上条命令成功没有」的人看到的永远是 0);百分号 / 空格的编码**顺序不能反**(先 `%`→`%25` 再空格→`%20`)。
+
+**2. 窗口标题**(OSC 0 / 2,启发式)—— `shell_integration::parse_prompt_title`
+
+- 发行版自带的 `PS1` 常常就把 cwd 放进标题:Debian / Ubuntu 默认是 `PS1=\[\e]0;\u@\h: \w\a\]$PS1` ⇒ 标题形如 `jz@host: /var/log`(家目录被 `\w` 缩成 `~`)。这条路**一个字节都不用改远端**,所以默认就能用(真机实测过)。
+- ⚠️ **标题也得自己扫**,不能等模拟器的事件:`TerminalBuilder` 给 alacritty 监听器的 `events_rx` 在**远端会话下根本没人读** —— `Terminal::subscribe` 遇到 SSH 就提前返回去跑 `ssh_events`(见 §4.2 的批处理说明与那里的注释)。所以 OSC 0/2 与 OSC 7 一起在 `DirectoryScanner` 里认(与 vte 一致:`0` / `2` 都算标题、值要 trim)。
+- 解析规则:取第一个 `": "` 之后那段(**前半段不能带空白**,否则不像 `user@host`),只认绝对路径或 `~` 开头。标题是用户随便设的,所以这**只是启发式**:判出来还要过文件管理器那关(`navigate_to` 会先 `is_dir` 问一句),**认错只是不跳,不会乱跳**。
+- ⚠️ 所以 `remote_directory()` 可能是 `~` / `~/x`;**展开 `~` 要用远端家目录**,而家目录只有文件管理器问得到(`FilesState::home`,从 `spawn_home` 缓存)→ `expand_home`。
+- OSC 7 优先:收到过精确上报(`Terminal::osc7_seen`)之后,标题那条就不再覆盖它。
+
+**为什么不去「让远端发 OSC 7」**(一度这么做过,已回退)
+
+- 做法曾是:开通道前先探一次 `$SHELL`(同一条连接上的另一个 exec 通道),认出 bash 就 `exec 'export PROMPT_COMMAND=…; exec /bin/bash -l'` 起 shell。
+- ⚠️ **实测否决:OpenSSH 只在「无命令的 shell 请求」上才做 PAM 会话**;换成 `exec` 之后,MOTD(`Welcome to Ubuntu …`、定制横幅)与 `Last login` 全部消失(真机对比过:单通道 `exec` 也丢,不是多开一条探针通道的锅)。对远端 shell 动手脚会改用户的登录环境,代价太大 —— 于是改成只读:远端爱发不发,发什么我们认什么。
+- 顺带记一笔:argv0 也会从 `-bash` 变成 `bash`(报错前缀不一样),这是同一个根因的另一个可见痕迹。
+
+**取回来**(应用侧)
+
+- 结果存 `Terminal::remote_cwd` → `TerminalView::remote_directory` → `TabPane::remote_directory` → `AppRoot::render` 每帧交给 `FilesState::follow_terminal`。**没有新事件**:远端每来一段字节都会 `Event::Wakeup` + `notify`,而根视图 `observe` 着每台 `TerminalView` ⇒ 下一帧的 `AppRoot::render` 自然就读到新目录了。
+- ⚠️ 本地会话不走这套:本地 cwd 采得到(`working_directory`),所以标题那条**只在远端**生效(`Terminal::process_event` 的 `Title` 分支判 `is_remote_terminal`)。
 
 ---
 
@@ -955,7 +999,7 @@ flowchart TD
 - **保留**:事件循环 + 4ms 批处理、选择 / 复制、vi mode、超链接、鼠标协议、滚动、进程标题检测、OSC 52 剪贴板、颜色查询
 - **砍掉**:Zed 的 `settings` 依赖、主题系统、搜索 UI
 - **替换**:本地 `TerminalColors` + 手写 Windows shell 探测;editor 依赖用本地 `paint_quad` 实现
-- **新增**:应用外壳(§3)——标题栏、侧边栏 / 分栏、dock 会话区与自绘标签栏、`dialog` 三个对话框、设置窗口、右键菜单;远端会话(§5.1-5.3)——内建 SSH 客户端 + SFTP 文件管理器
+- **新增**:应用外壳(§3)——标题栏、侧边栏 / 分栏、dock 会话区与自绘标签栏、`dialog` 三个对话框、设置窗口、右键菜单;远端会话(§5.1-5.4)——内建 SSH 客户端 + SFTP 文件管理器 + 让文件管理器跟着终端走的远端目录识别(OSC 7 / 窗口标题)
 
 **架构核心**:`Term` 网格与 UI 通过 `Content` 快照解耦——UI 线程每次 render 只做一次 `make_content` 快照,`sync()` 中消费 `InternalEvent` 队列,IO 线程与 UI 线程用 unbounded channel + 4ms 批处理通信。
 
@@ -983,4 +1027,5 @@ cargo run -p ssh --example local_server -- 2299
 - 标题栏集成三要素:`gpui_kit::init` → `Theme::change(ThemeMode::Dark)` → `WindowOptions` 用 `TitleBar::window_options()`
 - 窗口标题双轨:`AppRoot::render` 按当前标签页调 `window.set_window_title`(原生)+ 标签栏 / 侧边栏显示 `TabPane::name()`;自绘 `TitleBar` 固定 `Alacrterm`
 - SSH 的「已连上」(`Terminal::is_connected`)是**使用同一份参数做别的连接**(SFTP 文件管理器)的前置条件(§3.2 / §5.2)
+- 远端当前目录靠 **OSC 7 与窗口标题**两条:模拟器不认 OSC 7(只能自己扫,§5.4),stock bash 不发它(但发行版默认 `PS1` 会把 cwd 放进标题);**不要去改远端 shell**(`exec` 会弄丢 MOTD / `Last login`,§5.4);本地不需要这套(本地 cwd 采得到,§4.5)
 - 假 SSH 服务端(`ssh/examples/local_server.rs`)里 **`data` 回调要按通道过滤**:russh 会把**所有**通道的数据都送到 `Handler::data`,不限住的话 sftp 那条通道的协议包会被玩具 shell 当成键盘输入回显回去

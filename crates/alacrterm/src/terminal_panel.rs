@@ -467,6 +467,14 @@ impl TabPane {
         self.focused_view().read(cx).remote_fs(cx)
     }
 
+    /// 当前格子所在远端目录（远端 shell 上报的 OSC 7）。
+    ///
+    /// 「文件管理器跟着终端走」就看它（见 [`crate::sidebar_panel::files::FilesState`]），
+    /// 所以只问**聚焦**那一格：远端 shell 一 `cd`，面板就跟着换目录。
+    pub(crate) fn remote_directory(&self, cx: &App) -> Option<String> {
+        self.focused_view().read(cx).remote_directory(cx)
+    }
+
     /// 当前格子是否已连上。
     pub(crate) fn is_connected(&self, cx: &App) -> bool {
         self.focused_view().read(cx).is_connected(cx)
