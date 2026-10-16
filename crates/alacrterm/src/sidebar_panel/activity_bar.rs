@@ -16,8 +16,9 @@ use super::{Sidebar, SidebarContent, SidebarView};
 use crate::actions::{NewFolder, NewSession, OpenSettings};
 use crate::assets::IconName;
 use crate::components::{ActivityBar, ActivityBarItem, Sidebar as SidebarPanel};
+use crate::status_bar::empty_status_bar;
 
-/// 整条左列:图标栏 + 侧边栏面板。
+/// 整条左列:图标栏 + 侧边栏面板（面板自带底部状态栏）。
 pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
     let active = if sidebar.visible() {
         sidebar.active_view()
@@ -67,7 +68,10 @@ pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> A
 
     let panel = SidebarPanel::new(SharedString::from(format!("sidebar-{}", active.id())))
         .header(sidebar.render_header(cx))
-        .children(rows);
+        .children(rows)
+        // 侧边栏自己的底部状态栏(与中间列那条同一个组件 / 同一个高度)。
+        // 折叠时不摆:上面 `let Some(active) = active else { .. }` 早就返回了。
+        .status_bar(empty_status_bar());
 
     let panel = match active {
         SidebarView::Sessions => div()

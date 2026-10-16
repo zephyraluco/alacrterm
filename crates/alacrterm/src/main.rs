@@ -1,4 +1,6 @@
-//! 程序入口与根视图 [`AppRoot`]：标题栏 + 侧边栏 + 中间终端区 + 状态栏。
+//! 程序入口与根视图 [`AppRoot`]：标题栏 + 主体（最左整列 | 中间终端区）。
+//! 状态栏**每列一条**（见 [`status_bar`]）：中间列的在终端区下方（没有终端就不摆），
+//! 最左整列里的那条归侧边栏面板（`components::Sidebar::status_bar`，折叠时不摆）。
 //! 外壳分模块（`components` / `sidebar_panel` / `terminal_panel` 等），终端核心在 `crates/terminal`。
 
 mod actions;
@@ -23,7 +25,8 @@ use components::ACTIVITY_BAR_WIDTH;
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Styled as _,
-    Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
+    Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div,
+    prelude::FluentBuilder as _, px, size,
 };
 use gpui_kit::{
     QuitMode,
@@ -260,17 +263,27 @@ impl Render for AppRoot {
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
 
-        // 中间列：终端区（dock 或欢迎页）。
-        let terminal_area = if self.tabs.is_empty() {
-            self.render_welcome(cx)
-        } else {
+        // 中间列：终端区（dock 或欢迎页）+ 它下面的状态栏。
+        // 状态栏只跟着终端走：没有标签页（欢迎页）时整条不摆。
+        let has_tabs = !self.tabs.is_empty();
+        let terminal_area = if has_tabs {
             self.dock.clone().into_any_element()
+        } else {
+            self.render_welcome(cx)
         };
-        let mid_column = div()
+        let mid_column = v_flex()
             .h_full()
             .w_full()
             .overflow_hidden()
-            .child(terminal_area)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(terminal_area),
+            )
+            .when(has_tabs, |this| this.child(status_bar::empty_status_bar()))
             .into_any_element();
 
         // 分栏组：最左整列 | 中间列。
@@ -347,7 +360,7 @@ impl Render for AppRoot {
                     .overflow_hidden()
                     .child(body),
             )
-            .child(status_bar::empty_status_bar())
+            // 状态栏不在这里：每列各有一条（中间列的在终端区下方，侧边栏的在面板下沿）。
             // 覆盖层由 gpui-kit 的 `Root` 渲染。
     }
 }

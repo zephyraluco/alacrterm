@@ -1,4 +1,4 @@
-//! 侧边栏面板:顶部标题栏 + 下方可滚动的内容列表。
+//! 侧边栏面板:顶部标题栏 + 下方可滚动的内容列表 + 底部状态栏。
 
 use std::rc::Rc;
 
@@ -25,6 +25,7 @@ pub(crate) trait SidebarRow: Clone + 'static {
 pub(crate) struct Sidebar<E: SidebarRow> {
     id: ElementId,
     header: Option<AnyElement>,
+    status_bar: Option<AnyElement>,
     rows: Vec<E>,
 }
 
@@ -33,6 +34,7 @@ impl<E: SidebarRow> Sidebar<E> {
         Self {
             id: id.into(),
             header: None,
+            status_bar: None,
             rows: Vec::new(),
         }
     }
@@ -40,6 +42,12 @@ impl<E: SidebarRow> Sidebar<E> {
     /// 顶部标题栏。
     pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
         self.header = Some(header.into_any_element());
+        self
+    }
+
+    /// 底部状态栏（贴在面板下沿，不随内容滚动）。
+    pub(crate) fn status_bar(mut self, status_bar: impl IntoElement) -> Self {
+        self.status_bar = Some(status_bar.into_any_element());
         self
     }
 
@@ -119,5 +127,9 @@ impl<E: SidebarRow> RenderOnce for Sidebar<E> {
                         ),
                     ),
             )
+            // 底部状态栏：固定高度、贴面板下沿（标题栏在上、内容区自己滚）。
+            .when_some(self.status_bar, |this, status_bar| {
+                this.child(status_bar)
+            })
     }
 }
