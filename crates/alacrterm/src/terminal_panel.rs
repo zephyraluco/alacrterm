@@ -4,7 +4,12 @@
 //!
 //! 一个标签页 = 标签栏上的一枚标签，内部是一棵**分屏树**（见 [`crate::pane_layout`]）：
 //! 每格一台终端（各自一个 PTY），整页共用同一条标签栏（kitty / ghostty 的模型）。
+//!
+//! 分屏**沿用本页的会话**：新格子照本页的 [`TerminalTarget`] 再建一台（远端仍是远端，
+//! 本地仍是同一个 shell），并尽量落在当前格子的工作目录里 —— 见
+//! [`AppRoot::split_active_session`]。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
@@ -83,10 +88,9 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let SessionRequest { name, target } = request;
-        let remote = target.is_ssh();
-        let view = self.new_terminal(target, window, cx);
+        let view = self.new_terminal(None, target.clone(), window, cx);
         let root = cx.weak_entity();
-        let pane = cx.new(|cx| TabPane::new(view, name, remote, root, window, cx));
+        let pane = cx.new(|cx| TabPane::new(view, name, target, root, window, cx));
         let handle = panel_handle(pane.clone());
         self.dock.update(cx, |area, cx| {
             area.add_panel_view(handle, DockPlacement::Center, None, window, cx);
@@ -118,6 +122,9 @@ impl AppRoot {
     }
 
     /// 在「当前」标签页里再开一格（`Ctrl+Shift+D` / `Ctrl+Shift+S`）。
+    ///
+    /// 新格子**沿用本页的会话**（[`TabPane::target`]）而不是另起本地终端；本地会话还会
+    /// 落在当前格子的工作目录里（远端拿不到远端路径，见 [`TerminalView::working_directory`]）。
     pub(crate) fn split_active_session(
         &mut self,
         axis: Axis,
@@ -130,14 +137,18 @@ impl AppRoot {
         let Some(tab) = self.tabs.get(index).cloned() else {
             return;
         };
-        let view = self.new_terminal(TerminalTarget::system_shell(), window, cx);
+        let (target, working_directory) = tab.read(cx).split_params(cx);
+        let view = self.new_terminal(working_directory, target, window, cx);
         tab.update(cx, |tab, cx| tab.add_pane(view, axis, window, cx));
         cx.notify();
     }
 
     /// 建一台终端视图（顺手订好重绘）。
+    ///
+    /// `working_directory` = 起始工作目录（本地会话用；远端忽略）。
     fn new_terminal(
         &self,
+        working_directory: Option<PathBuf>,
         target: TerminalTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -148,7 +159,9 @@ impl AppRoot {
         let handler = target
             .is_ssh()
             .then(|| host_key::host_key_prompt_handler(root));
-        let view = cx.new(|cx| TerminalView::new(None, target, handler, settings, window, cx));
+        let view = cx.new(|cx| {
+            TerminalView::new(working_directory, target, handler, settings, window, cx)
+        });
         // 标题 / 焦点 / 连接状态变化时重绘（标签栏的文字也跟着它走）。
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         view
@@ -350,7 +363,8 @@ pub(crate) struct TabPane {
     root: WeakEntity<AppRoot>,
     /// 用户填的名字；`None` = 用当前聚焦格子的终端标题。
     name: Option<SharedString>,
-    remote: bool,
+    /// 本页所有格子的连接目标（分屏照它再建一台，见 [`Self::split_params`]）。
+    target: TerminalTarget,
     /// 本面板所在的标签组。
     group: Option<WeakEntity<TabGroup>>,
     /// 每格一台终端。
@@ -371,7 +385,7 @@ impl TabPane {
     pub(crate) fn new(
         view: Entity<TerminalView>,
         name: Option<SharedString>,
-        remote: bool,
+        target: TerminalTarget,
         root: WeakEntity<AppRoot>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -380,7 +394,7 @@ impl TabPane {
         Self {
             root,
             name,
-            remote,
+            target,
             group: None,
             panes: vec![view],
             subs: vec![sub],
@@ -428,7 +442,17 @@ impl TabPane {
     }
 
     pub(crate) fn is_remote(&self) -> bool {
-        self.remote
+        self.target.is_ssh()
+    }
+
+    /// 分屏用的参数：本页的会话目标 + 当前格子的工作目录（远端没有本地路径 ⇒ `None`）。
+    ///
+    /// 这是「标签页内分屏应该在同一个环境里」的落点：远端标签页分屏还是连那台主机，
+    /// 本地标签页分屏还是同一个 shell，并且尽量从当前目录开始。
+    pub(crate) fn split_params(&self, cx: &App) -> (TerminalTarget, Option<PathBuf>) {
+        let view = self.focused_view();
+        let working_directory = view.read(cx).working_directory(cx);
+        (self.target.clone(), working_directory)
     }
 
     /// 本页有格子持有焦点吗（根视图靠它认「当前标签页」）。
