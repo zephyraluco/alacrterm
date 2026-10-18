@@ -105,7 +105,6 @@ enum Command {
 /// 它只是个**命令发送端**:真正的连接活在后台线程里,所以
 /// [`write`](Self::write) / [`resize`](Self::resize) 都是非阻塞的 —— 终端每敲一个键
 /// 都会调,不能卡住渲染线程。
-#[derive(Clone)]
 pub struct SshSession {
     commands: TokioSender<Command>,
     fs: SshFs,
