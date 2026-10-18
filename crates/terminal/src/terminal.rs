@@ -46,8 +46,8 @@ use crate::backend::{INITIAL_PTY_SIZE, TerminalBackend};
 /// 远端会话用的类型（连接参数、主机密钥确认、远端文件系统）从 [`ssh`] crate 透出 ——
 /// 视图层与应用层不必自己依赖 `ssh`。
 pub use ssh::{
-    CancelToken, HostKeyDecision, HostKeyPrompt, RemoteEntry, RemoteMeta, SshAuth, SshError, SshFs,
-    SshParams, Transfer, TransferEvent, TransferProgress,
+    CancelToken, HostKeyDecision, HostKeyPrompt, RemoteEntry, RemoteMeta, SessionId, SshAuth,
+    SshError, SshFs, SshParams, Transfer, TransferEvent, TransferProgress,
 };
 
 use gpui::{

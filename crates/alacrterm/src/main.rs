@@ -13,12 +13,14 @@ mod dialog;
 mod format;
 mod keymap;
 mod pane_layout;
+mod preview_cache;
 mod preview_window;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
 mod tab_bar;
 mod terminal_panel;
+mod transfer_manager;
 mod welcome;
 
 use components::ACTIVITY_BAR_WIDTH;
@@ -32,6 +34,8 @@ use gpui_kit::{
     QuitMode,
     component::{
         ActiveTheme as _, Root, ThemeMode, TitleBar, WindowExt as _,
+        button::{Button, ButtonVariants as _},
+        dialog::DialogFooter,
         dock::{DockArea, DockEvent, TabGroup},
         h_flex,
         notification::Notification,
@@ -44,6 +48,75 @@ use sidebar_panel::sessions::SessionsState;
 use sidebar_panel::Sidebar;
 use tab_bar::TerminalDockSkin;
 use terminal_panel::TabPane;
+use transfer_manager::TransferManager;
+
+fn close_after_transfers(active: usize, waiting: bool) -> bool {
+    active == 0 && waiting
+}
+
+/// 这次同步需要真的应用吗。
+///
+/// 快照没变、又没有「必须拿窗口才能做」的待办时跳过 —— 事件可能因为同一帧内的多次
+/// 重绘而重复触发。
+fn needs_context_apply(
+    last: Option<&ActiveContext>,
+    next: &ActiveContext,
+    pending_window_work: bool,
+) -> bool {
+    pending_window_work || last != Some(next)
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::{ActiveContext, close_after_transfers, needs_context_apply};
+
+    fn context(title: &str, directory: Option<&str>) -> ActiveContext {
+        ActiveContext {
+            tab: None,
+            pane: None,
+            session: None,
+            connected: false,
+            remote: false,
+            directory: directory.map(str::to_string),
+            title: title.to_string(),
+        }
+    }
+
+    #[test]
+    fn exits_only_after_pending_transfers_finish() {
+        assert!(!close_after_transfers(2, true));
+        assert!(!close_after_transfers(0, false));
+        assert!(close_after_transfers(0, true));
+    }
+
+    #[test]
+    fn identical_context_is_not_reapplied() {
+        let current = context("Alacrterm", None);
+        assert!(!needs_context_apply(Some(&current), &current.clone(), false));
+    }
+
+    #[test]
+    fn directory_or_title_change_reapplies() {
+        let current = context("Alacrterm", Some("/home"));
+        assert!(needs_context_apply(
+            Some(&current),
+            &context("Alacrterm", Some("/home/user")),
+            false
+        ));
+        assert!(needs_context_apply(
+            Some(&current),
+            &context("other", Some("/home")),
+            false
+        ));
+    }
+
+    #[test]
+    fn pending_window_work_forces_one_apply() {
+        let current = context("Alacrterm", None);
+        assert!(needs_context_apply(Some(&current), &current.clone(), true));
+        assert!(needs_context_apply(None, &current, false));
+    }
+}
 
 fn main() {
     #[cfg(windows)]
@@ -58,9 +131,9 @@ fn main() {
             config::load_themes(cx);
             config::apply_saved_themes(cx);
             config::change_theme(ThemeMode::Dark, cx);
-            // 上一次跑剩下的预览缓存(交给系统程序打开的那些副本)现在没人用了,清掉。
+            // 上次跑剩下的预览缓存(交给系统程序打开的那些副本)现在没人用了,清掉。
             // ⚠️ 必须在任何窗口打开之前。
-            sidebar_panel::files::clear_preview_cache();
+            preview_cache::PreviewCache::install(cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(
@@ -70,6 +143,11 @@ fn main() {
                 },
                 |window, cx| {
                     let root = cx.new(|cx| AppRoot::new(window, cx));
+                    root.update(cx, |root, cx| root.sync_active_context(window, cx));
+                    let close_guard = root.downgrade();
+                    window.on_window_should_close(cx, move |window, cx| {
+                        AppRoot::should_close(&close_guard, window, cx)
+                    });
                     AppRoot::register_actions(root.downgrade(), cx);
                     // 键位全部来自 keymap JSON；必须在 gpui_kit::init 之后注册
                     // （它自己的 Root / Dialog 绑定不能被清掉），见 [`keymap`]。
@@ -93,6 +171,9 @@ struct AppRoot {
     sessions: Entity<SessionsState>,
     /// 「文件管理器」视图状态。
     files: Entity<FilesState>,
+    _transfers: Entity<TransferManager>,
+    _transfer_sub: Subscription,
+    close_when_transfers_finish: bool,
     /// 终端会话的 dock。
     dock: Entity<DockArea>,
     /// dock 布局变化订阅。
@@ -105,9 +186,131 @@ struct AppRoot {
     preview_window: Option<WindowHandle<Root>>,
     /// 「背景」焦点。
     background_focus: FocusHandle,
+    /// 上一次已经应用过的活动上下文（见 [`AppRoot::sync_active_context`]）。
+    last_context: Option<ActiveContext>,
+    /// 已经安排了一次延后的上下文同步（合并同一帧内的多次触发）。
+    context_sync_scheduled: bool,
+}
+
+/// 当前活动会话的「快照」。
+///
+/// 只在**变化**时才重新应用（标题 / 文件管理器 / 侧栏可用性）。以前这些是在
+/// `render` 里逐帧做的，现在由终端、焦点、标签页和 dock 的事件触发。
+#[derive(Clone, PartialEq, Eq)]
+struct ActiveContext {
+    /// 活动标签页。
+    tab: Option<gpui::EntityId>,
+    /// 活动标签页里聚焦的那一格。
+    pane: Option<gpui::EntityId>,
+    /// 它所属的连接实例（远端会话才有）。
+    session: Option<terminal::SessionId>,
+    /// 是否已连上（本地会话恒为真）。
+    connected: bool,
+    /// 是不是远端会话（决定文件管理器入口）。
+    remote: bool,
+    /// 远端 shell 报的当前目录。
+    directory: Option<String>,
+    /// 窗口标题。
+    title: String,
 }
 
 impl AppRoot {
+    fn close_after_pending_transfers(
+        &mut self,
+        cancel: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if cancel {
+            self._transfers.update(cx, |manager, cx| manager.cancel_all(cx));
+        }
+        if self._transfers.read(cx).active_count() == 0 {
+            self.finish_main_close(window, cx);
+        } else {
+            self.close_when_transfers_finish = true;
+        }
+    }
+
+    fn finish_main_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_when_transfers_finish = false;
+        if Self::preview_has_pending_changes(self.preview_window, cx) {
+            window.push_notification(
+                Notification::warning("预览文件仍在保存或有未保存的改动,请先在预览窗口处理"),
+                cx,
+            );
+            return;
+        }
+        let root = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            let Ok((active, preview)) = root.read_with(cx, |root, cx| {
+                (root._transfers.read(cx).active_count(), root.preview_window)
+            }) else {
+                return;
+            };
+            if active == 0 && !Self::preview_has_pending_changes(preview, cx) {
+                window.remove_window();
+            }
+        });
+    }
+
+    fn should_close(root: &WeakEntity<Self>, window: &mut Window, cx: &mut App) -> bool {
+        let Ok((active, preview)) = root.read_with(cx, |root, cx| {
+            (root._transfers.read(cx).active_count(), root.preview_window)
+        }) else {
+            return true;
+        };
+        if Self::preview_has_pending_changes(preview, cx) {
+            window.push_notification(
+                Notification::warning("预览文件仍在保存或有未保存的改动,请先在预览窗口处理"),
+                cx,
+            );
+            return false;
+        }
+        if close_after_transfers(active, true) {
+            return true;
+        }
+        if !window.has_active_dialog(cx) {
+            let returning = root.clone();
+            let dismissed = root.clone();
+            let waiting = root.clone();
+            let cancelling = root.clone();
+            window.open_dialog(cx, move |dialog, _window, _cx| {
+                let returning = returning.clone();
+                let dismissed = dismissed.clone();
+                let waiting = waiting.clone();
+                let cancelling = cancelling.clone();
+                dialog
+                    .title("传输尚未完成")
+                    .w(px(420.))
+                    .child(div().text_sm().child(format!("仍有 {active} 项传输在运行。")))
+                    .footer(
+                        DialogFooter::new()
+                            .child(Button::new("transfer-exit-back").label("返回").on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                let _ = returning.update(cx, |root, _| root.close_when_transfers_finish = false);
+                            }))
+                            .child(Button::new("transfer-exit-cancel").label("取消传输并退出").on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                let _ = cancelling.update(cx, |root, cx| {
+                                    root.close_after_pending_transfers(true, window, cx);
+                                });
+                            }))
+                            .child(Button::new("transfer-exit-wait").label("等待完成").primary().on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                let _ = waiting.update(cx, |root, cx| {
+                                    root.close_after_pending_transfers(false, window, cx);
+                                });
+                            })),
+                    )
+                    .on_cancel(move |_, _, cx| {
+                        let _ = dismissed.update(cx, |root, _| root.close_when_transfers_finish = false);
+                        true
+                    })
+            });
+        }
+        false
+    }
+
     /// 点击终端之外时把焦点从终端拿走。
     fn on_background_mouse_down(
         &mut self,
@@ -128,7 +331,13 @@ impl AppRoot {
         let dock = Self::build_dock(window, cx);
         let sessions = cx.new(|_| SessionsState::new());
         let app_root = cx.weak_entity();
-        let files = cx.new(|cx| FilesState::new(window, app_root, cx));
+        let transfers = cx.new(|_| TransferManager::default());
+        let transfer_sub = cx.observe_in(&transfers, window, |root: &mut Self, manager, window, cx| {
+            if close_after_transfers(manager.read(cx).active_count(), root.close_when_transfers_finish) {
+                root.finish_main_close(window, cx);
+            }
+        });
+        let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
         let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
 
         let mut this = Self {
@@ -137,19 +346,25 @@ impl AppRoot {
             sidebar,
             sessions,
             files,
+            _transfers: transfers,
+            _transfer_sub: transfer_sub,
+            close_when_transfers_finish: false,
             dock,
             dock_layout_sub: None,
             pending_session_group: None,
             settings_window: None,
             preview_window: None,
             background_focus: cx.focus_handle(),
+            last_context: None,
+            context_sync_scheduled: false,
         };
         this.dock_layout_sub = Some(cx.subscribe_in(
             &this.dock,
             window,
-            |root, _, event, _window, cx| {
+            |root, _, event, window, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
                     root.sync_tabs_with_dock(cx);
+                    root.sync_active_context(window, cx);
                 }
             },
         ));
@@ -191,6 +406,23 @@ impl AppRoot {
         .detach();
     }
 
+    /// 安排一次「下一帧重算活动上下文」。
+    ///
+    /// 给**没有窗口**或**正处在别的实体更新中**的回调用（例如终端视图的通知回调）：
+    /// 那里不能同步重读那个实体（gpui 会报重复租借），也不应该每帧都算一遍。
+    /// 同一帧内多次调用只排一次。
+    pub(crate) fn schedule_context_sync(&mut self, cx: &mut Context<Self>) {
+        if self.context_sync_scheduled {
+            return;
+        }
+        self.context_sync_scheduled = true;
+        let root = cx.weak_entity();
+        Self::defer_after_update(root, cx, |root, window, cx| {
+            root.context_sync_scheduled = false;
+            root.sync_active_context(window, cx);
+        });
+    }
+
     /// 往主窗口推一条通知。
     ///
     /// 给「没有窗口句柄」的地方用(比如文件管理器的传输任务回调)。没有活动窗口 = 应用在
@@ -207,16 +439,29 @@ impl AppRoot {
     ///
     /// 给预览窗口用:它把改过的文本写回远端之后,树里那份目录项(大小)就旧了(见
     /// [`crate::preview_window::PreviewWindow::refresh_parent_dir`])。
-    pub(crate) fn reload_files_dir(&mut self, dir: &str, cx: &mut Context<Self>) {
-        self.files.update(cx, |files, cx| files.reload_dir(dir, cx));
+    /// `session` = 写回那条连接；文件树已经切到别的连接时这次刷新会被忽略。
+    pub(crate) fn reload_files_dir(
+        &mut self,
+        session: terminal::SessionId,
+        dir: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.files
+            .update(cx, |files, cx| files.reload_from(session, dir, cx));
     }
-}
 
-impl Render for AppRoot {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 主体：侧边栏 | 中间列。
-
-        // 「当前标签页」以键盘焦点为准。
+    /// 重算「当前会话」并只在**变化**时应用。
+    ///
+    /// 以前这段逻辑在 [`Self::render`] 里逐帧跑（依赖重绘驱动业务）。现在由
+    /// 终端状态 / 焦点 / 标签页 / dock 的事件调用：
+    ///
+    /// - 焦点落在哪一格（[`TabPane::is_focused`]）⇒ 当前标签页；
+    /// - 活动标签页的连接实例、连接状态、远端目录、标题；
+    /// - 文件管理器同步（换连接时要重读根目录）与「跟着终端走」；
+    /// - 侧栏「文件管理器」入口可用性。
+    ///
+    /// 幂等且带快照去重，事件重复触发也不会反复发请求。
+    pub(crate) fn sync_active_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self
             .tabs
             .iter()
@@ -225,39 +470,54 @@ impl Render for AppRoot {
             self.active = index;
         }
 
-        // 窗口标题跟「当前标签页」走：一页可能同时渲染好几格终端，不能让它们各自去抢。
-        let title = match self.tabs.get(self.active) {
-            Some(tab) => tab.read(cx).name(cx).to_string(),
-            None => "Alacrterm".to_string(),
-        };
-        window.set_window_title(&title);
-
-        // 「文件管理器」只服务远端会话。
-        let active = self.tabs.get(self.active);
-        let remote = active.is_some_and(|tab| tab.read(cx).is_remote());
-        // 当前标签页的 SFTP 句柄；未连上返回 `None`。
-        let fs = if remote {
-            active
+        let tab = self.tabs.get(self.active);
+        let remote = tab.is_some_and(|tab| tab.read(cx).is_remote());
+        let connected = tab.is_some_and(|tab| tab.read(cx).is_connected(cx));
+        let snapshot = ActiveContext {
+            tab: tab.map(|tab| tab.entity_id()),
+            pane: tab.map(|tab| tab.read(cx).focused_id()),
+            session: tab.and_then(|tab| tab.read(cx).remote_session(cx)),
+            connected,
+            remote,
+            directory: tab
                 .filter(|tab| tab.read(cx).is_connected(cx))
-                .and_then(|tab| tab.read(cx).remote_fs(cx))
-        } else {
-            None
+                .and_then(|tab| tab.read(cx).remote_directory(cx)),
+            title: tab
+                .map(|tab| tab.read(cx).name(cx).to_string())
+                .unwrap_or_else(|| "Alacrterm".to_string()),
         };
-        // 终端自己说出来的当前目录（见 `terminal::shell_integration`：精确的 OSC 7，
-        // 或 Ubuntu 默认 `PS1` 放在窗口标题里的 `\w`）。
-        // 只有会话可用时才拿：连上之前远端还没开口，拿到的只会是上一轮的残留。
-        let directory = if fs.is_some() {
-            active.and_then(|tab| tab.read(cx).remote_directory(cx))
-        } else {
-            None
-        };
+
+        // 路径框要等窗口才能更新（见 `FilesState::path_input_pending`），所以即便快照没变
+        // 也得放它过去。
+        let pending_input = self.files.read(cx).needs_window_sync();
+        if !needs_context_apply(self.last_context.as_ref(), &snapshot, pending_input) {
+            return;
+        }
+        self.last_context = Some(snapshot.clone());
+
+        window.set_window_title(&snapshot.title);
+
+        // 未连上时不给句柄：连上之前目录树没有意义（也避免展示上一轮的残留）。
+        let fs = tab
+            .filter(|_| snapshot.connected)
+            .and_then(|tab| tab.read(cx).remote_fs(cx));
         self.files.update(cx, |files, cx| {
             files.sync(fs, window, cx);
             // 远端终端在哪儿，文件管理器就在哪儿（用户手动跳走、shell 没动时不动）。
-            files.follow_terminal(directory.as_deref(), cx);
+            files.follow_terminal(snapshot.directory.as_deref(), cx);
         });
         self.sidebar
-            .update(cx, |sidebar, cx| sidebar.set_files_enabled(remote, cx));
+            .update(cx, |sidebar, cx| sidebar.set_files_enabled(snapshot.remote, cx));
+    }
+}
+
+impl Render for AppRoot {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 主体：侧边栏 | 中间列。
+        //
+        // ⚠️ 这里**不做**业务同步（当前标签页 / 窗口标题 / 文件管理器 / 侧栏可用性都由
+        // [`Self::sync_active_context`] 在事件里完成）。渲染只管按现有状态摆界面。
+        // 唯一保留的「每帧动作」是侧栏宽度钉回拖拽值 —— 那是纯布局，没有副作用。
 
         // 侧边栏宽度每帧钉回用户拖拽值。
         self.sidebar

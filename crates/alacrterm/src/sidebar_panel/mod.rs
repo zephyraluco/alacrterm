@@ -160,6 +160,10 @@ impl Sidebar {
         self.visible
     }
 
+    fn files_view_available(&self, cx: &App) -> bool {
+        self.files_enabled || self.files.read(cx).has_transfers(cx)
+    }
+
     /// 设置是否显示。
     pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
@@ -226,18 +230,19 @@ impl Sidebar {
     }
 
     /// 当前该摆出来的视图；都不可用则 `None`。
-    fn active_view(&self) -> Option<SidebarView> {
-        if self.active.visible_with(self.files_enabled) {
+    fn active_view(&self, cx: &App) -> Option<SidebarView> {
+        let files_available = self.files_view_available(cx);
+        if self.active.visible_with(files_available) {
             return Some(self.active);
         }
         SidebarView::ALL
             .into_iter()
-            .find(|view| view.visible_with(self.files_enabled))
+            .find(|view| view.visible_with(files_available))
     }
 
     /// 图标栏点选：显示该视图；再点当前那枚 = 折叠。
     pub(crate) fn toggle_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
-        if self.visible && self.active_view() == Some(view) {
+        if self.visible && self.active_view(cx) == Some(view) {
             self.set_visible(false, cx);
             return;
         }

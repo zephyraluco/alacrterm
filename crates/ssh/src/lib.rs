@@ -50,7 +50,10 @@ mod params;
 mod session;
 
 pub use error::SshError;
-pub use fs::{CancelToken, RemoteEntry, RemoteMeta, SshFs, Transfer, TransferEvent, TransferProgress};
+pub use fs::{
+    CancelToken, RemoteEntry, RemoteMeta, SessionId, SshFs, Transfer, TransferEvent,
+    TransferProgress,
+};
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
 pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize};
 pub use session::{SshEvent, SshSession};

@@ -18,7 +18,7 @@ use crate::assets::IconName;
 impl Sidebar {
     /// 本栏顶部的标题栏。
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
-        let active = self.active_view();
+        let active = self.active_view(cx);
 
         h_flex()
             .id("sidebar-header")
@@ -32,7 +32,7 @@ impl Sidebar {
             .text_xs()
             .text_color(cx.theme().sidebar_foreground)
             .children(active.map(view_title))
-            .child(view_menu(active, self.files_enabled, cx.entity()))
+            .child(view_menu(active, self.files_view_available(cx), cx.entity()))
             .into_any_element()
     }
 }

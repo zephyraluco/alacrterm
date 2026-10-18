@@ -32,7 +32,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc as futures_mpsc;
@@ -167,6 +167,27 @@ enum TransferKind {
     Remove { path: String, is_dir: bool },
 }
 
+/// 一次 SSH 连接实例的身份。
+///
+/// 每建一个 [`SshFs`] 分配一个新值；克隆句柄共享同一个值 —— 所以「值相同」= 同一条连接，
+/// 「值不同」哪怕是同一个 `user@host:port` 也是另一次连接（重连、分屏各开一条都算）。
+///
+/// ⚠️ 只在**当前进程**内有意义：不要写进配置文件，也不要拿它当主机标识。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SessionId(u64);
+
+impl SessionId {
+    fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// 数字形式（日志 / 调试信息用）。
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// 一台 SSH 主机上的远端文件系统。
 ///
 /// 只是个**句柄**:真正的连接活在后台线程里(见模块文档),所以 `Clone` 只是复制句柄,
@@ -175,6 +196,8 @@ enum TransferKind {
 pub struct SshFs(Arc<Inner>);
 
 struct Inner {
+    /// 这条连接实例的身份（见 [`SessionId`]）。
+    id: SessionId,
     /// 建连要用的参数(与终端会话同一份)。
     params: SshParams,
     /// **浏览** worker 的入口;`None` = 还没连过,或上一条已经不可用(下次调用会重连)。
@@ -196,10 +219,16 @@ impl SshFs {
     /// 同参数的句柄。单独构造的场合是「只要远端文件、不开终端」。
     pub fn new(params: SshParams) -> Self {
         Self(Arc::new(Inner {
+            id: SessionId::next(),
             params,
             worker: Mutex::new(None),
             transfer: Mutex::new(None),
         }))
+    }
+
+    /// 这条连接实例的身份。克隆句柄返回同一个值；新建句柄一定是新值。
+    pub fn session_id(&self) -> SessionId {
+        self.0.id
     }
 
     /// 远端主机名(参数里的 `host`)。

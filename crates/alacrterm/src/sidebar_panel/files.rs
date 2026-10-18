@@ -25,8 +25,10 @@
 //! ## 传输进度
 //!
 //! 上传 / 下载都是 [`SshFs`] 的 `Transfer`(见 `crates/ssh/src/fs.rs`):进度与结果走同一条
-//! `futures` 通道。这里把每条传输摊成一行([`FilesItem::Transfer`])摆在路径框下面,读通道的
-//! 任务负责推进那一行、传完重读受影响的那个目录。
+//! `futures` 通道。应用级 [`TransferManager`] 持有任务与接收端,这里把任务摊成行
+//! ([`FilesItem::Transfer`])摆在路径框下面,传完只重读来源会话的目录。
+//! 切换或关闭终端不会丢掉在途任务;关闭主窗口时会等待这些任务完成或取消收尾。
+//! 预览窗口的文本保存另有关闭保护,尚未纳入同一个退出协调器。
 //!
 //! ⚠️ **成功不推通知**:进度行消失 + 列表重读就是反馈(传上去的文件会自己出现在树里),
 //! 弹 toast 只会盖住用户正在看的东西;失败才推(见 [`FilesState::report_error`])。
@@ -34,14 +36,13 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use futures::StreamExt as _;
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, ClipboardItem, Context, CursorStyle, Entity,
     IntoElement, ParentElement as _, PathPromptOptions, Pixels, SharedString, Styled as _,
     Subscription, WeakEntity, Window, div, px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -51,14 +52,18 @@ use gpui_kit::component::{
     progress::Progress,
     v_flex,
 };
-use terminal::{CancelToken, RemoteEntry, SshError, SshFs, Transfer, TransferEvent, TransferProgress};
+use terminal::{
+    RemoteEntry, SessionId, SshError, SshFs, Transfer,
+};
 
 use super::empty_state;
 use super::shared::{RowCache, ellipsis_label, row_content, row_shell};
 use crate::AppRoot;
 use crate::assets::IconName;
 use crate::format;
+use crate::preview_cache::PreviewCache;
 use crate::preview_window::{FileKind, PreviewRequest};
+use crate::transfer_manager::{TransferManager, TransferState};
 
 /// 路径输入框那一行的高度。
 const PATH_ROW_HEIGHT: Pixels = px(36.);
@@ -98,46 +103,11 @@ fn expand_home(directory: &str, home: Option<&str>) -> Option<String> {
     }
 }
 
-/// 预览缓存的落地目录:`<系统缓存>/alacrterm/preview`。
-///
-/// 用缓存目录而不是 `temp_dir()`:有些平台会在开窗口的当口清理临时目录,而缓存目录至少
-/// 是有归属的(预览窗口用完自己删,见 `preview_window::PreviewWindow::drop`;交给系统程序
-/// 打开的那份留着,下次启动统一清,见 [`clear_preview_cache`])。
-fn preview_dir() -> PathBuf {
-    let base = dirs::cache_dir()
-        .or_else(dirs::data_local_dir)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("alacrterm").join("preview")
-}
-
-/// 清掉上次跑剩下的预览缓存(整个 `<缓存>/alacrterm/preview` 目录)。启动时调一次。
-///
-/// 缓存里那两种东西的生命周期都只到「这次打开」为止:预览窗口用的那份在窗口 `Drop` 时删;
-/// **交给系统程序打开**的那份(音频 / 视频)得留给播放器读,应用这边不知道它什么时候读完 ——
-/// 所以统一放到**下次启动**来收:那一刻还没有任何窗口在用它们,剩下的只可能是上次跑留下的
-/// (包括上次崩了没清干净的情况)。⚠️ 还在被上一轮进程的播放器占着的文件删不掉,忽略即可
-/// (下次启动再清)。⚠️ 这里顺手把**没开成的预览窗口**留下的那份也清了,所以调用点要在
-/// 任何窗口打开**之前**。
-pub(crate) fn clear_preview_cache() {
-    let dir = preview_dir();
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => log::debug!("已清掉预览缓存:{}", dir.display()),
-        // 还没打开过任何文件时目录本来就不存在,这是最常见的情况。
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => log::warn!("清理预览缓存失败:{}:{error}", dir.display()),
-    }
-}
-
 /// 系统的下载目录(问不到就退回当前目录)。
 fn download_dir() -> PathBuf {
     dirs::download_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// 把一个远端文件名变成安全的本地文件名(远端路径里不该有分隔符,防一手)。
-fn safe_file_name(name: &str) -> String {
-    name.replace(['/', '\\'], "_")
 }
 
 /// 目标路径已经被占了就在主名后面加 ` (1)` / ` (2)`…(不回问用户,也不覆盖)。
@@ -233,34 +203,7 @@ enum RowKind {
     Loading,
 }
 
-/// 一条在跑的传输,对应侧边栏里的一行。
-#[derive(Clone)]
-struct TransferState {
-    id: u64,
-    /// 条目名(或「n 个文件」)。
-    label: SharedString,
-    files_done: u64,
-    files_total: u64,
-    bytes_done: u64,
-    bytes_total: u64,
-    cancel: CancelToken,
-}
-
 impl TransferState {
-    /// 进度百分比(0 ~ 100)。
-    ///
-    /// 优先按字节算(比按文件个数准得多);总字节数不知道(空文件 / 服务端没报大小)时退化成
-    /// 「第几个文件」。
-    fn percent(&self) -> f32 {
-        if self.bytes_total > 0 {
-            (self.bytes_done as f32 / self.bytes_total as f32 * 100.).clamp(0., 100.)
-        } else if self.files_total > 0 {
-            (self.files_done as f32 / self.files_total as f32 * 100.).clamp(0., 100.)
-        } else {
-            0.
-        }
-    }
-
     /// 行右侧那行说明文字。
     fn detail(&self) -> String {
         if self.bytes_total > 0 {
@@ -281,7 +224,7 @@ impl TransferState {
 ///
 /// ⚠️ 这里**不再带通知文本**了:成功一律静默(进度行消失即反馈),失败由
 /// [`FilesState::report_error`] 统一报。
-enum TransferDone {
+pub(crate) enum TransferDone {
     /// 打开预览窗口(文本 / 图片 / 其他下完缓存后走这条)。
     Preview(PreviewRequest),
     /// 交给系统默认程序打开本地那份(音频 / 视频走这条)。
@@ -325,23 +268,43 @@ pub(crate) struct FilesState {
     /// 远端家目录:终端报的目录可能是 `~` / `~/x`(见
     /// [`FilesState::follow_terminal`]),展开要用它。问到之前为 `None`。
     home: Option<String>,
+    /// 导航请求序号：只认最新一次（见 [`FilesState::navigate_to`]）。
     nav_seq: u64,
+    /// 会话代数：换会话 / 重置时自增，旧会话的回包据此丢弃。
     generation: u64,
+    /// 摊平后的可见行缓存（见 [`RowCache`]）。
     rows: RowCache<FileRow>,
-    /// 在跑的传输(最新的在前,见 [`FilesState::spawn_transfer`])。
-    transfers: Vec<TransferState>,
-    next_transfer_id: u64,
-    /// 预览缓存的递增序号(同名文件互不覆盖,见 [`FilesState::open_file`])。
-    cache_seq: u64,
+    /// 应用级传输管理器（任务与会话生命周期无关，见 [`crate::transfer_manager`]）。
+    transfers: Entity<TransferManager>,
+    _transfer_sub: Subscription,
     /// 拿它开预览窗口 / 推通知(见 [`FilesState::open_file`])。
     app_root: WeakEntity<AppRoot>,
     _input_sub: Subscription,
 }
 
 impl FilesState {
+    /// 有没有「必须拿到窗口才能做」的待办（路径框刷新）。
+    ///
+    /// 根视图据此决定即使上下文快照没变也要跑一次同步（见
+    /// [`crate::AppRoot::sync_active_context`]）。
+    pub(crate) fn needs_window_sync(&self) -> bool {
+        self.path_input_pending
+    }
+
+    pub(crate) fn has_transfers(&self, cx: &App) -> bool {
+        !self.transfers.read(cx).transfers().is_empty()
+    }
+
+    pub(crate) fn reload_from(&mut self, session: SessionId, dir: &str, cx: &mut Context<Self>) {
+        if self.fs.as_ref().map(SshFs::session_id) == Some(session) {
+            self.reload_dir(dir, cx);
+        }
+    }
+
     pub(crate) fn new(
         window: &mut Window,
         app_root: WeakEntity<AppRoot>,
+        transfers: Entity<TransferManager>,
         cx: &mut Context<Self>,
     ) -> Self {
         let path_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入远端目录路径"));
@@ -350,6 +313,7 @@ impl FilesState {
             window,
             |state: &mut Self, _, event, window, cx| state.on_path_input_event(event, window, cx),
         );
+        let transfer_sub = cx.observe(&transfers, |_, _, cx| cx.notify());
         Self {
             fs: None,
             root: None,
@@ -365,9 +329,8 @@ impl FilesState {
             nav_seq: 0,
             generation: 0,
             rows: RowCache::default(),
-            transfers: Vec::new(),
-            next_transfer_id: 0,
-            cache_seq: 0,
+            transfers,
+            _transfer_sub: transfer_sub,
             app_root,
             _input_sub: input_sub,
         }
@@ -387,9 +350,6 @@ impl FilesState {
         // 换了会话就忘了「上次跟到哪儿」与旧会话的家目录:新会话的目录跟旧会话没关系。
         self.followed = None;
         self.home = None;
-        // ⚠️ 传输行清掉,但在途的那些传输**不会**停(它们活在 worker 的那条连接上)。这是
-        // 有意取舍:会话已经换掉了,行摆着也没处显示;worker 那边下次请求自然会用到新连接。
-        self.transfers.clear();
         self.reset(window, cx);
     }
 
@@ -523,6 +483,12 @@ impl FilesState {
                     match home {
                         Ok(home) => {
                             this.home = Some(home.clone());
+                            // 家目录可能晚于终端上报的 `~` 到达：算完赶紧让根视图重跑一次
+                            // 上下文同步，否则 `~` 那条目录没人展开（以前靠逐帧兜底）。
+                            let app_root = this.app_root.clone();
+                            if let Some(root) = app_root.upgrade() {
+                                let _ = root.update(cx, |root, cx| root.schedule_context_sync(cx));
+                            }
                             // 终端已经报过目录、并且已经跳过去了(见 `follow_terminal`):
                             // 别拿家目录盖回来 —— 两条路都是异步的,谁先回来不一定。
                             if this.root.is_some() {
@@ -582,6 +548,11 @@ impl FilesState {
                                 this.path_input_pending = true;
                                 this.expanded.clear();
                                 this.entries = Some(entries);
+                                // 路径框要窗口才能刷新：让根视图下一帧再跑一次同步。
+                                let app_root = this.app_root.clone();
+                                if let Some(root) = app_root.upgrade() {
+                                    let _ = root.update(cx, |root, cx| root.schedule_context_sync(cx));
+                                }
                             }
                             LoadTarget::Dir(path) => {
                                 if let Some(entries_root) = this.entries.as_mut()
@@ -657,10 +628,6 @@ impl FilesState {
     }
 
     /// 按 id 取一条在跑的传输(渲染传输行时用)。
-    fn transfer(&self, id: u64) -> Option<TransferState> {
-        self.transfers.iter().find(|t| t.id == id).cloned()
-    }
-
     // --------------------------------------------------------- 打开 / 上传 / 下载
 
     /// 「打开」:先把远端文件下到本地缓存,下完按类型交给预览窗口或系统程序。
@@ -670,30 +637,39 @@ impl FilesState {
     /// 还要捎上 [`SshFs`] 句柄与根实体(后者用来在写回之后让本视图把所在目录重读一次)。
     ///
     /// ⚠️ **音频 / 视频不开窗口**:应用里没有解码器(内嵌播放要么自己写一层 unsafe 的 COM,
-    /// 要么引来 ffmpeg),下完直接交给系统默认程序。那份副本留在缓存目录里给播放器读,
-    /// 由下次启动清掉(见 [`clear_preview_cache`])。
+    /// 要么引来 ffmpeg),下完直接交给系统默认程序。那份副本**不挂租约**(播放器可能还要读),
+    /// 留给下次启动的实例清理回收(见 [`crate::preview_cache`])。
     pub(super) fn open_file(&mut self, path: FilePath, cx: &mut Context<Self>) {
         let (Some(fs), Some(node)) = (self.fs.clone(), self.node(&path)) else {
             return;
         };
         let (remote, name, size) = (node.path.clone(), node.name.clone(), node.size);
-        self.cache_seq += 1;
-        let local = preview_dir().join(format!("{}-{}", self.cache_seq, safe_file_name(&name)));
+        let cache = PreviewCache::global(cx);
+        let handed_to_system = FileKind::of(&name).handed_to_system();
+
+        // 预览那份挂租约（标签关了就删）；交给系统程序那份不挂。
+        let lease = (!handed_to_system).then(|| cache.allocate(&name));
+        let local = match &lease {
+            Some(lease) => lease.path().to_path_buf(),
+            None => cache.allocate_detached(&name),
+        };
         let transfer = fs.download_one(remote.clone(), local.clone());
-        let done = if FileKind::of(&name).handed_to_system() {
+        let done = if handed_to_system {
             TransferDone::OpenExternally(local)
         } else {
             TransferDone::Preview(PreviewRequest {
                 name: name.clone(),
                 host: fs.host().to_string(),
                 remote_path: remote,
+                session: fs.session_id(),
                 local_path: local,
+                _lease: lease.expect("预览请求一定有租约"),
                 size,
-                fs,
+                fs: fs.clone(),
                 app_root: self.app_root.clone(),
             })
         };
-        self.spawn_transfer(name, None, transfer, done, cx);
+        self.spawn_transfer(fs.clone(), name, None, transfer, done, cx);
     }
 
     /// 「下载到…」:文件走系统的**另存为**,目录走选目录 + 整个下下来。
@@ -725,7 +701,7 @@ impl FilesState {
                     let _ = state.update(&mut cx, |this, cx| {
                         // 远端目录名会落在选中的目录下面。
                         let transfer = fs.download(vec![remote.clone()], dir);
-                        this.spawn_transfer(name.clone(), None, transfer, TransferDone::Nothing, cx);
+                        this.spawn_transfer(fs.clone(), name.clone(), None, transfer, TransferDone::Nothing, cx);
                     });
                 }
             })
@@ -742,7 +718,7 @@ impl FilesState {
                 };
                 let _ = state.update(&mut cx, |this, cx| {
                     let transfer = fs.download_one(remote.clone(), target);
-                    this.spawn_transfer(name.clone(), None, transfer, TransferDone::Nothing, cx);
+                    this.spawn_transfer(fs.clone(), name.clone(), None, transfer, TransferDone::Nothing, cx);
                 });
             }
         })
@@ -761,7 +737,7 @@ impl FilesState {
             // 先算一个不撞的名字,免得悄悄覆盖用户已有的文件。
             fs.download_one(node.path.clone(), unique_path(dir.join(node.name.as_ref())))
         };
-        self.spawn_transfer(node.name.clone(), None, transfer, TransferDone::Nothing, cx);
+        self.spawn_transfer(fs, node.name.clone(), None, transfer, TransferDone::Nothing, cx);
     }
 
     /// 「上传…」:把本地这些路径传进当前选中项所在的远端目录。
@@ -784,7 +760,7 @@ impl FilesState {
             many => format!("{} 个文件", many.len()).into(),
         };
         let transfer = fs.upload(locals, dir.clone());
-        self.spawn_transfer(label, Some(dir), transfer, TransferDone::Nothing, cx);
+        self.spawn_transfer(fs, label, Some(dir), transfer, TransferDone::Nothing, cx);
     }
 
     /// 上传的落地目录。
@@ -929,7 +905,7 @@ impl FilesState {
         self.rows.bump();
         let transfer = fs.remove(remote, is_dir);
         // 删完重读当前根目录（那一行得从树上消失）。
-        self.spawn_transfer(label, Some(root), transfer, TransferDone::Nothing, cx);
+        self.spawn_transfer(fs, label, Some(root), transfer, TransferDone::Nothing, cx);
     }
 
     /// 跑一个「改远端」的短操作：成功了重读当前目录，失败了推一条错误通知。
@@ -974,108 +950,35 @@ impl FilesState {
 
     // --------------------------------------------------------- 传输
 
-    /// 起一条传输:立刻摆一行进度,再后台读通道推进那一行。
+    /// 起一条传输，任务及事件接收由应用级管理器持有。
     fn spawn_transfer(
         &mut self,
+        source: SshFs,
         label: SharedString,
         refresh: Option<String>,
         transfer: Transfer,
         done: TransferDone,
         cx: &mut Context<Self>,
     ) {
-        let id = self.next_transfer_id;
-        self.next_transfer_id += 1;
-        let Transfer { mut events, cancel } = transfer;
-        // 最新的摆最上面。
-        self.transfers.insert(
-            0,
-            TransferState {
-                id,
-                label,
-                files_done: 0,
-                files_total: 0,
-                bytes_done: 0,
-                bytes_total: 0,
-                cancel,
-            },
-        );
-        cx.notify();
-
-        let state = cx.weak_entity();
-        cx.spawn(move |_: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let mut cx = cx.clone();
-            async move {
-                let mut done = Some(done);
-                let mut finished = false;
-                while let Some(event) = events.next().await {
-                    match event {
-                        TransferEvent::Progress(progress) => {
-                            let keep = state
-                                .update(&mut cx, |this, cx| {
-                                    this.on_transfer_progress(id, progress, cx)
-                                })
-                                .unwrap_or(false);
-                            // 行没了 = 用户取消了,不用再读。
-                            if !keep {
-                                break;
-                            }
-                        }
-                        TransferEvent::Done(result) => {
-                            finished = true;
-                            let Some(done) = done.take() else {
-                                break;
-                            };
-                            let _ = state.update(&mut cx, |this, cx| {
-                                this.on_transfer_done(id, result, refresh.clone(), done, cx)
-                            });
-                            break;
-                        }
-                    }
-                }
-                // 通道直接断了(worker 线程没了):把那一行收掉并说一声,别让它一直挂着。
-                if !finished {
-                    let _ = state.update(&mut cx, |this, cx| this.on_transfer_lost(id, cx));
-                }
-            }
-        })
-        .detach();
+        let files = cx.weak_entity();
+        self.transfers.update(cx, |manager, cx| {
+            manager.start(source, label, refresh, transfer, done, files, cx);
+        });
     }
 
-    fn on_transfer_progress(
-        &mut self,
-        id: u64,
-        progress: TransferProgress,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) else {
-            return false;
-        };
-        transfer.label = progress.label.into();
-        transfer.files_done = progress.files_done;
-        transfer.files_total = progress.files_total;
-        transfer.bytes_done = progress.bytes_done;
-        transfer.bytes_total = progress.bytes_total;
-        cx.notify();
-        true
-    }
-
-    /// 传完了(或被取消 / 失败):收掉那一行,再把受影响的目录重读一次。
+    /// 传完了(或被取消 / 失败):由管理器收掉任务行,这里执行相应的 UI 动作。
     ///
     /// ⚠️ **成功不推通知**:进度行消失 + 列表重读一遍就是反馈(传上去的文件会自己出现在树里),
     /// 弹 toast 只会盖住用户正在看的东西。失败必须说 —— 不说用户不知道要重试。
-    fn on_transfer_done(
+    pub(crate) fn on_transfer_done(
         &mut self,
-        id: u64,
+        session: SessionId,
+        label: SharedString,
         result: Result<(), SshError>,
         refresh: Option<String>,
         done: TransferDone,
         cx: &mut Context<Self>,
     ) {
-        // 行已经没了 ⇒ 这次是被取消的,Done 只是 worker 收尾,不用再打扰用户。
-        let Some(transfer) = self.remove_transfer(id) else {
-            return;
-        };
-        let label = transfer.label;
         match result {
             Ok(()) => match done {
                 // 预览窗口本身就是反馈。
@@ -1093,32 +996,14 @@ impl FilesState {
             Err(error) => self.report_error(cx, format!("{label} 传输失败:{error}")),
         }
         if let Some(dir) = refresh {
-            self.reload_dir(&dir, cx);
+            self.reload_from(session, &dir, cx);
         }
     }
 
     /// 通道在 `Done` 之前就断了:worker 线程没了。
-    fn on_transfer_lost(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(transfer) = self.remove_transfer(id) else {
-            return;
-        };
-        let message = format!("{} 传输中断:远端文件系统线程已退出", transfer.label);
+    pub(crate) fn report_transfer_lost(&mut self, label: SharedString, cx: &mut Context<Self>) {
+        let message = format!("{label} 传输中断:远端文件系统线程已退出");
         self.report_error(cx, message);
-    }
-
-    /// 取消一条传输(点进度行右边的「×」)。
-    fn cancel_transfer(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let Some(transfer) = self.transfers.iter().find(|t| t.id == id) {
-            transfer.cancel.cancel();
-        }
-        self.remove_transfer(id);
-        cx.notify();
-    }
-
-    /// 收掉一行;返回收掉的那条(`None` = 这个 id 已经不在列表里了)。
-    fn remove_transfer(&mut self, id: u64) -> Option<TransferState> {
-        let ix = self.transfers.iter().position(|t| t.id == id)?;
-        Some(self.transfers.remove(ix))
     }
 
     /// 把某个远端目录重读一次(上传 / 下载完成后刷新它;预览窗口写回远端后也走这里)。
@@ -1155,28 +1040,33 @@ impl FilesState {
 
     /// 侧边栏虚拟列表的全部内容项。
     pub(super) fn sidebar_items(&mut self, cx: &mut Context<Self>) -> Vec<FilesItem> {
-        if self.error.is_none() && (self.root.is_none() || self.entries.is_none()) {
+        let transfers = self.transfers.read(cx).transfers().to_vec();
+        if transfers.is_empty() && self.error.is_none() && (self.root.is_none() || self.entries.is_none()) {
             return Vec::new();
         }
 
-        if self.root.is_none() {
-            return vec![FilesItem::Placeholder {
-                icon: IconName::FolderClosed,
-                title: "无法读取远端目录",
-                description: "当前会话的远端文件系统不可用",
-                detail: self.error.clone().map(SharedString::from),
-            }];
-        }
-
         let rows = self.rows();
-        let mut items = Vec::with_capacity(rows.len() + self.transfers.len() + 2);
-        items.push(FilesItem::Path(self.path_input.clone()));
+        let mut items = Vec::with_capacity(rows.len() + transfers.len() + 2);
+        if self.fs.is_some() {
+            items.push(FilesItem::Path(self.path_input.clone()));
+        }
         // 传输行摆在路径框下面、树上面:有东西在传时它最需要被看到。
         let state = cx.entity().downgrade();
-        items.extend(self.transfers.iter().map(|transfer| FilesItem::Transfer {
+        items.extend(transfers.iter().map(|transfer| FilesItem::Transfer {
             state: state.clone(),
             id: transfer.id,
         }));
+        if self.root.is_none() {
+            if self.error.is_some() {
+                items.push(FilesItem::Placeholder {
+                    icon: IconName::FolderClosed,
+                    title: "无法读取远端目录",
+                    description: "当前会话的远端文件系统不可用",
+                    detail: self.error.clone().map(SharedString::from),
+                });
+            }
+            return items;
+        }
         if rows.is_empty() {
             items.push(FilesItem::Placeholder {
                 icon: IconName::FolderOpen,
@@ -1271,10 +1161,16 @@ impl FilesItem {
                 )
                 .into_any_element(),
             Self::Transfer { state, id } => {
-                let Ok(Some(transfer)) = state.read_with(&*cx, |files, _| files.transfer(id)) else {
+                let Ok(Some(transfer)) = state.read_with(&*cx, |files, cx| files.transfers.read(cx).transfer(id)) else {
                     return div().w_full().into_any_element();
                 };
-                transfer_element(id, &transfer, &state, cx)
+                let foreign = state
+                    .read_with(&*cx, |files, _| {
+                        files.fs.as_ref().map(SshFs::session_id)
+                            != Some(transfer.source.session_id())
+                    })
+                    .unwrap_or(true);
+                transfer_element(id, &transfer, foreign, &state, cx)
             }
             Self::Row { state, ix } => {
                 let Ok(Some(row)) = state.read_with(&*cx, |files, _| files.row(ix)) else {
@@ -1356,11 +1252,21 @@ impl FilesItem {
 fn transfer_element(
     id: u64,
     transfer: &TransferState,
+    foreign: bool,
     state: &WeakEntity<FilesState>,
     cx: &mut App,
 ) -> AnyElement {
     let percent = transfer.percent();
-    let detail = transfer.detail();
+    let detail = if transfer.cancelling {
+        "取消中…".to_string()
+    } else {
+        transfer.detail()
+    };
+    let label: SharedString = if foreign {
+        format!("{}: {}", transfer.source.host(), transfer.label).into()
+    } else {
+        transfer.label.clone()
+    };
     let radius = cx.theme().radius;
     v_flex()
         .w_full()
@@ -1374,7 +1280,7 @@ fn transfer_element(
                 .gap_x_2()
                 .items_center()
                 .child(Icon::new(IconName::LoaderCircle).size_3())
-                .child(div().flex_1().min_w_0().child(ellipsis_label(transfer.label.clone())))
+                .child(div().flex_1().min_w_0().child(ellipsis_label(label)))
                 .child(
                     div()
                         .flex_none()
@@ -1389,8 +1295,11 @@ fn transfer_element(
                         .xsmall()
                         .icon(IconName::Close)
                         .tooltip("取消")
+                        .disabled(transfer.cancelling)
                         .on_click(move |_, _, cx| {
-                            let _ = state.update(cx, |files, cx| files.cancel_transfer(id, cx));
+                            let _ = state.update(cx, |files, cx| {
+                                files.transfers.update(cx, |manager, cx| manager.cancel(id, cx));
+                            });
                         })
                 }),
         )
@@ -1492,6 +1401,16 @@ fn row_element(ix: usize, row: &FileRow, selected: bool, cx: &mut App) -> ListIt
 mod tests {
     use super::{FileNode, find_dir_in, join_dir, parent_dir};
     use gpui::SharedString;
+
+    #[test]
+    fn remote_filesystem_identity_follows_connection_instance() {
+        let params = terminal::SshParams::new("example.test", 22, "user");
+        let first = terminal::SshFs::new(params.clone());
+        let same_connection = first.clone();
+        let next_connection = terminal::SshFs::new(params);
+        assert_eq!(first.session_id(), same_connection.session_id());
+        assert_ne!(first.session_id(), next_connection.session_id());
+    }
 
     fn dir(name: &str, path: &str, children: Option<Vec<FileNode>>) -> FileNode {
         FileNode {

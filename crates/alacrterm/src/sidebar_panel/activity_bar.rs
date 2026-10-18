@@ -25,11 +25,11 @@ use crate::status_bar::empty_status_bar;
 /// 整条左列:图标栏 + 侧边栏面板（面板自带底部状态栏）。
 pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
     let active = if sidebar.visible() {
-        sidebar.active_view()
+        sidebar.active_view(cx)
     } else {
         None
     };
-    let files_enabled = sidebar.files_enabled;
+    let files_enabled = sidebar.files_view_available(cx);
 
     let bar = SidebarView::ALL
         .iter()
@@ -75,7 +75,10 @@ pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> A
         // 工具栏只有「文件管理器」有（「会话」那条没有:它那一栏的动作在右键菜单里）。
         .toolbar(match active {
             SidebarView::Sessions => None,
-            SidebarView::Files => Some(files_toolbar(sidebar.files.clone(), cx)),
+            SidebarView::Files if sidebar.files.read(cx).status().ready => {
+                Some(files_toolbar(sidebar.files.clone(), cx))
+            }
+            SidebarView::Files => None,
         })
         .children(rows)
         // 侧边栏底部状态栏(与中间列那条同一个组件 / 同一个高度):空条。

@@ -28,7 +28,7 @@ use gpui_kit::component::{
     resizable::resize_handle,
     v_flex,
 };
-use terminal::{SshFs, TerminalTarget};
+use terminal::{SshFs, SessionId, TerminalTarget};
 use terminal_view::{RenderSettings, TerminalView};
 
 use crate::actions::NewLocalTerminal;
@@ -118,6 +118,7 @@ impl AppRoot {
         // 按 dock 的顺序重排。
         self.active = self.tabs.len() - 1;
         self.sync_tabs_with_dock(cx);
+        self.sync_active_context(window, cx);
         cx.notify();
     }
 
@@ -204,6 +205,7 @@ impl AppRoot {
         }
         // 顺序跟着 dock 走。
         self.sync_tabs_with_dock(cx);
+        self.sync_active_context(window, cx);
         cx.notify();
     }
 
@@ -340,6 +342,7 @@ impl AppRoot {
         let Some(group) = group else {
             // 还没进过标签组（首个标签页）：直接聚焦它。
             window.focus(&focus, cx);
+            self.sync_active_context(window, cx);
             cx.notify();
             return;
         };
@@ -354,6 +357,7 @@ impl AppRoot {
             Some(slot) => group.update(cx, |group, cx| group.select_tab(slot, window, cx)),
             None => window.focus(&focus, cx),
         }
+        self.sync_active_context(window, cx);
         cx.notify();
     }
 }
@@ -413,6 +417,12 @@ impl TabPane {
         cx.observe_in(view, window, |this, _view, window, cx| {
             this.sync_focus(window, cx);
             cx.notify();
+            // 标题 / 焦点 / 连接状态 / 远端目录都可能刚变过：让根视图在下一帧重算上下文。
+            // ⚠️ 不能在这里同步 `root.update(.. sync_active_context)` —— 本实体正在被更新，
+            // 那会再读到自己（gpui 的重复租借检查）。
+            if let Some(root) = this.root.upgrade() {
+                let _ = root.update(cx, |root, cx| root.schedule_context_sync(cx));
+            }
         })
     }
 
@@ -473,6 +483,16 @@ impl TabPane {
     /// 所以只问**聚焦**那一格：远端 shell 一 `cd`，面板就跟着换目录。
     pub(crate) fn remote_directory(&self, cx: &App) -> Option<String> {
         self.focused_view().read(cx).remote_directory(cx)
+    }
+
+    /// 当前格子所属的连接实例（远端会话才有）。
+    pub(crate) fn remote_session(&self, cx: &App) -> Option<SessionId> {
+        self.remote_fs(cx).map(|fs| fs.session_id())
+    }
+
+    /// 当前聚焦格子的实体 id（活动上下文快照的去重键）。
+    pub(crate) fn focused_id(&self) -> EntityId {
+        self.focused_view().entity_id()
     }
 
     /// 当前格子是否已连上。
@@ -725,8 +745,9 @@ impl BasePanel for TabPane {
         }
         self.focus_active(window, cx);
         let pane = cx.entity().entity_id();
-        AppRoot::defer_after_update(self.root.clone(), cx, move |root, _, cx| {
-            root.set_active_pane(pane, cx)
+        AppRoot::defer_after_update(self.root.clone(), cx, move |root, window, cx| {
+            root.set_active_pane(pane, cx);
+            root.sync_active_context(window, cx);
         });
     }
 }

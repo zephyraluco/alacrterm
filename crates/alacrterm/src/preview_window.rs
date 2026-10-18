@@ -114,8 +114,12 @@ pub(crate) struct PreviewRequest {
     pub(crate) host: String,
     /// 远端路径(文本保存时写回的就是它)。
     pub(crate) remote_path: String,
+    /// 这条预览所属的连接实例 —— 不同连接的同名路径是两个标签。
+    pub(crate) session: terminal::SessionId,
     /// 已经下到本地的缓存文件。
     pub(crate) local_path: PathBuf,
+    /// 缓存文件的租约：标签活着就一直持有，关闭时自动删（见 [`crate::preview_cache`]）。
+    pub(crate) _lease: crate::preview_cache::CacheLease,
     /// 字节数(远端报的;0 = 不知道)。
     pub(crate) size: u64,
     /// 远端文件系统句柄 —— 文本保存写回远端用(别的类型用不上)。
@@ -421,12 +425,33 @@ impl Revisions {
 
 /// 一次在跑的写回。
 struct Saving {
+    id: SaveOperationId,
     /// 抓那份文本时的版本号(见 [`Revisions`])。
     revision: u64,
     /// 已经写过去多少字节。
     done: u64,
     /// 这次要写多少字节(工具条上那行进度小字的分母)。
     total: u64,
+}
+
+impl Saving {
+    fn matches(saving: Option<&Self>, operation_id: SaveOperationId) -> bool {
+        saving.is_some_and(|saving| saving.id == operation_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SaveOperationId(u64);
+
+impl SaveOperationId {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |value| value.checked_add(1),
+        ).expect("save operation identity exhausted"))
+    }
 }
 
 /// 关窗口时该怎么办(见 [`PreviewWindow::should_close`])。
@@ -466,7 +491,22 @@ enum UnsavedScope {
 ///
 /// 除了「窗口认得的」(焦点句柄 / 主窗口订阅)都挂在这里 —— 一个窗口开多个文件时,每个文件
 /// 各有各的正文与写回账本。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreviewId(u64);
+
+impl PreviewId {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |value| value.checked_add(1),
+        ).expect("preview identity exhausted"))
+    }
+}
+
 pub(crate) struct PreviewTab {
+    id: PreviewId,
     /// 打开它时的那些信息(远端路径 / 主窗口句柄 / 缓存文件…)。
     request: PreviewRequest,
     kind: FileKind,
@@ -507,6 +547,7 @@ fn new_tab(
         }
     };
     let mut tab = PreviewTab {
+        id: PreviewId::new(),
         request,
         kind,
         body,
@@ -521,7 +562,7 @@ fn new_tab(
 /// 读本地缓存那份文本,读回来再建编辑器(建 [`EditorState`] 要窗口,所以只能在 UI 侧做)。
 fn load_text(tab: &mut PreviewTab, window: &mut Window, cx: &mut Context<PreviewWindow>) {
     let path = tab.request.local_path.clone();
-    let remote_path = tab.request.remote_path.clone();
+    let preview_id = tab.id;
     cx.spawn_in(
         window,
         async move |this: WeakEntity<PreviewWindow>, cx: &mut gpui::AsyncWindowContext| {
@@ -530,7 +571,7 @@ fn load_text(tab: &mut PreviewTab, window: &mut Window, cx: &mut Context<Preview
                 .spawn(async move { read_text(&path) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.finish_load(&remote_path, loaded, window, cx)
+                this.finish_load(preview_id, loaded, window, cx)
             });
         },
     )
@@ -587,9 +628,12 @@ impl PreviewWindow {
         if let Some(ix) = self
             .tabs
             .iter()
-            .position(|tab| tab.request.remote_path == request.remote_path)
+            .position(|tab| {
+                tab.request.session == request.session && tab.request.remote_path == request.remote_path
+            })
         {
-            // 同一个远端文件已经开着:切过去就行(内容可能已变,但用户看得见标签就在那儿)。
+            // 同一个远端文件已经开着:切过去就行(内容可能已变，但用户看得见标签就在那儿)。
+            // 重复请求那份新缓存随 `request` 析构，租约释放时自动删。
             self.active = ix;
             self.focus_active(window, cx);
             cx.notify();
@@ -635,8 +679,8 @@ impl PreviewWindow {
             return;
         }
         let tab = self.tabs.remove(ix);
-        // 标签没了就把它那份缓存删掉(照 [`Self::drop`] 那一步)。
-        remove_cache(&tab.request.local_path);
+        // 标签没了 ⇒ 它那份缓存租约随 `tab` 析构释放（最后一份时删文件）。
+        drop(tab);
         if self.active > ix {
             self.active -= 1;
         } else if self.active == ix {
@@ -762,10 +806,10 @@ impl PreviewWindow {
         }
     }
 
-    /// 后台把本地缓存读回来之后收尾:建编辑器,摆进**它那个标签**(按远端路径找回)。
+    /// 后台把本地缓存读回来之后收尾，按标签身份定位。
     fn finish_load(
         &mut self,
-        remote_path: &str,
+        preview_id: PreviewId,
         loaded: Result<Loaded, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -773,7 +817,7 @@ impl PreviewWindow {
         let Some(ix) = self
             .tabs
             .iter()
-            .position(|tab| tab.request.remote_path == remote_path)
+            .position(|tab| tab.id == preview_id)
         else {
             // 标签在读的中途被关了 ⇒ 正文就别摆了。
             return;
@@ -835,13 +879,16 @@ impl PreviewWindow {
         }
         let contents = text.editor.read(cx).value().to_string();
         let total = contents.len() as u64;
+        let operation_id = SaveOperationId::new();
         text.saving = Some(Saving {
+            id: operation_id,
             revision: text.revisions.current,
             done: 0,
             total,
         });
         text.outcome = None;
         let cache = tab.request.local_path.clone();
+        let preview_id = tab.id;
         let remote_path = tab.request.remote_path.clone();
         let fs = tab.request.fs.clone();
         cx.notify();
@@ -857,24 +904,24 @@ impl PreviewWindow {
                 if let Err(error) = written {
                     let message = format!("写本地缓存失败:{error}");
                     let _ = this.update_in(cx, |this, window, cx| {
-                        this.finish_save(&remote_path, Err(message), window, cx)
+                        this.finish_save(preview_id, operation_id, Err(message), window, cx)
                     });
                     return;
                 }
-                let mut events = fs.upload_one(cache, remote_path.clone()).events;
+                let mut events = fs.upload_one(cache.clone(), remote_path.clone()).events;
                 while let Some(event) = events.next().await {
                     match event {
                         TransferEvent::Progress(progress) => {
                             let (done, total) = (progress.bytes_done, progress.bytes_total);
                             // 视图已经没了也把这次写回读完:半截的远端文件比多等一会儿糟。
                             let _ = this.update_in(cx, |this, window, cx| {
-                                this.on_save_progress(&remote_path, done, total, window, cx)
+                                this.on_save_progress(preview_id, operation_id, done, total, window, cx)
                             });
                         }
                         TransferEvent::Done(result) => {
                             let result = result.map_err(|error| error.to_string());
                             let _ = this.update_in(cx, |this, window, cx| {
-                                this.finish_save(&remote_path, result, window, cx)
+                                this.finish_save(preview_id, operation_id, result, window, cx)
                             });
                             return;
                         }
@@ -883,7 +930,8 @@ impl PreviewWindow {
                 // 通道在 `Done` 之前就断了:worker 线程没了(照 `sidebar_panel/files.rs` 那条路)。
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.finish_save(
-                        &remote_path,
+                        preview_id,
+                        operation_id,
                         Err("远端文件系统线程已退出".to_string()),
                         window,
                         cx,
@@ -894,10 +942,11 @@ impl PreviewWindow {
         .detach();
     }
 
-    /// 写回进度(状态栏那行小字)。按远端路径找回它那个标签。
+    /// 写回进度(状态栏那行小字)，按标签身份定位。
     fn on_save_progress(
         &mut self,
-        remote_path: &str,
+        preview_id: PreviewId,
+        operation_id: SaveOperationId,
         done: u64,
         total: u64,
         _window: &mut Window,
@@ -906,7 +955,7 @@ impl PreviewWindow {
         let Some(tab) = self
             .tabs
             .iter_mut()
-            .find(|tab| tab.request.remote_path == remote_path)
+            .find(|tab| tab.id == preview_id)
         else {
             return;
         };
@@ -916,6 +965,9 @@ impl PreviewWindow {
         let Some(saving) = text.saving.as_mut() else {
             return;
         };
+        if !Saving::matches(Some(saving), operation_id) {
+            return;
+        }
         saving.done = done;
         if total > 0 {
             saving.total = total;
@@ -925,10 +977,11 @@ impl PreviewWindow {
 
     /// 一次写回收尾(成功 / 失败)。`result` 里带的是已经翻成人话的失败原因。
     ///
-    /// 按远端路径找回它那个标签 —— 写回是异步的,回来时用户可能已经切走甚至把它关了。
+    /// 按标签身份定位；标签已经关闭时丢弃结果。
     fn finish_save(
         &mut self,
-        remote_path: &str,
+        preview_id: PreviewId,
+        operation_id: SaveOperationId,
         result: Result<(), String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -936,7 +989,7 @@ impl PreviewWindow {
         let Some(ix) = self
             .tabs
             .iter()
-            .position(|tab| tab.request.remote_path == remote_path)
+            .position(|tab| tab.id == preview_id)
         else {
             return;
         };
@@ -945,6 +998,9 @@ impl PreviewWindow {
             let Body::Text(text) = &mut tab.body else {
                 return;
             };
+            if !Saving::matches(text.saving.as_ref(), operation_id) {
+                return;
+            }
             let Some(saving) = text.saving.take() else {
                 return;
             };
@@ -976,7 +1032,7 @@ impl PreviewWindow {
                 // 这次没成 ⇒ 别再自动关,让用户看着错误自己决定。
                 self.tabs[ix].close_after_save = false;
                 let note = format!("写回远端失败:{message}");
-                log::warn!("{remote_path}:{note}");
+                log::warn!("{}:{note}", self.tabs[ix].request.remote_path);
                 window.push_notification(Notification::error(note), cx);
             }
         }
@@ -1388,12 +1444,9 @@ impl Render for PreviewWindow {
 
 impl Drop for PreviewWindow {
     fn drop(&mut self) {
-        // 每个标签缓存那份都是「打开」时临时下的,窗口没了就删(失败也只是留个临时文件)。
+        // 每个标签都持有缓存租约，`self.tabs` 析构时自动释放（最后一份时删文件）。
         // ⚠️ 有没写回的改动时关窗口那一下先被 [`PreviewWindow::should_close`] 拦下来问了,
         // 所以走到这里的内容要么已经写回远端、要么是用户明确选了「丢弃」。
-        for tab in &self.tabs {
-            remove_cache(&tab.request.local_path);
-        }
     }
 }
 
@@ -1546,15 +1599,7 @@ fn refresh_parent_dir(tab: &PreviewTab, cx: &mut App) {
         return;
     };
     let dir = dir.to_string();
-    root.update(cx, |root, cx| root.reload_files_dir(&dir, cx));
-}
-
-/// 删掉某个标签的本地缓存(标签关了 / 窗口没了时,见 [`PreviewWindow::close_tab`] 与
-/// [`PreviewWindow::drop`])。失败也只是留个临时文件,不当回事。
-fn remove_cache(path: &Path) {
-    if let Err(error) = std::fs::remove_file(path) {
-        log::debug!("清理预览缓存失败:{}:{error}", path.display());
-    }
+    root.update(cx, |root, cx| root.reload_files_dir(tab.request.session, &dir, cx));
 }
 
 /// 工具条上两组动作之间的分隔线。
@@ -1717,6 +1762,24 @@ fn save_label(text: &TextEditing) -> Option<(String, bool)> {
 }
 
 impl AppRoot {
+    pub(crate) fn preview_has_pending_changes(
+        handle: Option<gpui::WindowHandle<Root>>,
+        cx: &mut App,
+    ) -> bool {
+        handle.is_some_and(|handle| {
+            handle
+                .update(cx, |root, _, cx| {
+                    root.view()
+                        .clone()
+                        .downcast::<PreviewWindow>()
+                        .is_ok_and(|view| {
+                            view.read(cx).tabs.iter().any(|tab| close_ask(tab) != CloseAsk::Allow)
+                        })
+                })
+                .unwrap_or(false)
+        })
+    }
+
     /// 打开一个文件预览。
     ///
     /// **一个窗口多个标签**(见模块文档):窗口没开就开一个(首标签就是这个请求),已经开了就
@@ -1777,6 +1840,38 @@ impl AppRoot {
 #[cfg(test)]
 mod tests {
     use super::FileKind;
+
+    #[test]
+    fn preview_identity_is_not_reused_after_close() {
+        let closed = super::PreviewId::new();
+        let reopened = super::PreviewId::new();
+        assert_ne!(closed, reopened);
+        let active = [reopened];
+        assert!(!active.contains(&closed));
+    }
+
+    #[test]
+    fn preview_identities_are_unique() {
+        let mut identities = std::collections::HashSet::new();
+        for _ in 0..1024 {
+            assert!(identities.insert(super::PreviewId::new().0));
+        }
+    }
+
+    #[test]
+    fn old_save_callback_does_not_match_next_save() {
+        let old = super::SaveOperationId::new();
+        let current = super::SaveOperationId::new();
+        let saving = super::Saving {
+            id: current,
+            revision: 2,
+            done: 0,
+            total: 10,
+        };
+        assert!(!super::Saving::matches(Some(&saving), old));
+        assert!(super::Saving::matches(Some(&saving), current));
+        assert!(!super::Saving::matches(None, current));
+    }
 
     /// 分类错了会走错界面(拿图片当文本读 / 把音频当成能在应用里看),所以这里逐类钉一遍。
     #[test]
