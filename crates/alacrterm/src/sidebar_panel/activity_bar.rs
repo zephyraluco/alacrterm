@@ -7,9 +7,8 @@ use gpui::{
     IntoElement, ParentElement as _, PathPromptOptions, SharedString, Styled as _, Window, div, px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Placement, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Placement, Sizable as _,
     button::{Button, ButtonVariants as _},
-    dialog::{DialogAction, DialogClose, DialogFooter},
     h_flex,
     menu::{ContextMenuExt as _, PopupMenuItem},
 };
@@ -110,7 +109,7 @@ pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> A
 
 /// 「文件管理器」顶部那一行工具栏（照 MobaXterm 的摆法：按钮在上、路径框在下）。
 ///
-/// 九枚 **xsmall ghost 图标按钮**（靠左一字排开，中间两条细竖线分成三组）：
+/// 七枚 **xsmall ghost 图标按钮**（靠左一字排开，中间两条细竖线分成三组）：
 ///
 /// | 按钮 | 图标 | 动作 |
 /// | --- | --- | --- |
@@ -120,17 +119,15 @@ pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> A
 /// | 刷新 | `Replace` | [`FilesState::refresh`] |
 /// | 新建文件夹 | `FolderPlus` | 名字对话框 → [`FilesState::create_dir`] |
 /// | 新建文件 | `File` | 名字对话框 → [`FilesState::create_file`] |
-/// | 删除 | `Delete` | 确认对话框 → [`FilesState::remove_selected`] |
 /// | 重命名 | `CaseSensitive` | 名字对话框（预填旧名）→ [`FilesState::rename_selected`] |
-/// | 编辑 | `FileText` | [`FilesState::open_selected`] |
 ///
 /// 判据每帧现取一次（[`FilesState::status`]）⇒ 跳目录 / 改选中项 / 断会话都会让相应的按钮
 /// 变灰，不需要额外订阅。
 ///
 /// ⚠️ 这几枚只做「最常用那一种」：「下载」只下**选中项**、**路径问用户**（与行右键菜单那
-/// 两项同一条 [`FilesState::download_as`]）；「上传」只问**文件**（不问文件夹）；「删除」对
-/// 目录是**整棵递归**（对话框里会说清）。其余都在**行右键菜单**里（上传文件夹 / 下载到
-/// 下载目录 / 复制远端路径，见 `files::row_menu`）与**面板右键菜单**里（上传 / 刷新）。
+/// 两项同一条 [`FilesState::download_as`]）；「上传」只问**文件**（不问文件夹）。其余都在
+/// **行右键菜单**里（上传文件夹 / 下载到下载目录 / 复制远端路径，见 `files::row_menu`）
+/// 与**面板右键菜单**里（上传 / 刷新）。
 fn files_toolbar(files: Entity<FilesState>, cx: &mut Context<Sidebar>) -> AnyElement {
     let status = files.read(cx).status();
     let has_selection = status.selected.is_some();
@@ -191,15 +188,7 @@ fn files_toolbar(files: Entity<FilesState>, cx: &mut Context<Sidebar>) -> AnyEle
         })
     };
 
-    // ---- 删除 / 重命名 / 编辑 ----
-
-    let remove = {
-        let files = files.clone();
-        let label = status.selected.clone().unwrap_or_default();
-        tool_button("files-remove", IconName::Delete, "删除", has_selection, move |window, cx| {
-            confirm_remove(window, cx, files.clone(), label.clone(), dir);
-        })
-    };
+    // ---- 重命名 ----
 
     let rename = {
         let files = files.clone();
@@ -214,14 +203,6 @@ fn files_toolbar(files: Entity<FilesState>, cx: &mut Context<Sidebar>) -> AnyEle
         })
     };
 
-    let edit = {
-        let files = files.clone();
-        let tooltip = if dir { "展开 / 收起" } else { "编辑" };
-        tool_button("files-edit", IconName::FileText, tooltip, has_selection, move |_, cx| {
-            let _ = files.update(cx, |files, cx| files.open_selected(cx));
-        })
-    };
-
     h_flex()
         .w_full()
         .items_center()
@@ -230,7 +211,7 @@ fn files_toolbar(files: Entity<FilesState>, cx: &mut Context<Sidebar>) -> AnyEle
         .child(separator(&cx.theme().border))
         .children([new_dir, new_file])
         .child(separator(&cx.theme().border))
-        .children([remove, rename, edit])
+        .child(rename)
         .into_any_element()
 }
 
@@ -264,44 +245,6 @@ fn separator(color: &Hsla) -> AnyElement {
         .mx_1()
         .bg(*color)
         .into_any_element()
-}
-
-/// 「删除」的确认对话框：危险操作，照主流文件管理器的做法先问一句。
-///
-/// ⚠️ 目录那一路是**整棵递归**删（远端那一侧见 `ssh::fs` 的 `remove`），所以提示语要把
-/// 「连同里面的内容」说出来，别让用户以为是删个空壳。确认按钮用 `danger` 变体。
-fn confirm_remove(
-    window: &mut Window,
-    cx: &mut App,
-    files: Entity<FilesState>,
-    label: SharedString,
-    is_dir: bool,
-) {
-    let description = if is_dir {
-        format!("确定要删除文件夹「{label}」吗？它里面的内容会一起删掉，且无法撤销。")
-    } else {
-        format!("确定要删除文件「{label}」吗？此操作无法撤销。")
-    };
-
-    window.open_dialog(cx, move |dialog, _window, _cx| {
-        let files = files.clone();
-        let footer = DialogFooter::new()
-            .child(DialogClose::new().child(Button::new("remove-cancel").label("取消")))
-            .child(
-                DialogAction::new()
-                    .child(Button::new("remove-confirm").label("删除").danger()),
-            );
-
-        dialog
-            .title("删除")
-            .w(px(380.))
-            .footer(footer)
-            .on_ok(move |_, _, cx| {
-                let _ = files.update(cx, |files, cx| files.remove_selected(cx));
-                true
-            })
-            .child(div().text_sm().child(description.clone()))
-    });
 }
 
 /// 「文件管理器」面板:挂上传 / 刷新的右键菜单 + **拖入即上传**。
