@@ -1,0 +1,68 @@
+Run: https://github.com/zephyraluco/alacrterm/actions/runs/39396832715
+Status before result capture: cancelled
+=== build.log ===
+   Compiling util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+   Compiling ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+   Compiling terminal v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal)
+   Compiling terminal_view v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal_view)
+   Compiling alacrterm v0.1.0 (D:\a\alacrterm\alacrterm\crates\alacrterm)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:449:19
+    |
+449 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+449 -         Self(NEXT.fetch_update(
+449 +         Self(NEXT.try_update(
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:500:19
+    |
+500 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+500 -         Self(NEXT.fetch_update(
+500 +         Self(NEXT.try_update(
+    |
+
+=== check.log ===
+    Checking util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+    Checking ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+    Checking terminal v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal)
+    Checking terminal_view v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal_view)
+    Checking alacrterm v0.1.0 (D:\a\alacrterm\alacrterm\crates\alacrterm)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:449:19
+    |
+449 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+449 -         Self(NEXT.fetch_update(
+449 +         Self(NEXT.try_update(
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:500:19
+    |
+500 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+500 -         Self(NEXT.fetch_update(
+500 +         Self(NEXT.try_update(
+    |
+
+warning: `alacrterm` (bin "alacrterm") generated 2 warnings (run `cargo fix --bin "alacrterm" -p alacrterm` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 4.70s
+=== runtime-smoke.log ===
+All checked-in runtime hashes verified; Bash, coreutils, terminfo, Unicode paths and UTF-8 file I/O passed on Windows.
