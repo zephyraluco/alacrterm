@@ -1,0 +1,103 @@
+Run: https://github.com/zephyraluco/alacrterm/actions/runs/39397063415
+Result: failure
+
+  from /etc/setup/wget.lst.gz
+  from /etc/setup/which.lst.gz
+  from /etc/setup/windows-default-manifest.lst.gz
+  from /etc/setup/xauth.lst.gz
+  from /etc/setup/xcursor-themes.lst.gz
+  from /etc/setup/xhost.lst.gz
+  from /etc/setup/xkbcomp.lst.gz
+  from /etc/setup/xkeyboard-config.lst.gz
+  from /etc/setup/xlsatoms.lst.gz
+  from /etc/setup/xlsclients.lst.gz
+  from /etc/setup/xlsfonts.lst.gz
+  from /etc/setup/xmodmap.lst.gz
+  from /etc/setup/xorg-server-common.lst.gz
+  from /etc/setup/xorg-server.lst.gz
+  from /etc/setup/xorgproto.lst.gz
+  from /etc/setup/xprop.lst.gz
+  from /etc/setup/xrdb.lst.gz
+  from /etc/setup/xz.lst.gz
+  from /etc/setup/zip.lst.gz
+  from /etc/setup/zlib-devel.lst.gz
+  from /etc/setup/zlib0.lst.gz
+  from /etc/setup/zsh.lst.gz
+  from /etc/setup/zstd.lst.gz
+  from /etc/setup/_autorebase.lst.gz
+creating empty /var/cache/rebase/rebase_lst
+Updating rebase information for installed dynamic objects in /var/cache/rebase/rebase_lst.
+creating empty /var/cache/rebase/rebase_exe
+Updating rebase information for installed executables in /var/cache/rebase/rebase_exe.
+Rebasing with list /var/cache/rebase/rebase_all, built from /var/cache/rebase/rebase_dyn /var/cache/rebase/rebase_lst.
+2026/10/20 08:58:09 running: D:\a\_temp\cygwin-full\bin\dash.exe "/etc/postinstall/0p_update-info-dir.dash"
+cat: /usr/share/info/.stamp: No such file or directory
+Rebuilding info directory
+install-info: warning: no info dir entry in `/usr/share/info/gawk_api-figure1.png'
+install-info: warning: no info dir entry in `/usr/share/info/gawk_api-figure2.png'
+install-info: warning: no info dir entry in `/usr/share/info/gawk_api-figure3.png'
+install-info: warning: no info dir entry in `/usr/share/info/gawk_array-elements.png'
+install-info: warning: no info dir entry in `/usr/share/info/gawk_general-program.png'
+install-info: warning: no info dir entry in `/usr/share/info/gawk_process-flow.png'
+install-info: warning: no info dir entry in `/usr/share/info/gawk_statist.jpg'
+install-info: warning: no info dir entry in `/usr/share/info/notes.info.gz'
+2026/10/20 08:58:11 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/coreutils.sh"
+2026/10/20 08:58:12 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/p11-kit.sh"
+2026/10/20 08:58:12 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/ca-certificates.sh"
+2026/10/20 08:58:24 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/crypto-policies.sh"
+Setting system policy to DEFAULT
+Note: System-wide crypto policies are applied on application start-up.
+It is recommended to restart the system for the change of policies
+to fully take place.
+2026/10/20 08:58:25 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/openssl.sh"
+2026/10/20 08:58:25 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/000-cygwin-post-install.sh"
+2026/10/20 08:58:25 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/base-files-mketc.sh"
+'/etc/hosts' -> '/proc/cygdrive/c/Windows/System32/drivers/etc/hosts'
+'/etc/protocols' -> '/proc/cygdrive/c/Windows/System32/drivers/etc/protocol'
+'/etc/services' -> '/proc/cygdrive/c/Windows/System32/drivers/etc/services'
+'/etc/networks' -> '/proc/cygdrive/c/Windows/System32/drivers/etc/networks'
+2026/10/20 08:58:25 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/base-files-profile.sh"
+Installing the default version of /Cygwin.bat from /etc/defaults/Cygwin.bat.
+Installing the default version of /etc/profile.d/lang.sh from /etc/defaults/etc/profile.d/lang.sh.
+Installing the default version of /etc/profile.d/lang.csh from /etc/defaults/etc/profile.d/lang.csh.
+Installing the default version of /etc/profile.d/tzset.sh from /etc/defaults/etc/profile.d/tzset.sh.
+Installing the default version of /etc/profile.d/tzset.csh from /etc/defaults/etc/profile.d/tzset.csh.
+Installing the default version of /etc/profile from /etc/defaults/etc/profile.
+Installing the default version of /etc/shells from /etc/defaults/etc/shells.
+Installing the default version of /etc/bash.bashrc from /etc/defaults/etc/bash.bashrc.
+Installing the default version of /etc/bash.bash_logout from /etc/defaults/etc/bash.bash_logout.
+Installing the default version of /etc/skel/.bashrc from /etc/defaults/etc/skel/.bashrc.
+Installing the default version of /etc/skel/.inputrc from /etc/defaults/etc/skel/.inputrc.
+Installing the default version of /etc/skel/.bash_profile from /etc/defaults/etc/skel/.bash_profile.
+Installing the default version of /etc/skel/.profile from /etc/defaults/etc/skel/.profile.
+2026/10/20 08:58:26 can't run /etc/postinstall/openssl.sh: No such file
+2026/10/20 08:58:26 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/libsasl2_3.sh"
+2026/10/20 08:58:26 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/libxml2.sh"
+2026/10/20 08:58:26 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/openssh.sh"
+2026/10/20 08:58:26 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/inetutils-server.sh"
+*** Info: Note that the inetd service and the xinetd service must not
+*** Info: both be active at the same time.  The easiest way to ensure
+*** Info: this is to only install one or the other as a service.
+*** Query: Do you want to install the inetd super-server as a service? (yes/no) no
+
+Configuration finished. Have fun!
+
+*** Warning: The following function requires administrator privileges!
+*** Query: Do you want to install syslogd as service? (yes/no) no
+
+Configuration finished. Have fun!
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\dash.exe "/etc/postinstall/openssl10.dash"
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/libtirpc.sh"
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/man-db.sh"
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/mintty.sh"
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/rsh.sh"
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/wget.sh"
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/xcursor-themes.sh"
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/xorg-server.sh"
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/zsh-profile.sh"
+Using the default version of /etc/zprofile (/usr/share/doc/zsh-5.8/StartupFiles/etc/zprofile)
+2026/10/20 08:58:34 running: D:\a\_temp\cygwin-full\bin\bash.exe --norc --noprofile "/etc/postinstall/zp_fontconfig_cache_1.sh"
+2026/10/20 08:58:41 running: D:\a\_temp\cygwin-full\bin\dash.exe "/etc/postinstall/zp_fontconfig_dtd.dash"
+2026/10/20 08:58:41 running: D:\a\_temp\cygwin-full\bin\dash.exe "/etc/postinstall/zp_man-db-update-index.dash"
+  ManDB index not available.
+2026/10/20 08:58:41 Ending cygwin install
