@@ -1,0 +1,293 @@
+===== RUN 39387934291 =====
+verify	Package application and relocated Cygwin runtime	﻿2026-10-20T07:40:22.3810083Z ##[group]Run ./scripts/windows/package-cygwin.ps1 -CygwinRoot $env:CYGWIN_SOURCE -SourceCache $env:CYGWIN_CACHE 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/package-cygwin.log"
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3811424Z ^[[36;1m./scripts/windows/package-cygwin.ps1 -CygwinRoot $env:CYGWIN_SOURCE -SourceCache $env:CYGWIN_CACHE 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/package-cygwin.log"^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3812296Z ^[[36;1m$runtime = Join-Path $env:GITHUB_WORKSPACE 'dist/Alacrterm 中文验证/runtime/cygwin'^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3812777Z ^[[36;1m"ALACRTERM_CYGWIN_ROOT=$runtime" >> $env:GITHUB_ENV^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3854782Z shell: C:\Program Files\PowerShell\7\pwsh.EXE -command ". '{0}'"
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3855161Z env:
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3855332Z   CARGO_BUILD_JOBS: 4
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3855538Z   CARGO_PROFILE_DEV_DEBUG: 0
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3855760Z   CARGO_PROFILE_TEST_DEBUG: 0
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3855984Z   CARGO_TERM_COLOR: never
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3856213Z   LIBCLANG_PATH: C:\Program Files\LLVM\bin
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3856649Z   CYGWIN_SOURCE: D:\a\_temp\cygwin-source
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3856999Z   CYGWIN_CACHE: D:\cygwin-packages
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.3857231Z ##[endgroup]
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.9324440Z ^[[31;1mException: ^[[0mD:\a\alacrterm\alacrterm\scripts\windows\package-cygwin.ps1:13^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.9325226Z ^[[31;1m^[[0m^[[36;1mLine |^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.9325827Z ^[[31;1m^[[0m^[[36;1m^[[36;1m  13 | ^[[0m     ^[[36;1mthrow 'Corresponding Cygwin source archives are missing; refusing^[[0m …^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.9326774Z ^[[31;1m^[[0m^[[36;1m^[[36;1m^[[0m^[[36;1m^[[0m^[[36;1m     | ^[[31;1m     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.9328013Z ^[[31;1m^[[0m^[[36;1m^[[36;1m^[[0m^[[36;1m^[[0m^[[36;1m^[[31;1m^[[31;1m^[[36;1m     | ^[[31;1mCorresponding Cygwin source archives are missing; refusing to package.^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:40:22.9783334Z ##[error]Process completed with exit code 1.
+===== RUN 39387934436 =====
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.4714499Z cygcheck: track_down: could not find cyggcc_s-seh-1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.4714865Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.5700714Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.5701104Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.5710214Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.5710571Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.6699409Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.6699726Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.6710476Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.6711067Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.7697402Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.7697781Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.9953991Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.9954324Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.9964316Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:38.9964710Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.0954936Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.0955367Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.0963662Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.1948038Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.1948712Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.1949810Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.1961852Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.1962286Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.3015384Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.3016141Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.4093749Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.4094265Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.4105587Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.4105836Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.5096896Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.5097362Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.5108546Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.5108783Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.6116868Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.6117352Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.6129338Z cygcheck: track_down: could not find cygiconv-2.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.6129768Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.6139443Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.6139884Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.7132465Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.7132948Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.9226485Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:39.9227003Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.1339870Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.1340272Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.1349353Z cygcheck: track_down: could not find cygiconv-2.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.1349614Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.1358554Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.1358783Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.2350944Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.2351258Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.2361956Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.2362204Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.3346594Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.3347113Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.3355659Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.3355934Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.4340313Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.4340791Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.4351111Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.4351400Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.5349896Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.5350219Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.7457279Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.7457598Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.7467153Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.7467478Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.8457397Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.8457722Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.8468330Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.8468688Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.9463115Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.9490268Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.9490628Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:40.9491059Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.0476215Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.0476529Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.0487541Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.0487920Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.1489454Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.1489781Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.2478667Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.2480009Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.3477103Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.3477499Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.3486582Z cygcheck: track_down: could not find cygiconv-2.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.3486931Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.3496477Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.3496832Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.3506030Z cygcheck: track_down: could not find cygreadline7.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.3506377Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.4508452Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.4520228Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.4520480Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.4520813Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.5553816Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.5554331Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.5569055Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.5569494Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.6789095Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.6789441Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.6800477Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.6800820Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.7797203Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.7797560Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.7807418Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.7807779Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.8806703Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.8807023Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.8817567Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.8817905Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.9867808Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.9869105Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.9878686Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:41.9879045Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.0874699Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.0875368Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.0887622Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.0888001Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.1893681Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.1894070Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.1902949Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.1903301Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.2904175Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.2914591Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.2914837Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.2915161Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.2924430Z cygcheck: track_down: could not find cyggcc_s-seh-1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.2924762Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.3918383Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.3918694Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.3929334Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.3929757Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.4923867Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.4924220Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.5933385Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.5933763Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.5945447Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.5948165Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.6953060Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.6963558Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.6963808Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:42.6964181Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.0061288Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.0061606Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.0071651Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.0071996Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.1063604Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.1063948Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.1075319Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.1075662Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.2118101Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.2118702Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.2128436Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.2128809Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.3116657Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.3116973Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.3128281Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.3128632Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.4174923Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.4175296Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.4185051Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.4185393Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.5188031Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.5188480Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.5197895Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.5198262Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.6192288Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.6192625Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.6204960Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.6205337Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.7203790Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.7204130Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.7215228Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.7215608Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.8213199Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.8213522Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.8224001Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.8224328Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.9220242Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.9220561Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.9232056Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:43.9232401Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.0221946Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.0222411Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.0231701Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.0232090Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.1230908Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.1231240Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.1241259Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.1241617Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.2223279Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.2223642Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.2233154Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.2233507Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.3229264Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.3229600Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.3240459Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.3240807Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.4219326Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.4219645Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.5207313Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.5207735Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.6191918Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.6192241Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.6203923Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.6204245Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.7180536Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.7180882Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.7190463Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.7190838Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.8191031Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.8191369Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.8201479Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.8201808Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.9199632Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.9199961Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.9211783Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:44.9212112Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.0207177Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.0207495Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.0217292Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.0217642Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.1210958Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.1211392Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.1219986Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.1220332Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.2208377Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.2208844Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.2219080Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.2219326Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.3215384Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.3215852Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.3227291Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.3227867Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.4223804Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.4224580Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.4234621Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.4234877Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.5224117Z cygcheck: track_down: could not find cygwin1.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.5224419Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.5234590Z cygcheck: track_down: could not find cygintl-8.dll
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.5234835Z
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.7817928Z ^[[31;1mException: ^[[0mD:\a\alacrterm\alacrterm\scripts\windows\vendor-cygwin.ps1:65^[[0m
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.7820568Z ^[[31;1m^[[0m^[[36;1mLine |^[[0m
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.7821351Z ^[[31;1m^[[0m^[[36;1m^[[36;1m  65 | ^[[0m if ($LASTEXITCODE -ne 0) { ^[[36;1mthrow 'Vendored Bash smoke test failed'^[[0m }^[[0m
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.7822381Z ^[[31;1m^[[0m^[[36;1m^[[36;1m^[[0m^[[36;1m^[[0m^[[36;1m     | ^[[31;1m                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^[[0m
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.7823741Z ^[[31;1m^[[0m^[[36;1m^[[36;1m^[[0m^[[36;1m^[[0m^[[36;1m^[[31;1m^[[31;1m^[[36;1m     | ^[[31;1mVendored Bash smoke test failed^[[0m
+vendor	Extract minimal complete runtime	2026-10-20T07:40:45.8031673Z ##[error]Process completed with exit code 1.
+===== RUN 39387269172 =====
+verify	Package application and relocated Cygwin runtime	﻿2026-10-20T07:34:04.9295084Z ##[group]Run ./scripts/windows/package-cygwin.ps1 -CygwinRoot $env:CYGWIN_SOURCE -SourceCache $env:CYGWIN_CACHE 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/package-cygwin.log"
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9295844Z ^[[36;1m./scripts/windows/package-cygwin.ps1 -CygwinRoot $env:CYGWIN_SOURCE -SourceCache $env:CYGWIN_CACHE 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/package-cygwin.log"^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9296318Z ^[[36;1m$runtime = Join-Path $env:GITHUB_WORKSPACE 'dist/Alacrterm 中文验证/runtime/cygwin'^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9296585Z ^[[36;1m"ALACRTERM_CYGWIN_ROOT=$runtime" >> $env:GITHUB_ENV^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9321626Z shell: C:\Program Files\PowerShell\7\pwsh.EXE -command ". '{0}'"
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9321835Z env:
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9321943Z   CARGO_BUILD_JOBS: 4
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9322066Z   CARGO_PROFILE_DEV_DEBUG: 0
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9322198Z   CARGO_PROFILE_TEST_DEBUG: 0
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9322329Z   CARGO_TERM_COLOR: never
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9322460Z   LIBCLANG_PATH: C:\Program Files\LLVM\bin
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9322674Z   CYGWIN_SOURCE: D:\a\_temp\cygwin-source
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9322828Z   CYGWIN_CACHE: D:\cygwin-packages
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:04.9322964Z ##[endgroup]
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:05.2937500Z ^[[31;1mException: ^[[0mD:\a\alacrterm\alacrterm\scripts\windows\package-cygwin.ps1:13^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:05.2937872Z ^[[31;1m^[[0m^[[36;1mLine |^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:05.2938213Z ^[[31;1m^[[0m^[[36;1m^[[36;1m  13 | ^[[0m     ^[[36;1mthrow 'Corresponding Cygwin source archives are missing; refusing^[[0m …^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:05.2938769Z ^[[31;1m^[[0m^[[36;1m^[[36;1m^[[0m^[[36;1m^[[0m^[[36;1m     | ^[[31;1m     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:05.2939450Z ^[[31;1m^[[0m^[[36;1m^[[36;1m^[[0m^[[36;1m^[[0m^[[36;1m^[[31;1m^[[31;1m^[[36;1m     | ^[[31;1mCorresponding Cygwin source archives are missing; refusing to package.^[[0m
+verify	Package application and relocated Cygwin runtime	2026-10-20T07:34:05.3312094Z ##[error]Process completed with exit code 1.
