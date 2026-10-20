@@ -1,0 +1,1057 @@
+Run: https://github.com/zephyraluco/alacrterm/actions/runs/39390615880
+Status before result capture: failure
+=== app-tests.log ===
+ Downloading crates ...
+  Downloaded diff v0.1.13
+  Downloaded pretty_assertions v1.4.1
+  Downloaded yansi v1.0.1
+   Compiling diff v0.1.13
+   Compiling yansi v1.0.1
+   Compiling ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+   Compiling alacrterm v0.1.0 (D:\a\alacrterm\alacrterm\crates\alacrterm)
+   Compiling pretty_assertions v1.4.1
+   Compiling util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:449:19
+    |
+449 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+449 -         Self(NEXT.fetch_update(
+449 +         Self(NEXT.try_update(
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:500:19
+    |
+500 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+500 -         Self(NEXT.fetch_update(
+500 +         Self(NEXT.try_update(
+    |
+
+warning: `alacrterm` (bin "alacrterm" test) generated 2 warnings (run `cargo fix --bin "alacrterm" -p alacrterm --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 7.32s
+     Running unittests src\main.rs (target\debug\deps\alacrterm-f07af8ad680088b7.exe)
+
+running 47 tests
+test close_tests::exits_only_after_pending_transfers_finish ... ok
+test close_tests::directory_or_title_change_reapplies ... ok
+test close_tests::pending_window_work_forces_one_apply ... ok
+test close_tests::identical_context_is_not_reapplied ... ok
+test format::tests::size_switches_units_at_kib ... ok
+test keymap::tests::empty_or_comment_only_source_yields_no_sections ... ok
+test keymap::tests::escapes_do_not_end_strings ... ok
+test keymap::tests::broken_json_is_ignored ... ok
+test keymap::tests::keeps_comment_like_text_inside_strings ... ok
+test keymap::tests::parses_bindings_actions_and_context ... ok
+test keymap::tests::quoted_null_unbinds_like_json_null ... ok
+test keymap::tests::skips_malformed_entries_without_failing_the_file ... ok
+test keymap::tests::strips_line_and_block_comments ... ok
+test pane_layout::tests::neighbor_follows_the_dragged_ratio ... ok
+test pane_layout::tests::ratio_keeps_a_minimum_pane_on_both_sides ... ok
+test pane_layout::tests::neighbor_walks_the_axes ... ok
+test pane_layout::tests::removing_a_leaf_collapses_its_parent ... ok
+test pane_layout::tests::removing_renumbers_the_leaves_after_it ... ok
+test pane_layout::tests::removing_the_last_leaf_keeps_the_tree_prefix ... ok
+test pane_layout::tests::set_ratio_targets_only_its_own_node ... ok
+test pane_layout::tests::split_missing_target_is_a_no_op ... ok
+test pane_layout::tests::split_puts_the_new_pane_after_the_target ... ok
+test pane_layout::tests::split_targets_a_nested_leaf ... ok
+test preview_cache::tests::lease_deletes_file_only_after_last_handle_drops ... ok
+test preview_cache::tests::live_instance_is_not_cleaned ... ok
+test preview_window::tests::caret_counts_lines_and_characters_from_one ... ok
+test preview_window::tests::editing_while_a_write_back_is_in_flight_keeps_the_dirty_mark ... ok
+test preview_cache::tests::detached_file_survives_and_stale_instance_is_cleaned ... ok
+test preview_window::tests::kind_ignores_case ... ok
+test preview_window::tests::every_language_with_a_grammar_is_registered ... ok
+test preview_window::tests::kinds_follow_the_extension ... ok
+test preview_window::tests::languages_follow_the_extension ... ok
+test preview_window::tests::old_save_callback_does_not_match_next_save ... ok
+test preview_window::tests::only_media_is_handed_to_the_system ... ok
+test preview_window::tests::preview_identity_is_not_reused_after_close ... ok
+test sidebar_panel::files::tests::does_not_invent_directories_it_has_not_read ... ok
+test sidebar_panel::files::tests::finds_a_directory_at_any_depth ... ok
+test preview_window::tests::preview_identities_are_unique ... ok
+test sidebar_panel::files::tests::parent_dir_round_trips_with_join_dir ... ok
+test sidebar_panel::files::tests::parent_dir_stops_at_the_root ... ok
+test sidebar_panel::files::tests::remote_filesystem_identity_follows_connection_instance ... ok
+test sidebar_panel::tests::dragging_flush_against_the_icon_bar_collapses ... ok
+test sidebar_panel::sessions::tests::persisted_ssh_session_round_trips_with_password ... ok
+test sidebar_panel::tests::sidebar_width_has_no_min_or_max ... ok
+test transfer_manager::tests::cancellation_keeps_state_until_worker_finishes ... ok
+test transfer_manager::tests::progress_updates_bytes_and_label ... ok
+test keymap::tests::embedded_default_keymaps_are_valid ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (target\debug\deps\ssh-ccf9f785b53d4966.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\remote_fs.rs (target\debug\deps\remote_fs-07000219637a19b0.exe)
+
+running 2 tests
+test browses_the_remote_home_directory ... ignored, 需要真机:设置 SSH_TEST_HOST / SSH_TEST_USER / SSH_TEST_PASSWORD
+test reports_a_missing_path_without_killing_the_connection ... ignored, 需要真机:设置 SSH_TEST_HOST / SSH_TEST_USER / SSH_TEST_PASSWORD
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\roundtrip.rs (target\debug\deps\roundtrip-d7313efa011dfe50.exe)
+
+running 14 tests
+test ask_policy_rejects_when_the_user_declines ... ok
+test ask_policy_connects_after_the_user_trusts ... ok
+test connects_authenticates_and_round_trips_bytes ... ok
+test filesystem_lists_the_remote_directory ... ok
+test cancelled_transfer_reports_cancelled ... ok
+test filesystem_reports_when_it_has_no_prompt_channel ... ok
+test filesystem_creates_renames_and_removes ... ok
+test strict_policy_rejects_an_unknown_host ... ok
+test filesystem_writes_back_a_single_file ... ok
+test filesystem_uploads_a_directory_recursively ... ok
+test filesystem_upload_download_round_trip ... ok
+test trusts_a_recorded_host_on_the_second_connection ... ok
+test wrong_password_fails_with_a_reason ... ok
+test unreachable_host_reports_the_address ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.23s
+
+     Running unittests src\util.rs (target\debug\deps\util-fc9b030e5516d874.exe)
+
+running 8 tests
+test cygwin::tests::accepts_extended_windows_paths_without_shell_quoting ... ok
+test shell::tests::test_try_quote_cmd ... ok
+test shell::tests::test_try_quote_cmd_edge_cases ... ok
+test shell::tests::test_try_quote_nu_command ... ok
+test shell::tests::test_try_quote_powershell ... ok
+test shell::tests::test_try_quote_powershell_edge_cases ... ok
+test shell::tests::test_try_quote_single_quote_paths ... ok
+test cygwin::tests::requires_the_runtime_and_application_init_file ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ssh
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests util
+
+running 2 tests
+test crates\util\src\paths.rs - paths::PathWithPosition::parse_str (line 732) ... ok
+test crates\util\src\paths.rs - paths::PathWithPosition::parse_str (line 763) ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+all doctests ran in 0.58s; merged doctests compilation took 0.55s
+=== build.log ===
+   Compiling pico-args v0.5.0
+   Compiling byteorder-lite v0.1.0
+   Compiling libbz2-rs-sys v0.2.5
+   Compiling base16ct v1.0.0
+   Compiling data-url v0.3.2
+   Compiling unicode-bidi v0.3.18
+   Compiling zune-core v0.5.3
+   Compiling zune-jpeg v0.5.15
+   Compiling bzip2 v0.6.1
+   Compiling image-webp v0.2.4
+   Compiling uuid v1.28.0
+   Compiling sharded-slab v0.1.7
+   Compiling kurbo v0.13.1
+   Compiling ref-cast v1.0.27
+   Compiling gpui-pre-collections v0.3.8
+   Compiling lyon_path v1.0.19
+   Compiling rand_core v0.9.5
+   Compiling idna v1.1.0
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling group v0.14.0
+   Compiling tracing-log v0.2.0
+   Compiling png v0.17.16
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling num-complex v0.4.6
+   Compiling nu-ansi-term v0.50.3
+   Compiling raw-cpuid v11.6.0
+   Compiling thread_local v1.1.10
+   Compiling dyn-clone v1.0.20
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling compression-core v0.4.33
+   Compiling atomic-waker v1.1.2
+   Compiling reborrow v0.5.5
+   Compiling compression-codecs v0.4.45
+   Compiling piper v0.2.5
+   Compiling schemars v1.2.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling pulp v0.22.3
+   Compiling tracing v0.1.44
+   Compiling accesskit v0.24.1
+   Compiling pin-project v1.1.13
+   Compiling tiny-skia v0.11.4
+   Compiling rand_chacha v0.9.0
+   Compiling url v2.5.8
+   Compiling windows-targets v0.52.6
+   Compiling svgtypes v0.16.1
+   Compiling gpui-pre-zlog v0.3.8
+   Compiling sec1 v0.8.1
+   Compiling rayon v1.12.0
+   Compiling gif v0.14.2
+   Compiling regex v1.13.1
+   Compiling hash32 v0.3.1
+   Compiling hkdf v0.13.0
+   Compiling rgb v0.8.53
+   Compiling http v1.5.0
+   Compiling winapi-util v0.1.11
+   Compiling spin v0.9.9
+   Compiling zune-inflate v0.2.54
+   Compiling signature v3.0.0
+   Compiling roxmltree v0.21.1
+   Compiling fax v0.2.7
+   Compiling lebe v0.5.3
+   Compiling ryu v1.0.23
+   Compiling imagesize v0.14.0
+   Compiling bit_field v0.10.3
+   Compiling pxfm v0.1.30
+   Compiling float_next_after v1.0.0
+   Compiling static_assertions v1.1.0
+   Compiling rustc-demangle v0.1.28
+   Compiling gpui-pre-ztracing v0.3.8
+   Compiling lyon_tessellation v1.0.22
+   Compiling backtrace v0.3.76
+   Compiling usvg v0.46.0
+   Compiling exr v1.74.2
+   Compiling moxcms v0.8.1
+   Compiling serde_urlencoded v0.7.1
+   Compiling tiff v0.11.3
+   Compiling thiserror v1.0.69
+   Compiling http-body v1.1.0
+   Compiling flume v0.12.0
+   Compiling same-file v1.0.6
+   Compiling elliptic-curve v0.14.1
+   Compiling heapless v0.9.3
+   Compiling rand v0.9.5
+   Compiling derive_more v2.1.1
+   Compiling async-compression v0.4.50
+   Compiling lyon_algorithms v1.0.21
+   Compiling primefield v0.14.0
+   Compiling png v0.18.1
+   Compiling polling v3.11.0
+   Compiling qoi v0.4.1
+   Compiling crossbeam-queue v0.3.14
+   Compiling smol_str v0.3.6
+   Compiling pollster v0.2.5
+   Compiling link-section v0.19.3
+   Compiling fixedbitset v0.5.7
+   Compiling atomic v0.5.3
+   Compiling web-time v1.1.0
+   Compiling svg_fmt v0.4.5
+   Compiling gpui-pre-scheduler v0.3.8
+   Compiling etagere v0.2.15
+   Compiling postage v0.5.0
+   Compiling futures-concurrency v7.7.1
+   Compiling ctor v1.0.13
+   Compiling profiling v1.0.18
+   Compiling gpui-pre-refineable v0.3.8
+   Compiling gpui-pre-shared-string v0.3.8
+   Compiling image v0.25.10
+   Compiling wnaf v0.14.1
+   Compiling lyon v1.0.19
+   Compiling gpui-pre-http-client v0.3.8
+   Compiling strum v0.28.0
+   Compiling gpui-pre-sum-tree v0.3.8
+   Compiling walkdir v2.5.0
+   Compiling resvg v0.46.0
+   Compiling rfc6979 v0.6.0
+   Compiling taffy v0.13.0
+   Compiling itertools v0.14.0
+   Compiling mio v1.2.4
+   Compiling socket2 v0.6.5
+   Compiling spin v0.10.1
+   Compiling chacha20 v0.10.2
+   Compiling mac v0.1.1
+   Compiling num_cpus v1.17.0
+   Compiling seahash v4.1.0
+   Compiling pollster v0.4.0
+   Compiling inventory v0.3.25
+   Compiling raw-window-handle v0.6.2
+   Compiling waker-fn v1.2.0
+   Compiling futf v0.1.5
+   Compiling tokio v1.53.2
+   Compiling ecdsa v0.17.0
+   Compiling primeorder v0.14.0
+   Compiling globset v0.4.20
+   Compiling errno v0.3.14
+   Compiling utf-8 v0.7.6
+   Compiling precomputed-hash v0.1.1
+   Compiling string_cache v0.8.9
+   Compiling tendril v0.4.3
+   Compiling rustix v1.1.5
+   Compiling rust-embed-utils v8.13.0
+   Compiling blocking v1.7.0
+   Compiling phf v0.11.3
+   Compiling ssh-encoding v0.3.0
+   Compiling keccak v0.2.2
+   Compiling curve25519-dalek v5.0.0
+   Compiling markup5ever v0.12.1
+   Compiling async-io v2.6.0
+   Compiling rust-embed v8.13.0
+   Compiling rand v0.10.3
+   Compiling ed25519 v3.0.0
+   Compiling windows-result v0.2.0
+   Compiling blowfish v0.10.0
+   Compiling poly1305 v0.9.1
+   Compiling blake2 v0.11.0
+   Compiling dunce v1.0.5
+   Compiling argon2 v0.6.0
+   Compiling ssh-cipher v0.3.0
+   Compiling bcrypt-pbkdf v0.11.0
+   Compiling windows-strings v0.1.0
+   Compiling ed25519-dalek v3.0.0
+   Compiling generic-array v0.14.7
+   Compiling windows_x86_64_msvc v0.53.1
+   Compiling sha3 v0.11.0
+   Compiling p256 v0.14.0
+   Compiling p521 v0.14.0
+   Compiling p384 v0.14.0
+   Compiling dirs-sys v0.5.0
+   Compiling async-lock v3.4.2
+   Compiling kurbo v0.11.3
+   Compiling hashbrown v0.16.1
+   Compiling sha1 v0.11.0
+   Compiling module-lattice v0.2.3
+   Compiling num-integer v0.1.47
+   Compiling kem v0.3.0
+   Compiling getrandom v0.2.17
+   Compiling hex v0.4.3
+   Compiling untrusted v0.9.0
+   Compiling hashbrown v0.14.5
+   Compiling sponge-cursor v0.1.0
+   Compiling sha3 v0.12.0
+   Compiling ring v0.17.14
+   Compiling dashmap v6.2.1
+   Compiling ssh-key v0.7.0-rc.11
+   Compiling num-bigint v0.5.1
+   Compiling windows-core v0.58.0
+   Compiling ml-kem v0.3.2
+   Compiling accesskit_consumer v0.38.0
+   Compiling svgtypes v0.15.3
+   Compiling async-fs v2.2.0
+   Compiling dirs v7.0.0
+   Compiling generic-array v1.4.5
+   Compiling windows-targets v0.53.5
+   Compiling html5ever v0.27.0
+   Compiling winapi v0.3.9
+   Compiling russh-util v0.52.0
+   Compiling tokio-util v0.7.20
+   Compiling async-net v2.0.0
+   Compiling async-process v2.5.0
+   Compiling xml5ever v0.18.1
+   Compiling russh-cryptovec v0.62.0
+   Compiling triomphe v0.1.17
+   Compiling async-executor v1.14.0
+   Compiling fluent-uri v0.1.4
+   Compiling serde_bytes v0.11.19
+   Compiling roxmltree v0.20.0
+   Compiling cursor-icon v1.2.0
+   Compiling imagesize v0.13.0
+   Compiling zune-core v0.4.12
+   Compiling md5 v0.8.1
+   Compiling unicode-id v0.3.7
+   Compiling hex-literal v1.1.0
+   Compiling str_indices v0.4.4
+   Compiling data-encoding v2.11.1
+   Compiling ropey v2.0.0-beta.1
+   Compiling markdown v1.0.0
+   Compiling usvg v0.45.1
+   Compiling zune-jpeg v0.4.21
+   Compiling lsp-types v0.97.0
+   Compiling vte v0.15.0
+   Compiling russh-sftp v3.0.1
+   Compiling smol v2.0.2
+   Compiling rust-i18n-support v4.2.4
+   Compiling ntapi v0.4.3
+   Compiling markup5ever_rcdom v0.3.0
+   Compiling windows-sys v0.60.2
+   Compiling windows v0.58.0
+   Compiling windows-sys v0.59.0
+   Compiling gif v0.13.3
+   Compiling tendril v0.5.1
+   Compiling windows-registry v0.6.1
+   Compiling itertools v0.13.0
+   Compiling itertools v0.15.0
+   Compiling home v0.5.12
+   Compiling miow v0.6.1
+   Compiling notify-types v2.1.0
+   Compiling instant v0.1.13
+   Compiling unicode-linebreak v0.1.5
+   Compiling streaming-iterator v0.1.9
+   Compiling util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+   Compiling tree-sitter v0.26.13
+   Compiling enum-iterator v2.3.0
+   Compiling notify v8.2.0
+   Compiling alacritty_terminal v0.26.0
+   Compiling resvg v0.45.1
+   Compiling rust-i18n v4.2.4
+   Compiling tree-sitter-python v0.23.6
+   Compiling tree-sitter-c v0.24.2
+   Compiling tree-sitter-yaml v0.7.2
+   Compiling tree-sitter-cpp v0.23.4
+   Compiling tree-sitter-md v0.5.3
+   Compiling tree-sitter-toml-ng v0.7.0
+   Compiling tree-sitter-json v0.24.8
+   Compiling tree-sitter-bash v0.23.3
+   Compiling tree-sitter-typescript v0.23.2
+   Compiling tree-sitter-javascript v0.23.1
+   Compiling tree-sitter-rust v0.24.2
+   Compiling similar v2.7.0
+   Compiling gpui-pre v0.3.8
+   Compiling pageant v0.2.4
+   Compiling accesskit_windows v0.34.0
+   Compiling russh v0.63.3
+   Compiling sysinfo v0.39.6
+   Compiling ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+   Compiling gpui-base v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+   Compiling gpui-pre-windows v0.3.8
+   Compiling gpui-kit-assets v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+   Compiling terminal v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal)
+   Compiling gpui-pre-platform v0.3.8
+   Compiling terminal_view v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal_view)
+   Compiling gpui-component v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+   Compiling gpui-kit v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+   Compiling alacrterm v0.1.0 (D:\a\alacrterm\alacrterm\crates\alacrterm)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:449:19
+    |
+449 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+449 -         Self(NEXT.fetch_update(
+449 +         Self(NEXT.try_update(
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:500:19
+    |
+500 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+500 -         Self(NEXT.fetch_update(
+500 +         Self(NEXT.try_update(
+    |
+
+warning: `alacrterm` (bin "alacrterm") generated 2 warnings (run `cargo fix --bin "alacrterm" -p alacrterm` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 3m 02s
+=== check.log ===
+    Checking sec1 v0.8.1
+    Checking rayon v1.12.0
+    Checking gif v0.14.2
+    Checking regex v1.13.1
+    Checking hash32 v0.3.1
+    Checking http v1.5.0
+    Checking hkdf v0.13.0
+    Checking rgb v0.8.53
+    Checking spin v0.9.9
+    Checking zune-inflate v0.2.54
+    Checking roxmltree v0.21.1
+    Checking signature v3.0.0
+   Compiling thiserror-impl v1.0.69
+    Checking lebe v0.5.3
+    Checking rustc-demangle v0.1.28
+    Checking bit_field v0.10.3
+    Checking ryu v1.0.23
+    Checking static_assertions v1.1.0
+    Checking float_next_after v1.0.0
+    Checking fax v0.2.7
+   Compiling unicase v2.10.0
+   Compiling gpui-pre-ztracing-macro v0.3.8
+    Checking imagesize v0.14.0
+    Checking pxfm v0.1.30
+   Compiling option-ext v0.2.0
+   Compiling dirs-sys v0.5.0
+    Checking usvg v0.46.0
+   Compiling mime_guess v2.0.5
+    Checking tiff v0.11.3
+    Checking lyon_tessellation v1.0.22
+    Checking serde_urlencoded v0.7.1
+    Checking moxcms v0.8.1
+    Checking backtrace v0.3.76
+    Checking exr v1.74.2
+    Checking flume v0.12.0
+    Checking http-body v1.1.0
+    Checking elliptic-curve v0.14.1
+    Checking derive_more v2.1.1
+    Checking rand v0.9.5
+   Compiling gpui-pre v0.3.8
+   Compiling gpui-pre-perf v0.3.8
+    Checking async-compression v0.4.50
+   Compiling strum_macros v0.28.0
+    Checking lyon_algorithms v1.0.21
+    Checking primefield v0.14.0
+    Checking png v0.18.1
+    Checking polling v3.11.0
+    Checking qoi v0.4.1
+    Checking crossbeam-queue v0.3.14
+   Compiling profiling-procmacros v1.0.18
+   Compiling gpui-pre-derive-refineable v0.3.8
+    Checking smol_str v0.3.6
+    Checking svg_fmt v0.4.5
+    Checking web-time v1.1.0
+    Checking pollster v0.2.5
+    Checking fixedbitset v0.5.7
+    Checking link-section v0.19.3
+    Checking atomic v0.5.3
+   Compiling linktime-proc-macro v0.2.3
+    Checking postage v0.5.0
+    Checking strum v0.28.0
+    Checking futures-concurrency v7.7.1
+    Checking ctor v1.0.13
+    Checking gpui-pre-refineable v0.3.8
+    Checking gpui-pre-scheduler v0.3.8
+    Checking etagere v0.2.15
+    Checking gpui-pre-shared-string v0.3.8
+    Checking profiling v1.0.18
+    Checking image v0.25.10
+    Checking lyon v1.0.19
+    Checking wnaf v0.14.1
+    Checking gpui-pre-http-client v0.3.8
+   Compiling gpui-pre-util-macros v0.3.8
+    Checking gpui-pre-sum-tree v0.3.8
+    Checking resvg v0.46.0
+   Compiling dirs v6.0.0
+   Compiling string_cache_codegen v0.5.4
+   Compiling phf_codegen v0.11.3
+   Compiling gpui-pre-macros v0.3.8
+    Checking rfc6979 v0.6.0
+    Checking taffy v0.13.0
+    Checking itertools v0.14.0
+   Compiling encoding_rs v0.8.42
+    Checking spin v0.10.1
+    Checking socket2 v0.6.5
+    Checking mio v1.2.4
+    Checking chacha20 v0.10.2
+   Compiling tokio-macros v2.7.2
+    Checking raw-window-handle v0.6.2
+   Compiling mime v0.3.17
+   Compiling rustix v1.1.5
+    Checking seahash v4.1.0
+    Checking pollster v0.4.0
+    Checking waker-fn v1.2.0
+    Checking inventory v0.3.25
+    Checking mac v0.1.1
+    Checking num_cpus v1.17.0
+    Checking futf v0.1.5
+    Checking tokio v1.53.2
+    Checking ecdsa v0.17.0
+   Compiling markup5ever v0.12.1
+   Compiling shellexpand v3.1.2
+   Compiling ignore v0.4.33
+    Checking primeorder v0.14.0
+   Compiling rust-embed-utils v8.13.0
+   Compiling curve25519-dalek v5.0.0
+    Checking errno v0.3.14
+   Compiling async-io v2.6.0
+   Compiling multiversion_no_op v1.0.0
+    Checking utf-8 v0.7.6
+   Compiling core_detect v1.0.0
+    Checking precomputed-hash v0.1.1
+   Compiling simdutf8 v0.1.5
+    Checking string_cache v0.8.9
+   Compiling globwalk v0.8.1
+    Checking tendril v0.4.3
+   Compiling rust-embed-impl v8.13.0
+    Checking phf v0.11.3
+    Checking blocking v1.7.0
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+    Checking ssh-encoding v0.3.0
+   Compiling generic-array v0.14.7
+   Compiling curve25519-dalek-derive v0.1.1
+    Checking keccak v0.2.2
+   Compiling unicode-width v0.2.2
+   Compiling arraydeque v0.5.1
+   Compiling windows_x86_64_msvc v0.53.1
+   Compiling toml_write v0.1.2
+   Compiling anstyle v1.0.14
+   Compiling winnow v0.7.15
+   Compiling annotate-snippets v0.12.16
+   Compiling granit-parser v1.3.0
+   Compiling toml_edit v0.22.27
+    Checking rust-embed v8.13.0
+   Compiling encoding_rs_io v0.1.8
+    Checking rand v0.10.3
+    Checking ed25519 v3.0.0
+    Checking windows-result v0.2.0
+    Checking blowfish v0.10.0
+    Checking poly1305 v0.9.1
+   Compiling arc-swap v1.9.2
+    Checking blake2 v0.11.0
+   Compiling html5ever v0.27.0
+   Compiling ring v0.17.14
+   Compiling base64 v0.23.1
+   Compiling nohash-hasher v0.2.0
+    Checking dunce v1.0.5
+   Compiling winapi v0.3.9
+   Compiling itertools v0.11.0
+   Compiling serde-saphyr v1.3.0
+   Compiling triomphe v0.1.17
+    Checking argon2 v0.6.0
+   Compiling toml v0.8.23
+   Compiling windows-registry v0.6.1
+    Checking ssh-cipher v0.3.0
+    Checking windows-strings v0.1.0
+    Checking bcrypt-pbkdf v0.11.0
+    Checking ed25519-dalek v3.0.0
+    Checking sha3 v0.11.0
+    Checking p256 v0.14.0
+    Checking p521 v0.14.0
+    Checking p384 v0.14.0
+    Checking async-lock v3.4.2
+   Compiling tree-sitter v0.26.13
+    Checking hashbrown v0.16.1
+   Compiling normpath v1.5.2
+    Checking kurbo v0.11.3
+    Checking sha1 v0.11.0
+    Checking num-integer v0.1.47
+    Checking module-lattice v0.2.3
+   Compiling windows-implement v0.58.0
+   Compiling delegate v0.13.5
+   Compiling windows-interface v0.58.0
+    Checking kem v0.3.0
+    Checking getrandom v0.2.17
+    Checking hashbrown v0.14.5
+   Compiling ntapi v0.4.3
+   Compiling base62 v2.2.6
+    Checking sponge-cursor v0.1.0
+    Checking untrusted v0.9.0
+   Compiling gpui-kit-assets v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+    Checking hex v0.4.3
+   Compiling rust-i18n-support v4.2.4
+    Checking ssh-key v0.7.0-rc.11
+    Checking sha3 v0.12.0
+    Checking dashmap v6.2.1
+    Checking windows-core v0.58.0
+   Compiling enum_dispatch v0.3.13
+    Checking ml-kem v0.3.2
+    Checking num-bigint v0.5.1
+    Checking svgtypes v0.15.3
+    Checking accesskit_consumer v0.38.0
+   Compiling rust-i18n v4.2.4
+    Checking async-fs v2.2.0
+    Checking generic-array v1.4.5
+    Checking windows-targets v0.53.5
+   Compiling gpui-pre-windows v0.3.8
+    Checking dirs v7.0.0
+    Checking async-net v2.0.0
+    Checking async-process v2.5.0
+    Checking xml5ever v0.18.1
+    Checking russh-cryptovec v0.62.0
+    Checking russh-util v0.52.0
+    Checking tokio-util v0.7.20
+    Checking fluent-uri v0.1.4
+    Checking async-executor v1.14.0
+   Compiling serde_repr v0.1.21
+   Compiling tree-sitter-python v0.23.6
+   Compiling tree-sitter-toml-ng v0.7.0
+   Compiling tree-sitter-c v0.24.2
+   Compiling tree-sitter-javascript v0.23.1
+   Compiling tree-sitter-typescript v0.23.2
+   Compiling tree-sitter-json v0.24.8
+   Compiling tree-sitter-md v0.5.3
+   Compiling tree-sitter-cpp v0.23.4
+   Compiling tree-sitter-rust v0.24.2
+   Compiling tree-sitter-yaml v0.7.2
+   Compiling tree-sitter-bash v0.23.3
+    Checking serde_bytes v0.11.19
+    Checking zune-core v0.4.12
+    Checking md5 v0.8.1
+    Checking roxmltree v0.20.0
+    Checking hex-literal v1.1.0
+    Checking cursor-icon v1.2.0
+    Checking str_indices v0.4.4
+    Checking data-encoding v2.11.1
+   Compiling glob v0.3.4
+    Checking imagesize v0.13.0
+    Checking unicode-id v0.3.7
+    Checking markdown v1.0.0
+   Compiling rust-i18n-macro v4.2.4
+    Checking usvg v0.45.1
+    Checking ropey v2.0.0-beta.1
+    Checking vte v0.15.0
+    Checking zune-jpeg v0.4.21
+    Checking russh-sftp v3.0.1
+    Checking lsp-types v0.97.0
+    Checking pageant v0.2.4
+    Checking russh v0.63.3
+    Checking accesskit_windows v0.34.0
+    Checking smol v2.0.2
+    Checking markup5ever_rcdom v0.3.0
+    Checking windows-sys v0.60.2
+    Checking windows v0.58.0
+    Checking windows-sys v0.59.0
+    Checking gif v0.13.3
+    Checking tendril v0.5.1
+    Checking itertools v0.13.0
+    Checking itertools v0.15.0
+    Checking miow v0.6.1
+    Checking home v0.5.12
+    Checking notify-types v2.1.0
+   Compiling enum-iterator-derive v1.5.0
+    Checking instant v0.1.13
+    Checking unicode-linebreak v0.1.5
+    Checking streaming-iterator v0.1.9
+   Compiling gpui-component v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+    Checking enum-iterator v2.3.0
+    Checking util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+    Checking notify v8.2.0
+    Checking alacritty_terminal v0.26.0
+    Checking resvg v0.45.1
+    Checking ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+    Checking sysinfo v0.39.6
+    Checking similar v2.7.0
+   Compiling gpui-component-macros v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+    Checking gpui-base v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+    Checking terminal v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal)
+    Checking terminal_view v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal_view)
+    Checking gpui-pre-platform v0.3.8
+    Checking gpui-kit v0.7.1 (https://github.com/longbridge/gpui-kit#4e2a00ee)
+    Checking alacrterm v0.1.0 (D:\a\alacrterm\alacrterm\crates\alacrterm)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:449:19
+    |
+449 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+449 -         Self(NEXT.fetch_update(
+449 +         Self(NEXT.try_update(
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:500:19
+    |
+500 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+500 -         Self(NEXT.fetch_update(
+500 +         Self(NEXT.try_update(
+    |
+
+warning: `alacrterm` (bin "alacrterm") generated 2 warnings (run `cargo fix --bin "alacrterm" -p alacrterm` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 3m 31s
+=== cygwin-bundled.log ===
+warning: method `set_character` is never used
+   --> crates\terminal\src\alacritty.rs:437:19
+    |
+430 | impl Cell {
+    | --------- method in this implementation
+...
+437 |     pub(crate) fn set_character(&mut self, character: char) {
+    |                   ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `terminal` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 0.56s
+     Running unittests src\terminal.rs (target\debug\deps\terminal-9e040dc17dee6209.exe)
+
+running 2 tests
+
+thread 'alacritty::windows_cygwin_tests::packaged_cygwin_application_shell' (6496) panicked at crates\terminal\src\alacritty\windows_cygwin_tests.rs:69:13:
+Cygwin exited Some(ExitStatus(ExitStatus(1))) while waiting for login, tty, cwd and UTF-8 checks
+[1t[crunneradmin@runnervmgnbhw:/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-true$ source "$(cygpath -u "$ALACRTERM_CYGWIN_PROBE")"
+
+++ export PATH=/usr/local/bin:/usr/bin:/bin
+++ PATH=/usr/local/bin:/usr/bin:/bin
+++ '[' -t 0 ']'
+++ '[' -t 1 ']'
+++ [[ ehimxBHs == *i* ]]
+++ [[ 1 == 1 ]]
++++ cygpath -u 'C:\Users\RUNNER~1\AppData\Local\Temp\alacrterm 中文 work 7792-true\用户 data'
+++ '[' '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-true/用户 data/Alacrterm/cygwin/home' = '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-true/用户 data/Alacrterm/cygwin/home' ']'
++++ cygpath -u 'C:\Users\RUNNER~1\AppData\Local\Temp\alacrterm 中文 work 7792-true\用户 data'
+++ '[' '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-true/用户 data/Alacrterm/cygwin/tmp' = '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-true/用户 data/Alacrterm/cygwin/tmp' ']'
+++ '[' -d '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-true/用户 data/Alacrterm/cygwin/home' ']'
+++ '[' -d '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-true/用户 data/Alacrterm/cygwin/tmp' ']'
++++ uname -s
+++ [[ CYGWIN_NT-10.0-20348 == CYGWIN* ]]
+++ '[' xterm-256color = xterm-256color ']'
++++ pwd -P
++++ cygpath -u 'C:\Users\RUNNER~1\AppData\Local\Temp\alacrterm 中文 work 7792-true'
+++ '[' '/cygdrive/c/Users/runneradmin/AppData/Local/Temp/alacrterm 中文 work 7792-true' = '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-true' ']'
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test alacritty::windows_cygwin_tests::packaged_cygwin_application_shell ... FAILED
+
+thread 'alacritty::windows_cygwin_tests::packaged_cygwin_conpty' (6728) panicked at crates\terminal\src\alacritty\windows_cygwin_tests.rs:69:13:
+Cygwin exited Some(ExitStatus(ExitStatus(1))) while waiting for login, tty, cwd and UTF-8 checks
+[1t[cbash-5.2$ source "$(cygpath -u "$ALACRTERM_CYGWIN_PROBE")"
+
+++ export PATH=/usr/local/bin:/usr/bin:/bin
+++ PATH=/usr/local/bin:/usr/bin:/bin
+++ '[' -t 0 ']'
+++ '[' -t 1 ']'
+++ [[ ehimxBHs == *i* ]]
+++ [[ 0 == 1 ]]
+++ shopt -q login_shell
++++ uname -s
+++ [[ CYGWIN_NT-10.0-20348 == CYGWIN* ]]
+++ '[' xterm-256color = xterm-256color ']'
++++ pwd -P
++++ cygpath -u 'C:\Users\RUNNER~1\AppData\Local\Temp\alacrterm 中文 work 7792-false'
+++ '[' '/cygdrive/c/Users/runneradmin/AppData/Local/Temp/alacrterm 中文 work 7792-false' = '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 7792-false' ']'
+
+test alacritty::windows_cygwin_tests::packaged_cygwin_conpty ... FAILED
+
+failures:
+
+failures:
+    alacritty::windows_cygwin_tests::packaged_cygwin_application_shell
+    alacritty::windows_cygwin_tests::packaged_cygwin_conpty
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 70 filtered out; finished in 6.67s
+
+error: test failed, to rerun pass `-p terminal --lib`
+=== cygwin-system.log ===
+   Compiling proc-macro2 v1.0.107
+   Compiling windows-sys v0.61.2
+   Compiling bitflags v2.13.2
+   Compiling slab v0.4.12
+   Compiling memchr v2.8.3
+   Compiling quote v1.0.47
+   Compiling foldhash v0.2.0
+   Compiling syn v3.0.8
+   Compiling syn v2.0.119
+   Compiling toml_datetime v1.1.2+spec-1.1.0
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling synstructure v0.14.0
+   Compiling winapi-util v0.1.11
+   Compiling aho-corasick v1.1.5
+   Compiling regex-syntax v0.8.11
+   Compiling windows-implement v0.60.2
+   Compiling serde_derive v1.0.229
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling zerofrom v0.1.8
+   Compiling futures-macro v0.3.34
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling zerocopy-derive v0.8.62
+   Compiling futures-util v0.3.34
+   Compiling tinystr v0.8.4
+   Compiling windows-interface v0.59.3
+   Compiling windows-core v0.62.2
+   Compiling serde v1.0.229
+   Compiling icu_locale_core v2.3.0
+   Compiling potential_utf v0.1.6
+   Compiling zerotrie v0.2.5
+   Compiling zerocopy v0.8.62
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling futures-executor v0.3.34
+   Compiling chrono v0.4.45
+   Compiling futures v0.3.34
+   Compiling tokio-macros v2.7.2
+   Compiling icu_properties v2.3.0
+   Compiling tokio v1.53.2
+   Compiling icu_normalizer v2.3.0
+   Compiling windows-collections v0.3.2
+   Compiling windows-numerics v0.3.1
+   Compiling windows-future v0.3.2
+   Compiling thiserror-impl v2.0.21
+   Compiling windows v0.62.2
+   Compiling thiserror v2.0.21
+   Compiling idna_adapter v1.2.2
+   Compiling ref-cast-impl v1.0.27
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling regex-automata v0.4.18
+   Compiling same-file v1.0.6
+   Compiling serde_derive_internals v0.30.0
+   Compiling serde_json v1.0.154
+   Compiling bstr v1.13.1
+   Compiling serde_spanned v1.1.2
+   Compiling toml v1.1.8+spec-1.1.0
+   Compiling globset v0.4.20
+   Compiling schemars_derive v1.2.2
+   Compiling walkdir v2.5.0
+   Compiling curve25519-dalek v5.0.0
+   Compiling ref-cast v1.0.27
+   Compiling idna v1.1.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling tracing-attributes v0.1.31
+   Compiling pin-project-internal v1.1.13
+   Compiling nu-ansi-term v0.50.3
+   Compiling winreg v0.56.0
+   Compiling raw-cpuid v11.6.0
+   Compiling dirs-sys v0.5.0
+   Compiling tracing v0.1.44
+   Compiling rustybuzz v0.20.1
+   Compiling schemars v1.2.2
+   Compiling pulp v0.22.3
+   Compiling derive_more-impl v2.1.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling pin-project v1.1.13
+   Compiling ed25519-dalek v3.0.0
+   Compiling embed-resource v3.0.12
+   Compiling rand_chacha v0.9.0
+   Compiling url v2.5.8
+   Compiling rust-embed-utils v8.13.0
+   Compiling event-listener v5.4.2
+   Compiling gpui-pre-zlog v0.3.8
+   Compiling delegate v0.13.5
+   Compiling thiserror-impl v1.0.69
+   Compiling toml_edit v0.25.17+spec-1.1.0
+   Compiling exr v1.74.2
+   Compiling tiff v0.11.3
+   Compiling gpui-pre-perf v0.3.8
+   Compiling ssh-key v0.7.0-rc.11
+   Compiling gpui-pre-ztracing v0.3.8
+   Compiling usvg v0.46.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling thiserror v1.0.69
+   Compiling proc-macro-crate v3.5.0
+   Compiling event-listener-strategy v0.5.4
+   Compiling rust-embed-impl v8.13.0
+   Compiling derive_more v2.1.1
+   Compiling rand v0.9.5
+   Compiling gpui-pre v0.3.8
+   Compiling dirs v7.0.0
+   Compiling strum_macros v0.28.0
+   Compiling russh-cryptovec v0.62.0
+   Compiling russh-util v0.52.0
+   Compiling tokio-util v0.7.20
+   Compiling futures-lite v2.6.1
+   Compiling enum_dispatch v0.3.13
+   Compiling profiling-procmacros v1.0.18
+   Compiling gpui-pre-derive-refineable v0.3.8
+   Compiling enumn v0.1.14
+   Compiling png v0.18.1
+   Compiling futures-concurrency v7.7.1
+   Compiling strum v0.28.0
+   Compiling vte v0.15.0
+   Compiling image v0.25.10
+   Compiling postage v0.5.0
+   Compiling gpui-pre-scheduler v0.3.8
+   Compiling gpui-pre-shared-string v0.3.8
+   Compiling russh-sftp v3.0.1
+   Compiling resvg v0.46.0
+   Compiling accesskit v0.24.1
+   Compiling gpui-pre-refineable v0.3.8
+   Compiling profiling v1.0.18
+   Compiling gpui-pre-http-client v0.3.8
+   Compiling rust-embed v8.13.0
+   Compiling gpui-pre-macros v0.3.8
+   Compiling async-channel v2.5.0
+   Compiling gpui-pre-sum-tree v0.3.8
+   Compiling gpui-pre-util-macros v0.3.8
+   Compiling polling v3.11.0
+   Compiling home v0.5.12
+   Compiling miow v0.6.1
+   Compiling alacritty_terminal v0.26.0
+   Compiling util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+   Compiling pageant v0.2.4
+   Compiling sysinfo v0.39.6
+   Compiling russh v0.63.3
+   Compiling ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+   Compiling terminal v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal)
+warning: method `set_character` is never used
+   --> crates\terminal\src\alacritty.rs:437:19
+    |
+430 | impl Cell {
+    | --------- method in this implementation
+...
+437 |     pub(crate) fn set_character(&mut self, character: char) {
+    |                   ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `terminal` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 2m 04s
+     Running unittests src\terminal.rs (target\debug\deps\terminal-9e040dc17dee6209.exe)
+
+running 2 tests
+
+thread 'alacritty::windows_cygwin_tests::packaged_cygwin_application_shell' (3076) panicked at crates\terminal\src\alacritty\windows_cygwin_tests.rs:69:13:
+Cygwin exited Some(ExitStatus(ExitStatus(1))) while waiting for login, tty, cwd and UTF-8 checks
+[2J[Hrunneradmin@runnervmgnbhw:/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-true$[1C]0;D:\a\alacrterm\alacrterm\runtime\cygwin\bin\bash.exesource "$(cygpath -u "$ALACRTERM_CYGWIN_PROBE")"
+++ export PATH=/usr/local/bin:/usr/bin:/bin
+++ PATH=/usr/local/bin:/usr/bin:/bin
+++ '[' -t 0 ']'
+++ '[' -t 1 ']'
+++ [[ ehimxBHs == *i* ]]
+++ [[ 1 == 1 ]]
++++ cygpath -u 'C:\Users\RUNNER~1\AppData\Local\Temp\alacrterm 中文 work 6940-true\用户 data'       [6;94H
+++ '[' '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-true/用户 data/Alacrt
+[5;100Hterm/cygwin/home' = '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-true/用户
+[5;99H户 data/Alacrterm/cygwin/home' ']'
++++ cygpath -u 'C:\Users\RUNNER~1\AppData\Local\Temp\alacrterm 中文 work 6940-true\用户 data'       [6;94H
+++ '[' '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-true/用户 data/Alacrt
+[5;100Hterm/cygwin/tmp' = '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-true/用户
+[5;100H data/Alacrterm/cygwin/tmp' ']'
+++ '[' -d '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-true/用户 data/Ala
+[5;100Hacrterm/cygwin/home' ']'
+++ '[' -d '/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-true/用户 data/Ala
+[5;100Hacrterm/cygwin/tmp' ']'
++++ uname -s
+++ [[ CYGWIN_NT-10.0-20348 == CYGWIN* ]]
+++ '[' xterm-256color = xterm-256color ']'
++++ pwd -P
++++ cygpath -u 'C:\Users\RUNNER~1\AppData\Local\Temp\alacrterm 中文 work 6940-true'
+++ '[' '/cygdrive/c/Users/runneradmin/AppData/Local/Temp/alacrterm 中文 work 6940-true' = '/cygdrive
+[5;100He/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-true' ']'
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test alacritty::windows_cygwin_tests::packaged_cygwin_application_shell ... FAILED
+
+thread 'alacritty::windows_cygwin_tests::packaged_cygwin_conpty' (8000) panicked at crates\terminal\src\alacritty\windows_cygwin_tests.rs:69:13:
+Cygwin exited Some(ExitStatus(ExitStatus(1))) while waiting for login, tty, cwd and UTF-8 checks
+[2J[Hbash-5.2$[1C]0;D:\a\alacrterm\alacrterm\runtime\cygwin\bin\bash.exesource "$(cygpath -u "$ALACRTERM_CYGWIN_PROBE")"
+++ export PATH=/usr/local/bin:/usr/bin:/bin
+++ PATH=/usr/local/bin:/usr/bin:/bin
+++ '[' -t 0 ']'
+++ '[' -t 1 ']'
+++ [[ ehimxBHs == *i* ]]
+++ [[ 0 == 1 ]]
+++ shopt -q login_shell
++++ uname -s
+++ [[ CYGWIN_NT-10.0-20348 == CYGWIN* ]]
+++ '[' xterm-256color = xterm-256color ']'
++++ pwd -P
++++ cygpath -u 'C:\Users\RUNNER~1\AppData\Local\Temp\alacrterm 中文 work 6940-false'
+++ '[' '/cygdrive/c/Users/runneradmin/AppData/Local/Temp/alacrterm 中文 work 6940-false' = '/cygdriv
+[5;100Hve/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 6940-false' ']'
+
+test alacritty::windows_cygwin_tests::packaged_cygwin_conpty ... FAILED
+
+failures:
+
+failures:
+    alacritty::windows_cygwin_tests::packaged_cygwin_application_shell
+    alacritty::windows_cygwin_tests::packaged_cygwin_conpty
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.68s
+
+error: test failed, to rerun pass `-p terminal --lib`
+=== runtime-smoke.log ===
+All checked-in runtime hashes verified; Bash, coreutils, terminfo, Unicode paths and UTF-8 file I/O passed on Windows.
