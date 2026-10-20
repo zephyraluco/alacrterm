@@ -1,0 +1,243 @@
+Run: https://github.com/zephyraluco/alacrterm/actions/runs/39397469953
+Status before result capture: cancelled
+=== app-tests.log ===
+   Compiling ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+   Compiling util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+   Compiling alacrterm v0.1.0 (D:\a\alacrterm\alacrterm\crates\alacrterm)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:449:19
+    |
+449 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+449 -         Self(NEXT.fetch_update(
+449 +         Self(NEXT.try_update(
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:500:19
+    |
+500 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+500 -         Self(NEXT.fetch_update(
+500 +         Self(NEXT.try_update(
+    |
+
+warning: `alacrterm` (bin "alacrterm" test) generated 2 warnings (run `cargo fix --bin "alacrterm" -p alacrterm --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 4.77s
+     Running unittests src\main.rs (target\debug\deps\alacrterm-f07af8ad680088b7.exe)
+
+running 47 tests
+test close_tests::exits_only_after_pending_transfers_finish ... ok
+test close_tests::pending_window_work_forces_one_apply ... ok
+test close_tests::identical_context_is_not_reapplied ... ok
+test close_tests::directory_or_title_change_reapplies ... ok
+test format::tests::size_switches_units_at_kib ... ok
+test keymap::tests::empty_or_comment_only_source_yields_no_sections ... ok
+test keymap::tests::escapes_do_not_end_strings ... ok
+test keymap::tests::broken_json_is_ignored ... ok
+test keymap::tests::keeps_comment_like_text_inside_strings ... ok
+test keymap::tests::quoted_null_unbinds_like_json_null ... ok
+test keymap::tests::parses_bindings_actions_and_context ... ok
+test keymap::tests::skips_malformed_entries_without_failing_the_file ... ok
+test keymap::tests::strips_line_and_block_comments ... ok
+test pane_layout::tests::neighbor_follows_the_dragged_ratio ... ok
+test pane_layout::tests::neighbor_walks_the_axes ... ok
+test pane_layout::tests::ratio_keeps_a_minimum_pane_on_both_sides ... ok
+test pane_layout::tests::removing_a_leaf_collapses_its_parent ... ok
+test pane_layout::tests::removing_renumbers_the_leaves_after_it ... ok
+test pane_layout::tests::removing_the_last_leaf_keeps_the_tree_prefix ... ok
+test pane_layout::tests::set_ratio_targets_only_its_own_node ... ok
+test pane_layout::tests::split_missing_target_is_a_no_op ... ok
+test pane_layout::tests::split_puts_the_new_pane_after_the_target ... ok
+test pane_layout::tests::split_targets_a_nested_leaf ... ok
+test preview_cache::tests::live_instance_is_not_cleaned ... ok
+test preview_cache::tests::lease_deletes_file_only_after_last_handle_drops ... ok
+test preview_window::tests::editing_while_a_write_back_is_in_flight_keeps_the_dirty_mark ... ok
+test preview_window::tests::caret_counts_lines_and_characters_from_one ... ok
+test preview_window::tests::kind_ignores_case ... ok
+test preview_cache::tests::detached_file_survives_and_stale_instance_is_cleaned ... ok
+test preview_window::tests::every_language_with_a_grammar_is_registered ... ok
+test preview_window::tests::languages_follow_the_extension ... ok
+test preview_window::tests::kinds_follow_the_extension ... ok
+test preview_window::tests::old_save_callback_does_not_match_next_save ... ok
+test preview_window::tests::only_media_is_handed_to_the_system ... ok
+test preview_window::tests::preview_identity_is_not_reused_after_close ... ok
+test sidebar_panel::files::tests::does_not_invent_directories_it_has_not_read ... ok
+test sidebar_panel::files::tests::finds_a_directory_at_any_depth ... ok
+test sidebar_panel::files::tests::parent_dir_round_trips_with_join_dir ... ok
+test preview_window::tests::preview_identities_are_unique ... ok
+test sidebar_panel::files::tests::parent_dir_stops_at_the_root ... ok
+test sidebar_panel::files::tests::remote_filesystem_identity_follows_connection_instance ... ok
+test sidebar_panel::tests::dragging_flush_against_the_icon_bar_collapses ... ok
+test sidebar_panel::sessions::tests::persisted_ssh_session_round_trips_with_password ... ok
+test sidebar_panel::tests::sidebar_width_has_no_min_or_max ... ok
+test transfer_manager::tests::cancellation_keeps_state_until_worker_finishes ... ok
+test transfer_manager::tests::progress_updates_bytes_and_label ... ok
+test keymap::tests::embedded_default_keymaps_are_valid ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (target\debug\deps\ssh-ccf9f785b53d4966.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\remote_fs.rs (target\debug\deps\remote_fs-07000219637a19b0.exe)
+
+running 2 tests
+test browses_the_remote_home_directory ... ignored, 需要真机:设置 SSH_TEST_HOST / SSH_TEST_USER / SSH_TEST_PASSWORD
+test reports_a_missing_path_without_killing_the_connection ... ignored, 需要真机:设置 SSH_TEST_HOST / SSH_TEST_USER / SSH_TEST_PASSWORD
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\roundtrip.rs (target\debug\deps\roundtrip-d7313efa011dfe50.exe)
+
+running 14 tests
+test ask_policy_rejects_when_the_user_declines ... ok
+test ask_policy_connects_after_the_user_trusts ... ok
+test connects_authenticates_and_round_trips_bytes ... ok
+test filesystem_lists_the_remote_directory ... ok
+test cancelled_transfer_reports_cancelled ... ok
+test filesystem_reports_when_it_has_no_prompt_channel ... ok
+test filesystem_creates_renames_and_removes ... ok
+test filesystem_writes_back_a_single_file ... ok
+test filesystem_uploads_a_directory_recursively ... ok
+test strict_policy_rejects_an_unknown_host ... ok
+test filesystem_upload_download_round_trip ... ok
+test trusts_a_recorded_host_on_the_second_connection ... ok
+test wrong_password_fails_with_a_reason ... ok
+test unreachable_host_reports_the_address ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.16s
+
+     Running unittests src\util.rs (target\debug\deps\util-fc9b030e5516d874.exe)
+
+running 8 tests
+test cygwin::tests::accepts_extended_windows_paths_without_shell_quoting ... ok
+test shell::tests::test_try_quote_cmd ... ok
+test shell::tests::test_try_quote_cmd_edge_cases ... ok
+test shell::tests::test_try_quote_powershell ... ok
+test shell::tests::test_try_quote_nu_command ... ok
+test shell::tests::test_try_quote_powershell_edge_cases ... ok
+test shell::tests::test_try_quote_single_quote_paths ... ok
+test cygwin::tests::requires_the_runtime_and_application_init_file ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ssh
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests util
+
+running 2 tests
+test crates\util\src\paths.rs - paths::PathWithPosition::parse_str (line 763) ... ok
+test crates\util\src\paths.rs - paths::PathWithPosition::parse_str (line 732) ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.42s; merged doctests compilation took 0.41s
+=== build.log ===
+   Compiling util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+   Compiling ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+   Compiling terminal v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal)
+   Compiling terminal_view v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal_view)
+   Compiling alacrterm v0.1.0 (D:\a\alacrterm\alacrterm\crates\alacrterm)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:449:19
+    |
+449 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+449 -         Self(NEXT.fetch_update(
+449 +         Self(NEXT.try_update(
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:500:19
+    |
+500 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+500 -         Self(NEXT.fetch_update(
+500 +         Self(NEXT.try_update(
+    |
+
+warning: `alacrterm` (bin "alacrterm") generated 2 warnings (run `cargo fix --bin "alacrterm" -p alacrterm` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 10.12s
+=== check.log ===
+    Checking util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+    Checking ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+    Checking terminal v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal)
+    Checking terminal_view v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal_view)
+    Checking alacrterm v0.1.0 (D:\a\alacrterm\alacrterm\crates\alacrterm)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:449:19
+    |
+449 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+449 -         Self(NEXT.fetch_update(
+449 +         Self(NEXT.try_update(
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\alacrterm\src\preview_window.rs:500:19
+    |
+500 |         Self(NEXT.fetch_update(
+    |                   ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+500 -         Self(NEXT.fetch_update(
+500 +         Self(NEXT.try_update(
+    |
+
+warning: `alacrterm` (bin "alacrterm") generated 2 warnings (run `cargo fix --bin "alacrterm" -p alacrterm` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 3.17s
+=== cygwin-system.log ===
+   Compiling util v0.1.0 (D:\a\alacrterm\alacrterm\crates\util)
+   Compiling ssh v0.1.0 (D:\a\alacrterm\alacrterm\crates\ssh)
+   Compiling terminal v0.1.0 (D:\a\alacrterm\alacrterm\crates\terminal)
+warning: method `set_character` is never used
+   --> crates\terminal\src\alacritty.rs:437:19
+    |
+430 | impl Cell {
+    | --------- method in this implementation
+...
+437 |     pub(crate) fn set_character(&mut self, character: char) {
+    |                   ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `terminal` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 4.72s
+     Running unittests src\terminal.rs (target\debug\deps\terminal-9e040dc17dee6209.exe)
+
+running 2 tests
+
+thread 'alacritty::windows_cygwin_tests::packaged_cygwin_application_shell' (1352) panicked at crates\terminal\src\alacritty\windows_cygwin_tests.rs:83:9:
+timeout waiting for interactive shell prompt
+[2J[Hrunneradmin@runnervmgnbhw:/cygdrive/c/Users/RUNNER~1/AppData/Local/Temp/alacrterm 中文 work 1732-true$[1C]0;D:\a\alacrterm\alacrterm\runtime\cygwin\bin\bash.exe
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test alacritty::windows_cygwin_tests::packaged_cygwin_application_shell ... FAILED
+=== runtime-smoke.log ===
+All checked-in runtime hashes verified; Bash, coreutils, terminfo, Unicode paths and UTF-8 file I/O passed on Windows.
