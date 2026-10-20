@@ -1,0 +1,4 @@
+Run: https://github.com/zephyraluco/alacrterm/actions/runs/39397240920
+Status before result capture: cancelled
+=== runtime-smoke.log ===
+All checked-in runtime hashes verified; Bash, coreutils, terminfo, Unicode paths and UTF-8 file I/O passed on Windows.
