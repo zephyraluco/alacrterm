@@ -3,7 +3,10 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, LazyLock, Mutex},
+    sync::{
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -18,6 +21,8 @@ pub(crate) struct Forwarder {
     fake: [u8; 16],
     real: [u8; 16],
     permits: Arc<Semaphore>,
+    generation: u64,
+    enabled: Arc<AtomicBool>,
 }
 
 pub(crate) struct Wayx {
@@ -26,31 +31,47 @@ pub(crate) struct Wayx {
     pub(crate) forwarder: Forwarder,
 }
 
-/// The application owns one server; SSH threads only borrow per-session forwarders.
+/// State displayed by the application-level WayX control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WayxStatus {
+    #[default]
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    Failed,
+}
+
 #[derive(Default)]
 struct ServiceState {
     server: Option<Wayx>,
-    ready: bool,
+    status: WayxStatus,
+    generation: u64,
     shutdown: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct WayxService {
-    state: Mutex<ServiceState>,
-    // Executor-independent lock: SSH sessions run on separate Tokio runtimes.
-    startup: futures::lock::Mutex<()>,
+    state: Arc<Mutex<ServiceState>>,
+    cleanup: Arc<Mutex<()>>,
 }
-
 static SHARED_WAYX: LazyLock<WayxService> = LazyLock::new(WayxService::default);
 
-pub(crate) async fn shared_forwarder() -> Result<Forwarder> {
-    SHARED_WAYX.acquire().await
+/// Start WayX on a worker thread without blocking the UI or opening SSH.
+pub fn start_wayx() {
+    SHARED_WAYX.start();
 }
-
-/// Stop the shared WayX server when the application quits. Idempotent; subsequent
-/// X11 connection attempts are rejected so background threads cannot restart it.
+/// Stop WayX asynchronously, leaving SSH and SFTP connections intact.
+pub fn stop_wayx() {
+    SHARED_WAYX.stop(false);
+}
+/// Read the current state, detecting an unexpectedly exited server.
+pub fn wayx_status() -> WayxStatus {
+    SHARED_WAYX.status()
+}
+/// Permanently stop the service during application exit.
 pub fn shutdown_wayx() {
-    SHARED_WAYX.shutdown();
+    SHARED_WAYX.stop(true);
 }
 
 impl WayxService {
@@ -60,76 +81,183 @@ impl WayxService {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    async fn acquire(&self) -> Result<Forwarder> {
-        let _startup = self.startup.lock().await;
-        {
-            let mut state = self.lock();
-            ensure!(!state.shutdown, "应用正在退出，WayX 已关闭");
-            if let Some(server) = &mut state.server {
-                if server.child.as_mut().unwrap().try_wait()?.is_none() {
-                    if state.ready {
-                        return Ok(state.server.as_ref().unwrap().forwarder.for_session());
-                    }
-                } else {
-                    // A crashed server is replaced on the next connection attempt.
-                    state.server.take();
-                    state.ready = false;
-                }
-            }
-            if state.server.is_none() {
-                // Publish ownership before awaiting readiness, so shutdown can
-                // stop a process even while another thread is starting it.
-                state.server = Some(Wayx::spawn()?);
-                state.ready = false;
+    fn status(&self) -> WayxStatus {
+        let mut state = self.lock();
+        if state.status == WayxStatus::Running {
+            let alive = state
+                .server
+                .as_mut()
+                .and_then(|server| server.child.as_mut())
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+            if !alive {
+                state.status = WayxStatus::Failed;
+                state.server.take();
             }
         }
-        let result = tokio::time::timeout(Duration::from_secs(15), async {
+        state.status
+    }
+
+    fn current(&self) -> Result<Forwarder> {
+        ensure!(self.status() == WayxStatus::Running, "WayX is not running");
+        let state = self.lock();
+        ensure!(state.status == WayxStatus::Running, "WayX is not running");
+        Ok(state
+            .server
+            .as_ref()
+            .context("WayX is not running")?
+            .forwarder
+            .clone())
+    }
+
+    fn begin_start(&self) -> Option<u64> {
+        let mut state = self.lock();
+        if state.shutdown
+            || matches!(
+                state.status,
+                WayxStatus::Starting | WayxStatus::Running | WayxStatus::Stopping
+            )
+        {
+            return None;
+        }
+        state.generation += 1;
+        state.status = WayxStatus::Starting;
+        Some(state.generation)
+    }
+
+    fn start(&self) {
+        let Some(generation) = self.begin_start() else {
+            return;
+        };
+        let service = self.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("wayx-start".into())
+            .spawn(move || {
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|runtime| runtime.block_on(service.finish_start(generation)));
+                if let Err(error) = result {
+                    log::debug!("WayX startup: {error:#}");
+                    service.fail_start(generation);
+                }
+            })
+        {
+            log::debug!("WayX worker: {error}");
+            self.fail_start(generation);
+        }
+    }
+
+    fn fail_start(&self, generation: u64) {
+        let _cleanup = self
+            .cleanup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let server = {
+            let mut state = self.lock();
+            if state.generation != generation {
+                return;
+            }
+            state.status = WayxStatus::Failed;
+            state.server.take()
+        };
+        drop(server);
+    }
+
+    async fn finish_start(&self, generation: u64) -> Result<()> {
+        {
+            let mut state = self.lock();
+            ensure!(
+                state.generation == generation
+                    && !state.shutdown
+                    && state.status == WayxStatus::Starting,
+                "WayX startup cancelled"
+            );
+            // Keep process creation and publishing ownership atomic with respect
+            // to shutdown; no child can appear after the exit hook has returned.
+            let mut server = Wayx::spawn()?;
+            server.forwarder.generation = generation;
+            state.server = Some(server);
+        }
+        tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let probe = {
                     let mut state = self.lock();
-                    ensure!(!state.shutdown, "应用正在退出，WayX 已关闭");
-                    let server = state.server.as_mut().context("WayX 已关闭")?;
-                    if let Some(status) = server.child.as_mut().unwrap().try_wait()? {
-                        use std::io::Read;
-                        let mut log = String::new();
-                        if let Ok(file) = std::fs::File::open(server.directory.join("wayx.log")) {
-                            let _ = file.take(4096).read_to_string(&mut log);
-                        }
-                        bail!("WayX 提前退出 ({status}): {log}");
+                    ensure!(
+                        state.generation == generation && state.status == WayxStatus::Starting,
+                        "WayX startup cancelled"
+                    );
+                    let server = state.server.as_mut().context("WayX stopped")?;
+                    if let Some(child) = &mut server.child {
+                        ensure!(child.try_wait()?.is_none(), "WayX exited during startup");
                     }
                     server.forwarder.clone()
                 };
                 if probe.ready().await {
                     let mut state = self.lock();
-                    ensure!(!state.shutdown, "应用正在退出，WayX 已关闭");
-                    state.ready = true;
-                    return Ok(probe.for_session());
+                    ensure!(
+                        state.generation == generation && !state.shutdown,
+                        "WayX startup cancelled"
+                    );
+                    state.status = WayxStatus::Running;
+                    return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
-        .context("等待 WayX 就绪超时")
-        .and_then(|result| result);
-        if result.is_err() {
+        .context("WayX readiness timeout")?
+    }
+
+    fn stop(&self, permanent: bool) {
+        let generation = {
+            let mut state = self.lock();
+            if state.shutdown && !permanent {
+                return;
+            }
+            if !permanent && state.status == WayxStatus::Stopping {
+                return;
+            }
+            state.shutdown |= permanent;
+            state.generation += 1;
+            state.status = WayxStatus::Stopping;
+            state.generation
+        };
+        let service = self.clone();
+        let cleanup = move || {
+            // Shutdown joins in-progress cleanup before returning. A delayed
+            // worker never privately owns an untracked child process.
+            let _cleanup = service
+                .cleanup
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let server = {
-                let mut state = self.lock();
-                state.ready = false;
+                let mut state = service.lock();
+                if state.generation != generation {
+                    return;
+                }
                 state.server.take()
             };
             drop(server);
-        }
-        result
-    }
-
-    fn shutdown(&self) {
-        let server = {
-            let mut state = self.lock();
-            state.shutdown = true;
-            state.ready = false;
-            state.server.take()
+            let mut state = service.lock();
+            if state.generation == generation {
+                state.status = WayxStatus::Stopped;
+            }
         };
-        drop(server);
+        if permanent {
+            cleanup();
+        } else {
+            if std::thread::Builder::new()
+                .name("wayx-stop".into())
+                .spawn(cleanup)
+                .is_err()
+            {
+                let mut state = self.lock();
+                if state.generation == generation {
+                    state.status = WayxStatus::Failed;
+                }
+            }
+        }
     }
 }
 
@@ -270,6 +398,8 @@ impl Wayx {
                 fake: rand::random(),
                 real: rand::random(),
                 permits: Arc::new(Semaphore::new(64)),
+                generation: 0,
+                enabled: Arc::new(AtomicBool::new(true)),
             },
         };
         let auth = server.directory.join("Xauthority");
@@ -345,11 +475,19 @@ impl Wayx {
 }
 
 impl Forwarder {
-    fn for_session(&self) -> Self {
+    pub(crate) fn session() -> Self {
         Self {
+            display: 0,
             fake: rand::random(),
-            ..self.clone()
+            real: [0; 16],
+            permits: Arc::new(Semaphore::new(64)),
+            generation: 0,
+            enabled: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    pub(crate) fn disable(&self) {
+        self.enabled.store(false, Ordering::Release);
     }
 
     pub(crate) fn cookie_hex(&self) -> String {
@@ -387,29 +525,44 @@ impl Forwarder {
         channel: russh::Channel<russh::client::Msg>,
         reply: russh::client::ChannelOpenHandle,
     ) {
-        let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+        if !self.enabled.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(forwarder) = SHARED_WAYX.current() else {
+            return;
+        };
+        let Ok(permit) = forwarder.permits.clone().try_acquire_owned() else {
             return;
         };
         reply.accept().await;
-        let forwarder = self.clone();
+        let fake = self.fake;
         tokio::spawn(async move {
             let _permit = permit;
             let result: Result<()> = async {
                 let mut remote = channel.into_stream();
                 let prefix = tokio::time::timeout(
                     Duration::from_secs(10),
-                    validated_setup(&mut remote, &forwarder.fake, &forwarder.real),
+                    validated_setup(&mut remote, &fake, &forwarder.real),
                 )
                 .await??;
                 // Authentication must complete before opening any local X connection.
                 let mut local = forwarder.local().await?;
                 local.write_all(&prefix).await?;
-                tokio::io::copy_bidirectional(&mut remote, &mut local).await?;
+                tokio::select! {
+                    result = tokio::io::copy_bidirectional(&mut remote, &mut local) => { result?; }
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            let state = SHARED_WAYX.lock();
+                            if state.generation != forwarder.generation || state.status != WayxStatus::Running { break; }
+                        }
+                    } => {}
+                }
                 Ok(())
             }
             .await;
             if let Err(error) = result {
-                log::warn!("X11 通道关闭:{error}");
+                log::debug!("X11 通道关闭:{error}");
             }
         });
     }
@@ -524,134 +677,63 @@ mod tests {
         assert_eq!(&bytes[11..29], b"MIT-MAGIC-COOKIE-1");
         assert_eq!(&bytes[31..], &[7; 16]);
     }
-
-    #[tokio::test]
-    async fn shutdown_is_idempotent_and_prevents_startup() {
+    #[test]
+    fn shutdown_invalidates_pending_start_and_prevents_restart() {
         let service = WayxService::default();
-        service.shutdown();
-        service.shutdown();
-        assert!(service.acquire().await.is_err());
-        assert!(service.lock().server.is_none());
+        let old = service.begin_start().unwrap();
+        assert!(service.begin_start().is_none());
+        service.stop(true);
+        service.fail_start(old);
+        assert_eq!(service.status(), WayxStatus::Stopped);
+        assert!(service.begin_start().is_none());
     }
 
     #[tokio::test]
     #[ignore = "requires a host display and bundled WayX runtime"]
-    async fn shared_wayx_reuses_server_and_is_reaped_on_shutdown() {
+    async fn manual_lifecycle_restarts_without_ssh_and_cancels_stale_startup() {
         let service = WayxService::default();
-        let (first, second) = futures::join!(service.acquire(), service.acquire());
-        let first = first.expect("start bundled WayX");
-        let second = second.expect("reuse bundled WayX");
-        assert_eq!(first.display, second.display);
-        assert!(first.real == second.real);
-        assert!(first.fake != second.fake);
-        assert!(Arc::ptr_eq(&first.permits, &second.permits));
-        let (directory, pid) = {
-            let state = service.lock();
-            let server = state.server.as_ref().unwrap();
-            (
-                server.directory.clone(),
-                server.child.as_ref().unwrap().id(),
-            )
-        };
-        let display = first.display;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(directory.join("Xauthority"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-        drop(first);
-        drop(second);
-        // The service survives the last SSH session, and a new session reuses it.
-        let third = service.acquire().await.unwrap();
-        assert!(third.ready().await);
-        assert_eq!(
-            service
-                .lock()
-                .server
-                .as_ref()
-                .unwrap()
-                .child
-                .as_ref()
-                .unwrap()
-                .id(),
-            pid
-        );
-        service.shutdown();
+        let generation = service.begin_start().unwrap();
+        service.finish_start(generation).await.unwrap();
+        assert_eq!(service.status(), WayxStatus::Running);
+        let first = service.current().unwrap();
+        let directory = service.lock().server.as_ref().unwrap().directory.clone();
+        service.stop(false);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while service.status() == WayxStatus::Stopping {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(service.status(), WayxStatus::Stopped);
         assert!(!directory.exists());
-        assert!(!third.ready().await);
-        assert!(service.acquire().await.is_err());
-        #[cfg(unix)]
-        {
-            assert!(!Path::new(&format!("/tmp/.X{display}-lock")).exists());
-            assert!(!Path::new(&format!("/tmp/.X11-unix/X{display}")).exists());
-        }
-        #[cfg(target_os = "linux")]
-        assert!(!Path::new(&format!("/proc/{pid}")).exists());
-        #[cfg(not(target_os = "linux"))]
-        let _ = (display, pid);
+        assert!(service.current().is_err());
+        let next = service.begin_start().unwrap();
+        service.fail_start(generation); // An old worker must not clobber the new state.
+        assert_eq!(service.status(), WayxStatus::Starting);
+        service.finish_start(next).await.unwrap();
+        let second = service.current().unwrap();
+        assert!(first.real != second.real);
+        assert_ne!(first.generation, second.generation);
+        let directory = service.lock().server.as_ref().unwrap().directory.clone();
+        service.stop(false);
+        service.stop(true); // Exit while asynchronous stop is still in progress.
+        assert!(!directory.exists());
+        assert!(service.begin_start().is_none());
     }
 
     #[tokio::test]
     #[ignore = "requires a host display and bundled WayX runtime"]
-    async fn shared_wayx_restarts_after_a_crash() {
+    async fn shutdown_during_startup_does_not_restore_running_state() {
         let service = WayxService::default();
-        let first = service.acquire().await.unwrap();
-        let previous_pid = {
-            let mut state = service.lock();
-            let child = state.server.as_mut().unwrap().child.as_mut().unwrap();
-            let pid = child.id();
-            child.kill().unwrap();
-            child.wait().unwrap();
-            pid
-        };
-        let replacement = service.acquire().await.unwrap();
-        assert!(replacement.ready().await);
-        assert!(replacement.real != first.real);
-        assert_ne!(
-            service
-                .lock()
-                .server
-                .as_ref()
-                .unwrap()
-                .child
-                .as_ref()
-                .unwrap()
-                .id(),
-            previous_pid
-        );
-        service.shutdown();
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a host display and bundled WayX runtime"]
-    async fn shutdown_during_startup_reaps_the_published_process() {
-        let service = WayxService::default();
-        let mut startup = Box::pin(service.acquire());
+        let generation = service.begin_start().unwrap();
+        let mut startup = Box::pin(service.finish_start(generation));
         assert!(futures::poll!(&mut startup).is_pending());
-        let (directory, pid) = {
-            let state = service.lock();
-            let server = state
-                .server
-                .as_ref()
-                .expect("ownership is published before waiting");
-            (
-                server.directory.clone(),
-                server.child.as_ref().unwrap().id(),
-            )
-        };
-        service.shutdown();
+        let directory = service.lock().server.as_ref().unwrap().directory.clone();
+        service.stop(true);
         assert!(startup.await.is_err());
+        service.fail_start(generation);
+        assert_eq!(service.status(), WayxStatus::Stopped);
         assert!(!directory.exists());
-        #[cfg(target_os = "linux")]
-        assert!(!Path::new(&format!("/proc/{pid}")).exists());
-        #[cfg(not(target_os = "linux"))]
-        let _ = pid;
     }
 }

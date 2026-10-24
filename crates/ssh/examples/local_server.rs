@@ -84,6 +84,7 @@ pub struct LocalServer {
     /// 不限住的话 sftp 那条通道的协议包会被当成键盘输入回显回去。
     shell: Option<ChannelId>,
     x11_cookie: Option<[u8; 16]>,
+    reject_x11: bool,
 }
 
 impl LocalServer {
@@ -93,6 +94,7 @@ impl LocalServer {
             channels: HashMap::new(),
             shell: None,
             x11_cookie: None,
+            reject_x11: false,
         }
     }
 
@@ -179,7 +181,8 @@ impl russh::server::Handler for LocalServer {
     type Error = russh::Error;
 
     /// 只认一个密码,用来验证「公钥全失败后回落密码」这条链。
-    async fn auth_password(&mut self, _user: &str, password: &str) -> Result<Auth, Self::Error> {
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        self.reject_x11 = user == "no-x11";
         Ok(if password == PASSWORD {
             Auth::Accept
         } else {
@@ -217,6 +220,7 @@ impl russh::server::Handler for LocalServer {
         _screen: u32,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.reject_x11 { session.channel_failure(channel)?; return Ok(()); }
         let decoded: Option<Vec<u8>> = if cookie.len() == 32 && cookie.is_ascii() {
             (0..16)
                 .map(|index| u8::from_str_radix(&cookie[index * 2..index * 2 + 2], 16).ok())

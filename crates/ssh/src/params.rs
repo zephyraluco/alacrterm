@@ -30,8 +30,6 @@ pub struct SshParams {
     pub key_files: Vec<PathBuf>,
     /// 用哪个 `known_hosts` 文件;`None` = `~/.ssh/known_hosts`(与 `ssh` 共用同一份)。
     pub known_hosts: Option<PathBuf>,
-    /// 启动内置 WayX 并申请 SSH X11 转发（默认关闭）。
-    pub x11_forwarding: bool,
 }
 
 impl SshParams {
@@ -46,7 +44,6 @@ impl SshParams {
             term: DEFAULT_TERM.to_string(),
             key_files: Vec::new(),
             known_hosts: None,
-            x11_forwarding: false,
         }
     }
 

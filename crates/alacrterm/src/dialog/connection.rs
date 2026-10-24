@@ -7,7 +7,6 @@ use gpui::{
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
     dialog::{DialogAction, DialogClose, DialogFooter},
     h_flex,
     input::{Input, InputState},
@@ -27,7 +26,6 @@ pub(crate) struct ConnectionForm {
     name: Entity<InputState>,
     user: Entity<InputState>,
     password: Entity<InputState>,
-    x11_forwarding: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl ConnectionForm {
@@ -44,7 +42,6 @@ impl ConnectionForm {
             name,
             user,
             password,
-            x11_forwarding: Default::default(),
         }
     }
 
@@ -83,7 +80,6 @@ impl ConnectionForm {
             host: self.trimmed(&self.host, cx),
             port: self.port(cx)?,
             password: (!password.is_empty()).then_some(password),
-            x11_forwarding: self.x11_forwarding.get(),
         })
     }
 
@@ -114,18 +110,6 @@ impl ConnectionForm {
             .child(field("名称", &self.name, cx))
             .child(field("用户名", &self.user, cx))
             .child(field("密码", &self.password, cx))
-            .child(
-                Checkbox::new("x11-forwarding")
-                    .label("启用 X11 转发（WayX）")
-                    .checked(self.x11_forwarding.get())
-                    .on_click({
-                        let enabled = self.x11_forwarding.clone();
-                        move |value, _, cx| {
-                            enabled.set(*value);
-                            cx.refresh_windows();
-                        }
-                    }),
-            )
             .child(field_hint(self, cx))
             .into_any_element()
     }

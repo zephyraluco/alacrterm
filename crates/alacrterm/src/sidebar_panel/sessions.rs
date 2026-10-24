@@ -72,14 +72,12 @@ pub(crate) struct SessionRecord {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) password: Option<String>,
-    pub(crate) x11_forwarding: bool,
 }
 
 impl SessionRecord {
     /// 这条记录的会话参数。
     pub(crate) fn request(&self) -> SessionRequest {
-        let mut params = SshParams::new(self.host.clone(), self.port, self.user.clone());
-        params.x11_forwarding = self.x11_forwarding;
+        let params = SshParams::new(self.host.clone(), self.port, self.user.clone());
         let params = match &self.password {
             Some(password) => params.with_password(password.clone()),
             None => params,
@@ -107,8 +105,6 @@ enum PersistedEntry {
         port: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
-        #[serde(default)]
-        x11_forwarding: bool,
     },
 }
 
@@ -143,7 +139,6 @@ impl From<&SessionEntry> for PersistedEntry {
                 host: record.host.clone(),
                 port: record.port,
                 password: record.password.clone(),
-                x11_forwarding: record.x11_forwarding,
             },
         }
     }
@@ -164,7 +159,6 @@ impl From<PersistedEntry> for SessionEntry {
                 host,
                 port,
                 password,
-                x11_forwarding,
             } => Self::Session(SessionRecord {
                 id,
                 name: name.into(),
@@ -172,7 +166,6 @@ impl From<PersistedEntry> for SessionEntry {
                 host,
                 port,
                 password,
-                x11_forwarding,
             }),
         }
     }
@@ -667,19 +660,14 @@ mod tests {
     use super::{PersistedEntry, SessionEntry, SessionFolder, SessionRecord};
 
     #[test]
-    fn legacy_sessions_default_to_no_x11_forwarding() {
-        let record: PersistedEntry = serde_json::from_str(
-            r#"{"type":"session","id":1,"name":"old","user":"me","host":"localhost","port":22}"#,
-        )
-        .unwrap();
-        let SessionEntry::Session(record) = SessionEntry::from(record) else {
-            panic!("expected session")
-        };
-        assert!(!record.x11_forwarding);
-        let terminal::TerminalTarget::Ssh(params) = record.request().target else {
-            panic!("expected SSH")
-        };
-        assert!(!params.x11_forwarding);
+    fn old_x11_setting_is_ignored_and_no_longer_persisted() {
+        for enabled in [false, true] {
+            let json = format!(r#"{{"type":"session","id":1,"name":"old","user":"me","host":"localhost","port":22,"x11_forwarding":{enabled}}}"#);
+            let stored: PersistedEntry = serde_json::from_str(&json).unwrap();
+            let entry = SessionEntry::from(stored);
+            let json = serde_json::to_string(&PersistedEntry::from(&entry)).unwrap();
+            assert!(!json.contains("x11_forwarding"));
+        }
     }
 
     #[test]
@@ -694,7 +682,6 @@ mod tests {
                 host: "db.example.com".into(),
                 port: 2222,
                 password: Some("saved password".into()),
-                x11_forwarding: true,
             })],
         });
 
@@ -714,11 +701,7 @@ mod tests {
         assert_eq!(folder.name, "Production");
         assert_eq!(record.host, "db.example.com");
         assert_eq!(record.port, 2222);
-        assert!(record.x11_forwarding);
-        let terminal::TerminalTarget::Ssh(params) = record.request().target else {
-            panic!("expected SSH")
-        };
-        assert!(params.x11_forwarding);
+
         assert_eq!(record.password.as_deref(), Some("saved password"));
     }
 }

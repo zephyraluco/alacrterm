@@ -231,16 +231,7 @@ async fn run_session(
     sink: &EventSink,
     commands: &mut UnboundedReceiver<Command>,
 ) -> Result<Option<u32>, SshError> {
-    let x11 = if params.x11_forwarding {
-        sink.status("正在连接共享 WayX X11 显示服务 …");
-        Some(
-            crate::wayx::shared_forwarder()
-                .await
-                .map_err(|e| SshError::X11(format!("{e:#}")))?,
-        )
-    } else {
-        None
-    };
+    let x11 = crate::wayx::Forwarder::session();
     sink.status(format!("正在连接 {} …", params.endpoint()));
     let socket = tokio::net::TcpStream::connect((params.host.as_str(), params.port))
         .await
@@ -267,7 +258,7 @@ async fn run_session(
         // 终端会话这条路有人可问(界面弹窗);没人的情况见 `HostKeyPolicy::Ask`。
         Some(sink.clone()),
     );
-    handler.x11 = x11.clone();
+    handler.x11 = Some(x11.clone());
     let mut handle = client::connect_stream(config, socket, handler).await?;
 
     auth::authenticate(&mut handle, params, sink).await?;
@@ -276,31 +267,28 @@ async fn run_session(
         .channel_open_session()
         .await
         .map_err(|error| SshError::ChannelOpen(error.to_string()))?;
-    if let Some(forwarder) = &x11 {
-        channel
-            .request_x11(
-                true,
-                false,
-                "MIT-MAGIC-COOKIE-1",
-                forwarder.cookie_hex(),
-                0,
-            )
-            .await?;
-        tokio::time::timeout(Duration::from_secs(15), async {
+    // Declining X11 must not prevent a normal SSH terminal from opening.
+    let accepted = if channel
+        .request_x11(true, false, "MIT-MAGIC-COOKIE-1", x11.cookie_hex(), 0)
+        .await
+        .is_ok()
+    {
+        tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match channel.wait().await {
-                    Some(ChannelMsg::Success) => return Ok(()),
-                    Some(ChannelMsg::Failure) | Some(ChannelMsg::Close) | None => {
-                        return Err(SshError::X11(
-                            "服务端拒绝 X11 转发；请检查 sshd X11Forwarding 与 xauth".into(),
-                        ));
-                    }
+                    Some(ChannelMsg::Success) => return true,
+                    Some(ChannelMsg::Failure | ChannelMsg::Close) | None => return false,
                     _ => {}
                 }
             }
         })
         .await
-        .map_err(|_| SshError::X11("等待服务端 X11 转发确认超时".into()))??;
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    if !accepted {
+        x11.disable();
     }
     let interactive = match launch {
         Launch::Shell(size) => {
@@ -380,8 +368,6 @@ async fn run_session(
     }
 
     // 礼貌地告别:服务端据此清理 shell 与 PTY,不等 TCP 超时。
-    let _ = handle
-        .disconnect(Disconnect::ByApplication, "", "en")
-        .await;
+    let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
     Ok(exit_status)
 }

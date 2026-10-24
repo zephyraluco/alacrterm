@@ -7,18 +7,26 @@ cookie 校验逻辑的许可证见 [wayx-LICENSE](wayx-LICENSE)。
 
 ## 使用
 
-新建 SSH 会话时勾选 **启用 X11 转发（WayX）**，连接后直接在远端终端运行
-`xterm` 等 X11 应用。服务器需要安装 `xauth`，并在 sshd 中启用
-`X11Forwarding yes`。`DISPLAY` 由服务器的 X11 转发请求设置，不要手工改成本地编号。
-默认不启用转发，旧的会话文件也按关闭处理。
+Alacrterm 打开主窗口后在后台异步启动一个共享的 rootless WayX 服务，与是否打开
+SSH 会话无关。通过本地 X11 认证握手后，状态才变为运行中；启动不阻塞主窗口。
 
-所有启用转发的终端会话共用一个 rootless WayX 进程和显示编号，首次连接时按需
-启动并完成认证握手；并发连接只会启动一个进程。每个 SSH 会话仍使用独立的远端
-cookie，共享服务使用同一个本地认证 cookie。会话断开只关闭自己的转发通道；即使
-最后一个会话断开，服务也会保留，直到应用退出时回收进程、认证文件与临时目录。
-如果服务意外退出，下一次连接会重新启动；已有会话需重新连接以恢复图形转发。
-远端 X11 通道必须先通过独立的随机 cookie 校验，随后将 cookie 替换成本地的认证
-cookie；本地 cookie 不发送给服务器。不启用转发时拒绝服务端打开的 X11 通道。
+标题栏右上角的按钮仅显示状态图标，不显示文字或悬浮提示：已停止、启动中、运行中、
+停止中、失败各有对应图标。启动中和停止中暂不接受重复点击。点击启动或停止会弹出
+确认框，确认后执行，取消不改变服务状态。停止确认框说明图形窗口会关闭，而 SSH
+终端和 SFTP 不受影响。启动失败或服务异常退出仅改变图标，不弹通知；可点击重试。
+应用退出时同步终止服务并清理认证文件、socket 和显示锁。
+
+所有 SSH 终端会话默认申请 X11 转发，不再提供或保存会话级开关。旧会话文件中的
+`x11_forwarding` 字段被忽略，无论原值为 true 或 false 都使用新行为。服务端不支持、
+拒绝或未及时确认 X11 请求时静默回退到普通 SSH，不显示 X11 错误提示。
+服务器需要安装 `xauth`，并在 sshd 中启用 `X11Forwarding yes` 才能运行远端图形程序。
+`DISPLAY` 由 SSH 服务端设置，不要手工设置成本地显示编号。
+
+WayX 手动停止后，SSH 连接不会自动重启它。已经成功协商 X11 的会话保留独立的远端
+cookie；每次打开图形连接时读取当前服务的显示编号与本地 cookie。重新启动 WayX 后，
+原 SSH 会话可再次运行 `xclock` 等程序，无需重连。之前关闭的图形应用需要重新运行。
+每次启停更换服务代次，旧的启动任务不能覆盖新状态，旧的图形通道会关闭。
+本地认证 cookie 不发送给远端，收到的 X11 初始化请求通过校验后才连接本地服务。
 共享服务最多同时处理 64 条 X11 通道，初始认证限时 10 秒。
 
 当前运行包支持 Linux x64、macOS arm64、Windows x64。发布时应将完整 `platform/`
@@ -41,14 +49,13 @@ cargo test --locked -p alacrterm sidebar_panel::sessions::tests
 需要宿主 DISPLAY / Wayland 环境的测试单独运行：
 
 ```sh
-cargo test --locked -p ssh --lib shared_wayx_reuses_server_and_is_reaped_on_shutdown -- --ignored
+cargo test --locked -p ssh --lib manual_lifecycle_restarts_without_ssh_and_cancels_stale_startup -- --ignored
 cargo test --locked -p ssh --test roundtrip shared_x11_server_survives_disconnecting_another_session -- --ignored
 ```
 
-第一个测试确认多个会话复用同一个进程和显示编号、使用不同的远端 cookie，并验证
-最后一个会话断开后服务仍然存在、应用关闭后资源被回收。第二个测试通过本机测试
-SSH 服务端建立两条并发会话，认证请求经 cookie 替换后连接真实的内置 X server，
-创建、映射窗口并完成请求往返；断开其中一个会话后，另一个仍能建立新的 X11 连接。
-这些测试不需要远端主机或外部凭据。
+第一个测试不创建 SSH 会话，直接验证启动、停止、重启和启动代次隔离。第二个测试
+建立两条并发 SSH 会话，创建并映射图形窗口；关闭其中一个会话后，另一个继续运行，
+停止 WayX 后仍可使用终端，重启后原会话可再次建立 X11 连接。默认测试还验证服务端
+拒绝 X11 时保持交互式 shell，且没有 X11 状态提示。这些测试无需外部主机或凭据。
 云环境可使用 `Xvfb :99 -screen 0 1280x800x24 -nolisten tcp -ac -extension MIT-SHM`
 并给上述命令设置 `DISPLAY=:99`。
