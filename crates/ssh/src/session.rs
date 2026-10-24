@@ -231,6 +231,16 @@ async fn run_session(
     sink: &EventSink,
     commands: &mut UnboundedReceiver<Command>,
 ) -> Result<Option<u32>, SshError> {
+    let x11 = if params.x11_forwarding {
+        sink.status("正在连接共享 WayX X11 显示服务 …");
+        Some(
+            crate::wayx::shared_forwarder()
+                .await
+                .map_err(|e| SshError::X11(format!("{e:#}")))?,
+        )
+    } else {
+        None
+    };
     sink.status(format!("正在连接 {} …", params.endpoint()));
     let socket = tokio::net::TcpStream::connect((params.host.as_str(), params.port))
         .await
@@ -248,7 +258,7 @@ async fn run_session(
         keepalive_interval: Some(Duration::from_secs(30)),
         ..Default::default()
     });
-    let handler = ClientHandler::new(
+    let mut handler = ClientHandler::new(
         params.user.clone(),
         params.host.clone(),
         params.port,
@@ -257,14 +267,41 @@ async fn run_session(
         // 终端会话这条路有人可问(界面弹窗);没人的情况见 `HostKeyPolicy::Ask`。
         Some(sink.clone()),
     );
+    handler.x11 = x11.clone();
     let mut handle = client::connect_stream(config, socket, handler).await?;
 
     auth::authenticate(&mut handle, params, sink).await?;
 
-    let channel = handle
+    let mut channel = handle
         .channel_open_session()
         .await
         .map_err(|error| SshError::ChannelOpen(error.to_string()))?;
+    if let Some(forwarder) = &x11 {
+        channel
+            .request_x11(
+                true,
+                false,
+                "MIT-MAGIC-COOKIE-1",
+                forwarder.cookie_hex(),
+                0,
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Success) => return Ok(()),
+                    Some(ChannelMsg::Failure) | Some(ChannelMsg::Close) | None => {
+                        return Err(SshError::X11(
+                            "服务端拒绝 X11 转发；请检查 sshd X11Forwarding 与 xauth".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| SshError::X11("等待服务端 X11 转发确认超时".into()))??;
+    }
     let interactive = match launch {
         Launch::Shell(size) => {
             let size = size.sanitized();

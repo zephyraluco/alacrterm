@@ -129,6 +129,7 @@ struct ResponseSlot {
 
 /// 客户端回调:主机密钥校验需要的全部上下文。
 pub(crate) struct ClientHandler {
+    pub(crate) x11: Option<crate::wayx::Forwarder>,
     user: String,
     host: String,
     port: u16,
@@ -149,6 +150,7 @@ impl ClientHandler {
         events: Option<EventSink>,
     ) -> Self {
         Self {
+            x11: None,
             user,
             host,
             port,
@@ -236,6 +238,21 @@ impl ClientHandler {
 
 impl Handler for ClientHandler {
     type Error = SshError;
+
+    async fn server_channel_open_x11(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        _origin: &str,
+        _port: u32,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(forwarder) = &self.x11 {
+            forwarder.accept(channel, reply).await;
+        }
+        // Dropping reply rejects unsolicited X11 channels when forwarding is off.
+        Ok(())
+    }
 
     /// 校验服务器的主机公钥 —— **唯一的中间人防护**,必须老老实实查 `known_hosts`。
     ///

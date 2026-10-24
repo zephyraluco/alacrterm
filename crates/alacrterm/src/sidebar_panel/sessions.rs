@@ -72,12 +72,14 @@ pub(crate) struct SessionRecord {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) password: Option<String>,
+    pub(crate) x11_forwarding: bool,
 }
 
 impl SessionRecord {
     /// 这条记录的会话参数。
     pub(crate) fn request(&self) -> SessionRequest {
-        let params = SshParams::new(self.host.clone(), self.port, self.user.clone());
+        let mut params = SshParams::new(self.host.clone(), self.port, self.user.clone());
+        params.x11_forwarding = self.x11_forwarding;
         let params = match &self.password {
             Some(password) => params.with_password(password.clone()),
             None => params,
@@ -105,6 +107,8 @@ enum PersistedEntry {
         port: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
+        #[serde(default)]
+        x11_forwarding: bool,
     },
 }
 
@@ -139,6 +143,7 @@ impl From<&SessionEntry> for PersistedEntry {
                 host: record.host.clone(),
                 port: record.port,
                 password: record.password.clone(),
+                x11_forwarding: record.x11_forwarding,
             },
         }
     }
@@ -159,6 +164,7 @@ impl From<PersistedEntry> for SessionEntry {
                 host,
                 port,
                 password,
+                x11_forwarding,
             } => Self::Session(SessionRecord {
                 id,
                 name: name.into(),
@@ -166,6 +172,7 @@ impl From<PersistedEntry> for SessionEntry {
                 host,
                 port,
                 password,
+                x11_forwarding,
             }),
         }
     }
@@ -525,9 +532,7 @@ impl SessionsItem {
                 .id("session-tree-top-level-drop")
                 .w_full()
                 .h(px(16.))
-                .drag_over::<DragSessionEntry>(|style, _, _, cx| {
-                    style.bg(cx.theme().tokens.accent)
-                })
+                .drag_over::<DragSessionEntry>(|style, _, _, cx| style.bg(cx.theme().tokens.accent))
                 .on_drop(move |drag: &DragSessionEntry, window, cx| {
                     drop_into(drag.path.clone(), None, window, cx)
                 })
@@ -604,7 +609,12 @@ fn session_row_element(
             let state = state.clone();
             move |event, window, cx| {
                 if event.click_count() >= 2 && !is_folder {
-                    window.dispatch_action(Box::new(OpenSession { path: click_path.clone() }), cx);
+                    window.dispatch_action(
+                        Box::new(OpenSession {
+                            path: click_path.clone(),
+                        }),
+                        cx,
+                    );
                     return;
                 }
                 let _ = state.update(cx, |sessions, cx| {
@@ -627,7 +637,12 @@ fn session_row_element(
                     }),
                 )
                 .separator()
-                .menu("删除文件夹", Box::new(RemoveEntry { path: menu_path.clone() }))
+                .menu(
+                    "删除文件夹",
+                    Box::new(RemoveEntry {
+                        path: menu_path.clone(),
+                    }),
+                )
             } else {
                 menu.menu(
                     "打开会话",
@@ -636,7 +651,12 @@ fn session_row_element(
                     }),
                 )
                 .separator()
-                .menu("删除会话", Box::new(RemoveEntry { path: menu_path.clone() }))
+                .menu(
+                    "删除会话",
+                    Box::new(RemoveEntry {
+                        path: menu_path.clone(),
+                    }),
+                )
             }
         })
         .into_any_element()
@@ -645,6 +665,22 @@ fn session_row_element(
 #[cfg(test)]
 mod tests {
     use super::{PersistedEntry, SessionEntry, SessionFolder, SessionRecord};
+
+    #[test]
+    fn legacy_sessions_default_to_no_x11_forwarding() {
+        let record: PersistedEntry = serde_json::from_str(
+            r#"{"type":"session","id":1,"name":"old","user":"me","host":"localhost","port":22}"#,
+        )
+        .unwrap();
+        let SessionEntry::Session(record) = SessionEntry::from(record) else {
+            panic!("expected session")
+        };
+        assert!(!record.x11_forwarding);
+        let terminal::TerminalTarget::Ssh(params) = record.request().target else {
+            panic!("expected SSH")
+        };
+        assert!(!params.x11_forwarding);
+    }
 
     #[test]
     fn persisted_ssh_session_round_trips_with_password() {
@@ -658,6 +694,7 @@ mod tests {
                 host: "db.example.com".into(),
                 port: 2222,
                 password: Some("saved password".into()),
+                x11_forwarding: true,
             })],
         });
 
@@ -677,6 +714,11 @@ mod tests {
         assert_eq!(folder.name, "Production");
         assert_eq!(record.host, "db.example.com");
         assert_eq!(record.port, 2222);
+        assert!(record.x11_forwarding);
+        let terminal::TerminalTarget::Ssh(params) = record.request().target else {
+            panic!("expected SSH")
+        };
+        assert!(params.x11_forwarding);
         assert_eq!(record.password.as_deref(), Some("saved password"));
     }
 }

@@ -48,6 +48,7 @@ mod fs;
 mod handler;
 mod params;
 mod session;
+mod wayx;
 
 pub use error::SshError;
 pub use fs::{
@@ -57,3 +58,5 @@ pub use fs::{
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
 pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize};
 pub use session::{SshEvent, SshSession};
+
+pub use wayx::shutdown_wayx;

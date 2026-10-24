@@ -126,6 +126,11 @@ fn main() {
         .with_assets(assets::Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
+            cx.on_app_quit(|_| {
+                terminal::shutdown_wayx();
+                async {}
+            })
+            .detach();
             gpui_kit::init(cx);
             config::install(cx);
             config::load_themes(cx);
@@ -157,6 +162,7 @@ fn main() {
             )
             .expect("failed to open window");
         });
+    terminal::shutdown_wayx();
 }
 
 /// 应用根视图（只存共享状态）。

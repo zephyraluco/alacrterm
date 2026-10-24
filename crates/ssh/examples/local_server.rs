@@ -83,6 +83,7 @@ pub struct LocalServer {
     /// russh 会把**所有**通道的数据都送到 [`russh::server::Handler::data`],
     /// 不限住的话 sftp 那条通道的协议包会被当成键盘输入回显回去。
     shell: Option<ChannelId>,
+    x11_cookie: Option<[u8; 16]>,
 }
 
 impl LocalServer {
@@ -91,6 +92,63 @@ impl LocalServer {
             line: String::new(),
             channels: HashMap::new(),
             shell: None,
+            x11_cookie: None,
+        }
+    }
+
+    fn probe_x11(&self, channel: ChannelId, session: &Session) {
+        if let Some(cookie) = self.x11_cookie {
+            let handle = session.handle();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let result = tokio::time::timeout(Duration::from_secs(5), async {
+                    let forwarded = handle.channel_open_x11("127.0.0.1", 0).await?;
+                    let mut stream = forwarded.into_stream();
+                    let mut setup = vec![b'l', 0, 11, 0, 0, 0, 18, 0, 16, 0, 0, 0];
+                    setup.extend_from_slice(b"MIT-MAGIC-COOKIE-1\0\0");
+                    setup.extend_from_slice(&cookie);
+                    stream.write_all(&setup).await?;
+                    let mut response = [0; 8];
+                    stream.read_exact(&mut response).await?;
+                    anyhow::ensure!(response[0] == 1, "X11 authentication rejected");
+                    let size = u16::from_le_bytes([response[6], response[7]]) as usize * 4;
+                    anyhow::ensure!((32..=1024 * 1024).contains(&size), "invalid setup size");
+                    let mut body = vec![0; size];
+                    stream.read_exact(&mut body).await?;
+                    let vendor_len = u16::from_le_bytes([body[16], body[17]]) as usize;
+                    let screen = 32 + ((vendor_len + 3) & !3) + body[21] as usize * 8;
+                    anyhow::ensure!(body[20] > 0 && screen + 40 <= body.len(), "missing screen");
+                    let window = u32::from_le_bytes(body[4..8].try_into()?) | 1;
+                    let root = u32::from_le_bytes(body[screen..screen + 4].try_into()?);
+                    let white = u32::from_le_bytes(body[screen + 8..screen + 12].try_into()?);
+                    // CreateWindow + MapWindow + GetInputFocus (a round-trip barrier).
+                    let mut requests = vec![1, 0, 9, 0];
+                    requests.extend_from_slice(&window.to_le_bytes());
+                    requests.extend_from_slice(&root.to_le_bytes());
+                    for value in [20u16, 20, 320, 180, 0, 1] {
+                        requests.extend_from_slice(&value.to_le_bytes());
+                    }
+                    requests.extend_from_slice(&0u32.to_le_bytes()); // CopyFromParent visual
+                    requests.extend_from_slice(&2u32.to_le_bytes()); // CWBackPixel
+                    requests.extend_from_slice(&white.to_le_bytes());
+                    requests.extend_from_slice(&[8, 0, 2, 0]);
+                    requests.extend_from_slice(&window.to_le_bytes());
+                    requests.extend_from_slice(&[43, 0, 1, 0]);
+                    stream.write_all(&requests).await?;
+                    let mut focus = [0; 32];
+                    stream.read_exact(&mut focus).await?;
+                    Ok::<bool, anyhow::Error>(
+                        focus[0] == 1 && u16::from_le_bytes([focus[2], focus[3]]) == 3,
+                    )
+                })
+                .await;
+                let message = if matches!(result, Ok(Ok(true))) {
+                    "X11:OK\r\n"
+                } else {
+                    "X11:FAILED\r\n"
+                };
+                let _ = handle.data(channel, message.as_bytes().to_vec()).await;
+            });
         }
     }
 }
@@ -147,6 +205,33 @@ impl russh::server::Handler for LocalServer {
         // 留一份通道句柄:`sftp` 子系统要把它变成一条字节流。
         self.channels.insert(channel.id(), channel);
         reply.accept().await;
+        Ok(())
+    }
+
+    async fn x11_request(
+        &mut self,
+        channel: ChannelId,
+        _single: bool,
+        protocol: &str,
+        cookie: &str,
+        _screen: u32,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let decoded: Option<Vec<u8>> = if cookie.len() == 32 && cookie.is_ascii() {
+            (0..16)
+                .map(|index| u8::from_str_radix(&cookie[index * 2..index * 2 + 2], 16).ok())
+                .collect()
+        } else {
+            None
+        };
+        if protocol == "MIT-MAGIC-COOKIE-1" {
+            self.x11_cookie = decoded.and_then(|bytes| bytes.try_into().ok());
+        }
+        if self.x11_cookie.is_some() {
+            session.channel_success(channel)?;
+        } else {
+            session.channel_failure(channel)?;
+        }
         Ok(())
     }
 
@@ -219,10 +304,8 @@ impl russh::server::Handler for LocalServer {
     ) -> Result<(), Self::Error> {
         eprintln!("[local_server] shell_request");
         self.shell = Some(channel);
-        session.data(
-            channel,
-            format!("{BANNER}{PROMPT}").into_bytes(),
-        )?;
+        self.probe_x11(channel, session);
+        session.data(channel, format!("{BANNER}{PROMPT}").into_bytes())?;
         Ok(())
     }
 
@@ -255,10 +338,10 @@ impl russh::server::Handler for LocalServer {
                         session.close(channel)?;
                         return Ok(());
                     }
-                    session.data(
-                        channel,
-                        format!("REPLY:{line}\r\n{PROMPT}").into_bytes(),
-                    )?;
+                    if line.trim() == "x11" {
+                        self.probe_x11(channel, session);
+                    }
+                    session.data(channel, format!("REPLY:{line}\r\n{PROMPT}").into_bytes())?;
                 }
                 // 退格:只回显(玩具 shell 不做真正的行编辑)。
                 '\u{7f}' | '\u{8}' => {}
@@ -388,9 +471,7 @@ impl russh_sftp::server::Handler for FsSession {
         if write && pflags.contains(OpenFlags::TRUNCATE) {
             options.truncate(true);
         }
-        let file = options
-            .open(&path)
-            .map_err(|_| StatusCode::NoSuchFile)?;
+        let file = options.open(&path).map_err(|_| StatusCode::NoSuchFile)?;
 
         self.next_handle += 1;
         let handle = format!("fh-{}", self.next_handle);
@@ -559,7 +640,11 @@ fn resolve(path: &str) -> PathBuf {
 fn attributes(metadata: &std::fs::Metadata) -> FileAttributes {
     let mut attrs = FileAttributes::empty();
     attrs.size = Some(metadata.len());
-    attrs.permissions = Some(if metadata.is_dir() { 0o040755 } else { 0o100644 });
+    attrs.permissions = Some(if metadata.is_dir() {
+        0o040755
+    } else {
+        0o100644
+    });
     attrs.mtime = metadata
         .modified()
         .ok()

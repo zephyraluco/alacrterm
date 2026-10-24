@@ -7,6 +7,8 @@
 /// SSH 连接 / 会话相关的失败。
 #[derive(Debug, thiserror::Error)]
 pub enum SshError {
+    #[error("X11 转发:{0}")]
+    X11(String),
     /// 传输层 / 协议层错误(russh 原样透出)。
     #[error(transparent)]
     Russh(#[from] russh::Error),
