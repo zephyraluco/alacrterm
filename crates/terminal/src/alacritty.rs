@@ -771,11 +771,11 @@ pub(super) fn clear_saved_screen(term: &mut Term<ZedListener>) {
     }
 }
 
-pub(super) fn make_content(term: &Term<ZedListener>, last_content: &Content) -> Content {
+pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content) -> Content {
     let content = term.renderable_content();
 
-    let estimated_size = content.display_iter.size_hint().0;
-    let mut cells = Vec::with_capacity(estimated_size);
+    let mut cells = std::mem::take(&mut last_content.cells);
+    cells.clear();
 
     cells.extend(content.display_iter.map(|ic| IndexedCell {
         point: terminal_point_from_alacritty(ic.point),
@@ -1033,4 +1033,58 @@ mod tests {
             }
         );
     }
+    #[test]
+    fn snapshot_reuses_cells_and_captures_new_output() {
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+        let (sender, _receiver) = futures::channel::mpsc::unbounded();
+        let term = new_term(
+            &AlacrittyTermConfig::default(),
+            TerminalBounds::default(),
+            sender,
+        );
+        let mut term = term.lock();
+        let mut content = Content::default();
+        content = make_content(&term, &mut content);
+        let allocation = content.cells.as_ptr();
+        let mut parser = Processor::<StdSyncHandler>::new();
+        parser.advance(&mut *term, b"hello");
+        content = make_content(&term, &mut content);
+        assert_eq!(allocation, content.cells.as_ptr());
+        assert_eq!(content.cells[0].cell.character(), 'h');
+        assert_eq!(content.cells[4].cell.character(), 'o');
+        assert_eq!(content.cursor.point.column, 5);
+    }
+
+    #[test]
+    fn remote_parser_emits_replies_and_flushes_unfinished_synchronized_update() {
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+        use futures::{FutureExt as _, StreamExt as _};
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+        let term = new_term(
+            &AlacrittyTermConfig::default(),
+            TerminalBounds::default(),
+            sender,
+        );
+        let mut term = term.lock();
+        let mut parser = Processor::<StdSyncHandler>::new();
+        parser.advance(&mut *term, b"\x1b[6n\x1b]2;test-title\x07");
+        let mut replies = Vec::new();
+        let mut title = None;
+        while let Some(Some(event)) = receiver.next().now_or_never() {
+            match event {
+                TerminalBackendEvent::PtyWrite(text) => replies.push(text),
+                TerminalBackendEvent::Title(text) => title = Some(text),
+                _ => {}
+            }
+        }
+        assert!(replies.iter().any(|text| text.ends_with('R')));
+        assert_eq!(title.as_deref(), Some("test-title"));
+        parser.advance(&mut *term, b"\x1b[?2026hDEFERRED");
+        assert!(parser.sync_timeout().sync_timeout().is_some());
+        assert!(!content_text(&term).contains("DEFERRED"));
+        parser.stop_sync(&mut *term);
+        assert!(content_text(&term).contains("DEFERRED"));
+        assert!(parser.sync_timeout().sync_timeout().is_none());
+    }
+
 }

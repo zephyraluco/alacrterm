@@ -21,6 +21,7 @@
 //! - 主题色使用 `terminal::TerminalColors`（本地定义）
 
 use std::mem;
+use std::rc::Rc;
 use std::ops::Range as StdRange;
 use std::sync::Arc;
 
@@ -81,12 +82,28 @@ impl Default for TerminalRenderSettings {
     }
 }
 
+type GridLayout = (Vec<LayoutRect>, Vec<BatchedTextRun>, Vec<BlockElementLayoutRect>);
+
+#[derive(Default)]
+pub(crate) struct GridCache {
+    settings: Option<Arc<TerminalRenderSettings>>,
+    generation: Option<u64>,
+    link: Option<Range>,
+    clip: Option<Bounds<Pixels>>,
+    bounds: Option<Bounds<Pixels>>,
+    rows: Vec<CachedRow>,
+}
+struct CachedRow {
+    cells: Vec<IndexedCell>,
+    line: i32,
+    link: Option<Range>,
+    layout: Rc<GridLayout>,
+}
+
 /// The information generated during layout that is necessary for painting.
 pub struct LayoutState {
     hitbox: Hitbox,
-    batched_text_runs: Vec<BatchedTextRun>,
-    block_element_rects: Vec<BlockElementLayoutRect>,
-    rects: Vec<LayoutRect>,
+    grids: Vec<Rc<GridLayout>>,
     relative_highlighted_ranges: Vec<(Range, Hsla)>,
     cursor: Option<CursorLayout>,
     ime_cursor_bounds: Option<Bounds<Pixels>>,
@@ -1206,10 +1223,7 @@ impl Element for TerminalElement {
                     font_fallbacks: None,
                     font_size: font_size.into(),
                     font_style: FontStyle::Normal,
-                    line_height: px(
-                        f32::from(font_size) * settings.line_height_multiplier,
-                    )
-                    .into(),
+                    line_height: px(f32::from(font_size) * settings.line_height_multiplier).into(),
                     background_color: Some(colors.terminal_background),
                     white_space: WhiteSpace::Normal,
                     // These are going to be overridden per-cell
@@ -1220,10 +1234,7 @@ impl Element for TerminalElement {
                 let text_system = window.text_system();
                 let font_id = text_system.resolve_font(&text_style.font());
                 let line_height_multiplier = settings.line_height_multiplier;
-                let cell_width = text_system
-                    .advance(font_id, font_size, 'm')
-                    .unwrap()
-                    .width;
+                let cell_width = text_system.advance(font_id, font_size, 'm').unwrap().width;
                 let line_height_px = f32::from(font_size) * line_height_multiplier;
 
                 let mut grid_size = bounds.size;
@@ -1250,8 +1261,9 @@ impl Element for TerminalElement {
                     let line_height_px = px(line_height_px);
                     let line_height_device_px =
                         (f32::from(line_height_px) * scale_factor).round().max(1.0) as i32;
-                    let available_height_device_px =
-                        (f32::from(available_height) * scale_factor).floor().max(0.0) as i32;
+                    let available_height_device_px = (f32::from(available_height) * scale_factor)
+                        .floor()
+                        .max(0.0) as i32;
 
                     let rows =
                         ((available_height_device_px / line_height_device_px) as usize).max(1);
@@ -1279,8 +1291,14 @@ impl Element for TerminalElement {
                 origin.x = snap_px(origin.x);
                 origin.y = snap_px(origin.y);
 
-                let dimensions =
-                    TerminalBounds::new(px(line_height_px), cell_width, Bounds { origin, size: grid_size });
+                let dimensions = TerminalBounds::new(
+                    px(line_height_px),
+                    cell_width,
+                    Bounds {
+                        origin,
+                        size: grid_size,
+                    },
+                );
 
                 let search_matches = self.terminal.read(cx).matches.clone();
 
@@ -1331,53 +1349,72 @@ impl Element for TerminalElement {
                 let intersection = visible_bounds.intersect(&content_bounds);
 
                 // If the terminal is entirely outside the viewport, skip all cell processing.
-                let (rects, batched_text_runs, block_element_rects) = if intersection.size.height
-                    <= px(0.)
-                    || intersection.size.width <= px(0.)
+                let generation = self.terminal.read(cx).content_generation();
+                let view = self.terminal_view.read(cx);
+                let mut cache = view.grid_cache.borrow_mut();
+                if !cache
+                    .settings
+                    .as_ref()
+                    .is_some_and(|old| Arc::ptr_eq(old, &settings))
                 {
-                    (Vec::new(), Vec::new(), Vec::new())
-                } else if intersection == content_bounds {
-                    // Fast path: terminal fully visible, no clipping needed.
-                    TerminalElement::layout_grid(
-                        content.cells.iter(),
-                        0,
-                        &text_style,
-                        last_hovered_word
-                            .as_ref()
-                            .map(|last_hovered_word| (link_style, &last_hovered_word.word_match)),
-                        settings.minimum_contrast,
-                        &colors,
-                        cx,
-                    )
+                    *cache = GridCache {
+                        settings: Some(settings.clone()),
+                        ..Default::default()
+                    };
+                }
+                let hovered_link = last_hovered_word.as_ref().map(|word| word.word_match);
+                let grids = if cache.generation == Some(generation)
+                    && cache.link == hovered_link
+                    && cache.clip == Some(intersection)
+                    && cache.bounds == Some(content_bounds)
+                {
+                    cache.rows.iter().map(|row| row.layout.clone()).collect()
                 } else {
-                    // Calculate which screen rows are visible based on pixel positions.
-                    // This works because we filter by screen position (enumerated line
-                    // group index), not by the cell's internal line number.
-                    let rows_above_viewport = f32::from(
-                        (intersection.top() - content_bounds.top()).max(px(0.)) / line_height_px,
-                    ) as usize;
-                    let visible_row_count =
-                        f32::from((intersection.size.height / line_height_px).ceil()) as usize + 1;
-
-                    TerminalElement::layout_grid(
-                        content
-                            .cells
-                            .iter()
-                            .chunk_by(|c| c.point.line)
-                            .into_iter()
-                            .skip(rows_above_viewport)
-                            .take(visible_row_count)
-                            .flat_map(|(_, line_cells)| line_cells),
-                        rows_above_viewport as i32,
-                        &text_style,
-                        last_hovered_word
-                            .as_ref()
-                            .map(|last_hovered_word| (link_style, &last_hovered_word.word_match)),
-                        settings.minimum_contrast,
-                        &colors,
-                        cx,
-                    )
+                    let mut old_rows = std::mem::take(&mut cache.rows);
+                    if intersection.size.height > px(0.) && intersection.size.width > px(0.) {
+                        let first =
+                            (f32::from((intersection.top() - content_bounds.top()).max(px(0.)))
+                                / line_height_px) as usize;
+                        let count = (f32::from(intersection.size.height) / line_height_px).ceil()
+                            as usize
+                            + 1;
+                        let groups = content.cells.chunk_by(|a, b| a.point.line == b.point.line);
+                        for (index, cells) in groups.enumerate().skip(first).take(count) {
+                            let link = last_hovered_word.as_ref().map(|word| word.word_match);
+                            let existing = old_rows.iter().position(|old| {
+                                old.line == index as i32
+                                    && old.link == link
+                                    && old.cells.as_slice() == cells
+                            });
+                            let row = if let Some(existing) = existing {
+                                old_rows.swap_remove(existing)
+                            } else {
+                                let layout = Rc::new(Self::layout_grid(
+                                    cells.iter(),
+                                    index as i32,
+                                    &text_style,
+                                    link.as_ref().map(|range| (link_style, range)),
+                                    settings.minimum_contrast,
+                                    &colors,
+                                    cx,
+                                ));
+                                CachedRow {
+                                    cells: cells.to_vec(),
+                                    line: index as i32,
+                                    link,
+                                    layout,
+                                }
+                            };
+                            cache.rows.push(row);
+                        }
+                    }
+                    cache.generation = Some(generation);
+                    cache.link = hovered_link;
+                    cache.clip = Some(intersection);
+                    cache.bounds = Some(content_bounds);
+                    cache.rows.iter().map(|row| row.layout.clone()).collect()
                 };
+                drop(cache);
 
                 // Layout cursor. Rectangle is used for IME, so we should lay it out even
                 // if we don't end up showing it.
@@ -1442,13 +1479,11 @@ impl Element for TerminalElement {
 
                 LayoutState {
                     hitbox,
-                    batched_text_runs,
-                    block_element_rects,
+                    grids,
                     cursor,
                     ime_cursor_bounds,
                     background_color,
                     dimensions,
-                    rects,
                     relative_highlighted_ranges,
                     mode,
                     display_offset,
@@ -1529,7 +1564,7 @@ impl Element for TerminalElement {
                     });
 
                     // 1. 背景矩形（cell 非默认背景）
-                    for rect in &layout.rects {
+                    for rect in layout.grids.iter().flat_map(|grid| &grid.0) {
                         rect.paint(origin, &layout.dimensions, window);
                     }
 
@@ -1542,12 +1577,12 @@ impl Element for TerminalElement {
                     );
 
                     // 3. 批量文本 run
-                    for batch in &layout.batched_text_runs {
+                    for batch in layout.grids.iter().flat_map(|grid| &grid.1) {
                         batch.paint(origin, &layout.dimensions, window, cx);
                     }
 
                     // 4. 块字符矩形（subcell 网格）
-                    for block_element_rect in &layout.block_element_rects {
+                    for block_element_rect in layout.grids.iter().flat_map(|grid| &grid.2) {
                         block_element_rect.paint(origin, &layout.dimensions, window);
                     }
 

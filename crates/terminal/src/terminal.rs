@@ -2,6 +2,7 @@ mod mappings;
 
 mod alacritty;
 mod backend;
+mod parser_events;
 mod pty_info;
 mod shell_integration;
 
@@ -327,7 +328,7 @@ pub struct RenderableCells<'a> {
     cells: AlacrittyGridIterator<'a>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedCell {
     pub point: Point,
     pub cell: Cell,
@@ -876,7 +877,7 @@ pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
 
 pub struct TerminalBuilder {
     terminal: Terminal,
-    events_rx: UnboundedReceiver<TerminalBackendEvent>,
+    events_rx: parser_events::ParserEvents,
 }
 
 impl TerminalBuilder {
@@ -1047,7 +1048,9 @@ impl TerminalBuilder {
                 }
             };
 
+            let parser_events = parser_events::ParserEvents::new(events_rx);
             let terminal = Terminal {
+                parser_events: parser_events.clone(),
                 backend,
                 ssh_events,
                 ssh_pending: None,
@@ -1058,6 +1061,8 @@ impl TerminalBuilder {
                 ssh_status_shown: false,
                 // 本地：PTY 建好就算可用；远端：等 `SshEvent::Connected`（见 `is_connected`）。
                 connected: !is_remote_terminal,
+                snapshot_dirty: true,
+                content_generation: 0,
                 term,
                 term_config: config,
                 output_processor: Processor::<StdSyncHandler>::new(),
@@ -1085,6 +1090,8 @@ impl TerminalBuilder {
                 child_exited: None,
                 keyboard_input_sent: false,
                 event_loop_task: Task::ready(Ok(())),
+                backend_event_task: Task::ready(Ok(())),
+                sync_task: Task::ready(()),
                 background_executor,
                 // 远端是台 Unix 主机（SSH 连 Windows 时这里会判错，但那只影响超链接里的
                 // 路径切分，属于可接受误差）。
@@ -1095,7 +1102,7 @@ impl TerminalBuilder {
                 },
             };
 
-            Ok(TerminalBuilder { terminal, events_rx })
+            Ok(TerminalBuilder { terminal, events_rx: parser_events })
         };
         cx.background_spawn(fut)
     }
@@ -1103,20 +1110,12 @@ impl TerminalBuilder {
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
         // SSH：远端字节没有任何人替我们喂进模拟器，得自己起一个事件泵。
         // （本地 PTY 那条由 alacritty 的 `EventLoop` 代劳，见下面的 event loop。）
-        if let Some(mut ssh_events) = self.terminal.ssh_events.take() {
-            self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
-                while let Some(event) = ssh_events.next().await {
-                    terminal.update(cx, |terminal, cx| {
-                        terminal.process_ssh_event(event, cx);
-                    })?;
-                }
-                anyhow::Ok(())
-            });
-            return self.terminal;
+        if let Some(ssh_events) = self.terminal.ssh_events.take() {
+            self.terminal.start_ssh_events(ssh_events, cx);
         }
 
-        //Event loop
-        self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
+        // Keep parser replies and UI events alive for both PTY and SSH backends.
+        self.terminal.backend_event_task = cx.spawn(async move |terminal, cx| {
             while let Some(event) = self.events_rx.next().await {
                 terminal.update(cx, |terminal, cx| {
                     //Process the first event immediately for lowered latency
@@ -1198,6 +1197,7 @@ impl TerminalBuilder {
 pub struct Terminal {
     /// 谁在搬字节：本地 PTY 或远端 SSH（见 [`backend`]）。
     backend: TerminalBackend,
+    parser_events: parser_events::ParserEvents,
     /// SSH 事件流（**只**在 SSH 后端下为 `Some`），[`Terminal::subscribe`] 会把它取走并
     /// 起一个任务把远端字节喂进模拟器 —— 本地 PTY 那条由 alacritty 事件循环代劳。
     ssh_events: Option<UnboundedReceiver<SshEvent>>,
@@ -1224,6 +1224,8 @@ pub struct Terminal {
     /// 远端在它变真之前，同一份连接参数还不能拿去做别的连接（那时主机密钥可能还没确认，
     /// 见 [`Terminal::remote_fs`]）。
     connected: bool,
+    snapshot_dirty: bool,
+    content_generation: u64,
     term: Arc<AlacrittyTermLock>,
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
@@ -1253,6 +1255,8 @@ pub struct Terminal {
     child_exited: Option<ExitStatus>,
     keyboard_input_sent: bool,
     event_loop_task: Task<Result<(), anyhow::Error>>,
+    backend_event_task: Task<Result<(), anyhow::Error>>,
+    sync_task: Task<()>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
 }
@@ -1281,6 +1285,72 @@ const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 const SSH_PENDING_LIMIT: usize = 256 * 1024;
 
 impl Terminal {
+    fn start_ssh_events(&mut self, mut events: UnboundedReceiver<SshEvent>, cx: &Context<Self>) {
+        self.event_loop_task = cx.spawn(async move |terminal, cx| {
+            while let Some(first) = events.next().await {
+                // Bound each UI update by both event count and bytes. Do not delay
+                // the first event; drain only output already available in the queue.
+                let mut batch = vec![first];
+                let mut bytes = match &batch[0] {
+                    SshEvent::Data(data) => data.len(),
+                    _ => 0,
+                };
+                while batch.len() < 64 && bytes < 128 * 1024 {
+                    let Some(Some(event)) = events.next().now_or_never() else {
+                        break;
+                    };
+                    if let SshEvent::Data(data) = &event {
+                        bytes += data.len();
+                    }
+                    batch.push(event);
+                }
+                terminal.update(cx, |terminal, cx| {
+                    for event in batch {
+                        terminal.process_ssh_event(event, cx);
+                    }
+                    terminal.schedule_sync_timeout(cx);
+                    cx.emit(Event::Wakeup);
+                    cx.notify();
+                })?;
+                yield_now().await;
+            }
+            anyhow::Ok(())
+        });
+    }
+
+    fn schedule_sync_timeout(&mut self, cx: &mut Context<Self>) {
+        let Some(deadline) = self.output_processor.sync_timeout().sync_timeout() else {
+            return;
+        };
+        self.sync_task = cx.spawn(async move |terminal, cx| {
+            cx.background_executor()
+                .timer(deadline.saturating_duration_since(std::time::Instant::now()))
+                .await;
+            let _ = terminal.update(cx, |terminal, cx| {
+                if terminal
+                    .output_processor
+                    .sync_timeout()
+                    .sync_timeout()
+                    .is_some_and(|deadline| deadline <= std::time::Instant::now())
+                {
+                    terminal
+                        .output_processor
+                        .stop_sync(&mut *terminal.term.lock());
+                    terminal.snapshot_dirty = true;
+                    terminal.drain_parser_events(cx);
+                    cx.emit(Event::Wakeup);
+                    cx.notify();
+                }
+            });
+        });
+    }
+
+    fn drain_parser_events(&mut self, cx: &mut Context<Self>) {
+        while let Some(event) = self.parser_events.try_next() {
+            self.process_event(event, cx);
+        }
+    }
+
     fn process_pty_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         self.process_event(event, cx);
     }
@@ -1290,6 +1360,7 @@ impl Terminal {
     /// 本地那条路是「alacritty 事件循环把字节写进 term，只发一条 `Wakeup` 告诉我们重绘」；
     /// SSH 没有那层，所以**字节由本函数亲手写进 term**（顺手补一次重绘）。
     fn process_ssh_event(&mut self, event: SshEvent, cx: &mut Context<Self>) {
+        self.snapshot_dirty = true;
         match event {
             // 进度（连接中 / 认证中）：写成屏幕上的一行，原地刷新（不堆积）。
             // 建连可能要几秒，不写用户就只能干等。
@@ -1333,8 +1404,7 @@ impl Terminal {
                 self.register_task_finished(None, cx);
             }
         }
-        cx.emit(Event::Wakeup);
-        cx.notify();
+        self.drain_parser_events(cx);
     }
 
     /// 把远端字节**原样**喂给终端模拟器。
@@ -1382,10 +1452,14 @@ impl Terminal {
         if !pending.is_empty() {
             self.output_processor.advance(&mut *term, &pending);
         }
+        if self.output_processor.sync_timeout().sync_timeout().is_some_and(|deadline| deadline <= std::time::Instant::now()) {
+            self.output_processor.stop_sync(&mut *term);
+        }
         self.output_processor.advance(&mut *term, bytes);
     }
 
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
+        self.snapshot_dirty = true;
         match event {
             TerminalBackendEvent::Title(title) => {
                 // ignore default shell program title change as windows always sends those events
@@ -1703,11 +1777,13 @@ impl Terminal {
     }
 
     pub fn set_cursor_shape(&mut self, cursor_shape: CursorShape) {
+        self.snapshot_dirty = true;
         set_default_cursor_style(&mut self.term_config, cursor_shape);
         apply_config(&self.term, &self.term_config);
     }
 
     pub fn write_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.snapshot_dirty = true;
         // Inject bytes directly into the terminal emulator and refresh the UI.
         // This bypasses the PTY/event loop.
         //
@@ -2026,11 +2102,21 @@ impl Terminal {
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
         //Note that the ordering of events matters for event processing
+        self.snapshot_dirty |= !self.events.is_empty();
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
 
-        self.last_content = make_content(&terminal, &self.last_content);
+        if self.snapshot_dirty {
+            self.last_content = make_content(&terminal, &mut self.last_content);
+            self.snapshot_dirty = false;
+            self.content_generation = self.content_generation.wrapping_add(1);
+        }
+    }
+
+    /// Changes only when the render snapshot is rebuilt.
+    pub fn content_generation(&self) -> u64 {
+        self.content_generation
     }
 
     pub fn with_renderable_cells<R>(&self, f: impl for<'a> FnOnce(RenderableCells<'a>) -> R) -> R {
@@ -2553,7 +2639,7 @@ impl Terminal {
         let TerminalTarget::Ssh(params) = &self.template.target else {
             return false;
         };
-        let (sender, mut events) = unbounded::<SshEvent>();
+        let (sender, events) = unbounded::<SshEvent>();
         let Ok(session) = SshSession::connect(
             params.clone(),
             crate::backend::ssh_size_from_bounds(self.last_content.terminal_bounds),
@@ -2567,6 +2653,7 @@ impl Terminal {
         self.remote_cwd = None;
         self.osc7_seen = false;
         self.directory_scanner = DirectoryScanner::default();
+        self.sync_task = Task::ready(());
         self.output_processor = Processor::new();
         self.ssh_status_shown = false;
         self.child_exited = None;
@@ -2574,12 +2661,7 @@ impl Terminal {
         self.feed_remote_bytes(b"\r\n\x1b[0m");
         // Replacing the retained task cancels the previous event pump, so late events
         // from the old connection cannot affect this terminal after reconnecting.
-        self.event_loop_task = cx.spawn(async move |terminal, cx| {
-            while let Some(event) = events.next().await {
-                terminal.update(cx, |terminal, cx| terminal.process_ssh_event(event, cx))?;
-            }
-            anyhow::Ok(())
-        });
+        self.start_ssh_events(events, cx);
         cx.notify();
         true
     }

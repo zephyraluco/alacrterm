@@ -85,6 +85,10 @@ pub struct TerminalView {
     pub(crate) ime_state: Option<ImeState>,
     /// 光标闪烁相位。
     cursor_phase: bool,
+    focused: bool,
+    terminal_blinking: Option<bool>,
+    _blink_task: gpui::Task<()>,
+    grid_cache: std::cell::RefCell<terminal_element::GridCache>,
     /// 主机密钥确认的回调（仅远端会话有）。
     host_key_prompt: Option<HostKeyPromptHandler>,
 }
@@ -113,24 +117,44 @@ impl TerminalView {
         let focus_in = cx.on_focus_in(&focus_handle, window, |terminal_view, _window, cx| {
             terminal_view.focus_in(cx);
         });
-        let focus_out = cx.on_focus_out(&focus_handle, window, |terminal_view, _event, _window, cx| {
-            terminal_view.focus_out(cx);
-        });
+        let focus_out = cx.on_focus_out(
+            &focus_handle,
+            window,
+            |terminal_view, _event, _window, cx| {
+                terminal_view.focus_out(cx);
+            },
+        );
 
         // 光标闪烁定时器
-        cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        let blink_task = cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 loop {
                     cx.background_executor().timer(CURSOR_BLINK_INTERVAL).await;
-                    let _ = this.update(&mut cx, |this, cx| {
-                        this.cursor_phase = !this.cursor_phase;
-                        cx.notify();
-                    });
+                    if this
+                        .update(&mut cx, |this, cx| {
+                            if this.focused
+                                && this.settings.cursor_blinks
+                                && this.terminal_blinking != Some(false)
+                                && !this.exited
+                                && !this.terminal.as_ref().is_some_and(|term| {
+                                    term.read(cx)
+                                        .last_content()
+                                        .mode
+                                        .contains(Modes::ALT_SCREEN)
+                                })
+                            {
+                                this.cursor_phase = !this.cursor_phase;
+                                cx.notify();
+                            }
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
-        })
-        .detach();
+        });
 
         cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
@@ -185,6 +209,10 @@ impl TerminalView {
             title: "终端".into(),
             ime_state: None,
             cursor_phase: true,
+            focused: false,
+            terminal_blinking: None,
+            _blink_task: blink_task,
+            grid_cache: Default::default(),
             host_key_prompt: host_key,
         }
     }
@@ -197,6 +225,7 @@ impl TerminalView {
         if let Some(terminal) = &self.terminal {
             if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
                 self.exited = false;
+                self.terminal_blinking = None;
                 self.ime_state = None;
                 cx.notify();
             }
@@ -224,6 +253,8 @@ impl TerminalView {
 
     /// 焦点进入：设置默认光标形状并通知终端应用。
     fn focus_in(&mut self, cx: &mut gpui::Context<Self>) {
+        self.focused = true;
+        self.cursor_phase = true;
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.set_cursor_shape(self.settings.cursor_shape);
@@ -235,6 +266,7 @@ impl TerminalView {
 
     /// 焦点离开：通知终端应用（未聚焦时光标由渲染层显示为空心）。
     fn focus_out(&mut self, cx: &mut gpui::Context<Self>) {
+        self.focused = false;
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| terminal.focus_out());
         }
@@ -259,6 +291,11 @@ impl TerminalView {
                         self.title = title.into();
                     });
                 }
+                cx.notify();
+            }
+            TerminalEvent::BlinkChanged(blinking) => {
+                self.terminal_blinking = Some(*blinking);
+                self.cursor_phase = true;
                 cx.notify();
             }
             TerminalEvent::CloseTerminal => {
@@ -553,7 +590,7 @@ impl TerminalView {
             return true;
         }
 
-        match self.settings.cursor_blinks {
+        match self.settings.cursor_blinks && self.terminal_blinking != Some(false) {
             false => true,
             true => self.cursor_phase,
         }

@@ -342,6 +342,14 @@ impl russh::server::Handler for LocalServer {
                         session.close(channel)?;
                         return Ok(());
                     }
+                    if line.trim() == "protocol-probe" {
+                        session.data(channel, b"\x1b]2;RuntimeProbe\x07\x1b[6n\x1b[c\x1b]11;?\x07".to_vec())?;
+                        return Ok(());
+                    }
+                    if line.trim() == "sync-probe" {
+                        session.data(channel, b"\x1b[?2026hSYNC12345".to_vec())?;
+                        return Ok(());
+                    }
                     if line.trim() == "x11" {
                         self.probe_x11(channel, session);
                     }
