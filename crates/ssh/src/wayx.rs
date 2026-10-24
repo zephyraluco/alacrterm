@@ -19,7 +19,6 @@ use tokio::{
 pub(crate) struct Forwarder {
     display: u16,
     fake: [u8; 16],
-    real: [u8; 16],
     permits: Arc<Semaphore>,
     generation: u64,
     enabled: Arc<AtomicBool>,
@@ -343,20 +342,6 @@ fn runtime_dir() -> Result<PathBuf> {
     bail!("找不到 platform/{name}；请随应用分发 platform 目录或设置 WAYX_RUNTIME_DIR")
 }
 
-fn authority(display: u16, cookie: &[u8; 16]) -> Vec<u8> {
-    let mut bytes = 65535u16.to_be_bytes().to_vec(); // FamilyWild
-    for field in [
-        b"".as_slice(),
-        display.to_string().as_bytes(),
-        b"MIT-MAGIC-COOKIE-1",
-        cookie,
-    ] {
-        bytes.extend_from_slice(&(field.len() as u16).to_be_bytes());
-        bytes.extend_from_slice(field);
-    }
-    bytes
-}
-
 impl Wayx {
     fn spawn() -> Result<Self> {
         let runtime = runtime_dir()?;
@@ -396,24 +381,11 @@ impl Wayx {
             forwarder: Forwarder {
                 display,
                 fake: rand::random(),
-                real: rand::random(),
                 permits: Arc::new(Semaphore::new(64)),
                 generation: 0,
                 enabled: Arc::new(AtomicBool::new(true)),
             },
         };
-        let auth = server.directory.join("Xauthority");
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        std::io::Write::write_all(
-            &mut options.open(&auth)?,
-            &authority(display, &server.forwarder.real),
-        )?;
         let bin = runtime.join("bin");
         let mut command = Command::new(bin.join(if cfg!(windows) { "wayx.exe" } else { "wayx" }));
         #[cfg(windows)]
@@ -440,8 +412,7 @@ impl Wayx {
         #[cfg(windows)]
         command.args(["-listen", "tcp", "-nolisten", "local"]);
         command
-            .arg("-auth")
-            .arg(&auth)
+            .arg("-ac")
             .env("WAYX_XKB_DIR", runtime.join("share/X11/xkb"))
             .env("WAYX_XKB_BIN_DIR", &bin)
             .stdin(Stdio::null())
@@ -479,7 +450,6 @@ impl Forwarder {
         Self {
             display: 0,
             fake: rand::random(),
-            real: [0; 16],
             permits: Arc::new(Semaphore::new(64)),
             generation: 0,
             enabled: Arc::new(AtomicBool::new(true)),
@@ -506,9 +476,7 @@ impl Forwarder {
     async fn ready(&self) -> bool {
         let probe = async {
             let mut local = self.local().await?;
-            let mut setup = vec![b'l', 0, 11, 0, 0, 0, 18, 0, 16, 0, 0, 0];
-            setup.extend_from_slice(b"MIT-MAGIC-COOKIE-1\0\0");
-            setup.extend_from_slice(&self.real);
+            let setup = [b'l', 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0];
             local.write_all(&setup).await?;
             let mut response = [0; 8];
             local.read_exact(&mut response).await?;
@@ -542,7 +510,7 @@ impl Forwarder {
                 let mut remote = channel.into_stream();
                 let prefix = tokio::time::timeout(
                     Duration::from_secs(10),
-                    validated_setup(&mut remote, &fake, &forwarder.real),
+                    validated_setup(&mut remote, &fake),
                 )
                 .await??;
                 // Authentication must complete before opening any local X connection.
@@ -569,11 +537,7 @@ impl Forwarder {
 }
 
 // Adapted from zephyraluco/WayX src/ssh.rs (MIT, see docs/wayx-LICENSE).
-async fn validated_setup<R: AsyncRead + Unpin>(
-    stream: &mut R,
-    fake: &[u8; 16],
-    real: &[u8; 16],
-) -> Result<Vec<u8>> {
+async fn validated_setup<R: AsyncRead + Unpin>(stream: &mut R, fake: &[u8; 16]) -> Result<Vec<u8>> {
     let mut header = [0u8; 12];
     stream.read_exact(&mut header).await?;
     ensure!(matches!(header[0], b'l' | b'B'), "Invalid X11 byte order");
@@ -603,10 +567,10 @@ async fn validated_setup<R: AsyncRead + Unpin>(
         .zip(fake)
         .fold(0u8, |acc, (a, b)| acc | (a ^ b));
     ensure!(difference == 0, "Invalid X11 forwarding cookie");
-    body[20..].copy_from_slice(real);
-    let mut output = header.to_vec();
-    output.extend_from_slice(&body);
-    Ok(output)
+    // SSH authenticates each forwarded connection; the local WayX display uses -ac.
+    // Strip both authentication fields and their body, preserving byte order/version.
+    header[6..10].fill(0);
+    Ok(header.to_vec())
 }
 
 #[cfg(test)]
@@ -628,15 +592,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticates_both_byte_orders_and_replaces_only_cookie() {
+    async fn authenticates_both_byte_orders_and_strips_local_authentication() {
         for big in [false, true] {
             let packet = setup(big, &[7; 16]);
-            let result = validated_setup(&mut packet.as_slice(), &[7; 16], &[9; 16])
+            let result = validated_setup(&mut packet.as_slice(), &[7; 16])
                 .await
                 .unwrap();
-            assert_eq!(&result[..32], &packet[..32]);
-            assert_eq!(&result[32..], &[9; 16]);
+            assert_eq!(&result[..6], &packet[..6]);
+            assert_eq!(&result[6..], &[0; 6]);
+            assert_eq!(result.len(), 12);
         }
+    }
+
+    #[tokio::test]
+    async fn stripping_authentication_preserves_following_x11_requests() {
+        let mut packet = setup(false, &[7; 16]);
+        packet.extend_from_slice(&[127, 0, 1, 0]); // X11 NoOperation request.
+        let mut stream = packet.as_slice();
+        let header = validated_setup(&mut stream, &[7; 16]).await.unwrap();
+        assert_eq!(header, [b'l', 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(stream, &[127, 0, 1, 0]);
     }
 
     #[tokio::test]
@@ -662,21 +637,13 @@ mod tests {
             truncated,
         ] {
             assert!(
-                validated_setup(&mut packet.as_slice(), &[7; 16], &[9; 16])
+                validated_setup(&mut packet.as_slice(), &[7; 16])
                     .await
                     .is_err()
             );
         }
     }
 
-    #[test]
-    fn authority_encodes_display_and_mit_cookie() {
-        let bytes = authority(123, &[7; 16]);
-        assert_eq!(&bytes[..2], &65535u16.to_be_bytes());
-        assert_eq!(&bytes[4..9], b"\0\x03123");
-        assert_eq!(&bytes[11..29], b"MIT-MAGIC-COOKIE-1");
-        assert_eq!(&bytes[31..], &[7; 16]);
-    }
     #[test]
     fn shutdown_invalidates_pending_start_and_prevents_restart() {
         let service = WayxService::default();
@@ -697,6 +664,8 @@ mod tests {
         assert_eq!(service.status(), WayxStatus::Running);
         let first = service.current().unwrap();
         let directory = service.lock().server.as_ref().unwrap().directory.clone();
+        assert!(!directory.join("Xauthority").exists());
+        assert!(first.ready().await);
         service.stop(false);
         tokio::time::timeout(Duration::from_secs(5), async {
             while service.status() == WayxStatus::Stopping {
@@ -713,7 +682,7 @@ mod tests {
         assert_eq!(service.status(), WayxStatus::Starting);
         service.finish_start(next).await.unwrap();
         let second = service.current().unwrap();
-        assert!(first.real != second.real);
+        assert!(second.ready().await);
         assert_ne!(first.generation, second.generation);
         let directory = service.lock().server.as_ref().unwrap().directory.clone();
         service.stop(false);
