@@ -629,6 +629,7 @@ async fn connect(params: &SshParams) -> Result<SftpSession, SshError> {
         })?;
 
     let config = Arc::new(client::Config {
+        preferred: crate::compression::preferred(),
         nodelay: true,
         keepalive_interval: Some(KEEPALIVE),
         ..Default::default()

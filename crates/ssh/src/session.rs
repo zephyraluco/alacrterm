@@ -242,6 +242,7 @@ async fn run_session(
         })?;
 
     let config = Arc::new(client::Config {
+        preferred: crate::compression::preferred(),
         // 交互式终端:关掉 Nagle,否则每次敲键要等 40ms 的延迟确认,手感发黏。
         nodelay: true,
         // 空闲的 SSH 连接会被中间设备(路由器 / 防火墙)静默掐断,而且不会通知两端。

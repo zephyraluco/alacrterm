@@ -43,6 +43,7 @@
 //! 文本写回远端(见 [`SshFs::upload_one`])。它是**懒连接**:不用就不连。
 
 mod auth;
+mod compression;
 mod error;
 mod fs;
 mod handler;

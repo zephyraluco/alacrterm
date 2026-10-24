@@ -382,7 +382,18 @@ impl russh::server::Handler for LocalServer {
 ///
 /// 监听 `127.0.0.1:0`(端口交给系统分配),所以测试之间不会撞端口。
 pub async fn serve() -> std::io::Result<u16> {
+    serve_with_compression(russh::Preferred::default().compression).await
+}
+
+/// Restrict the server to selected algorithms to exercise real compression negotiation.
+pub async fn serve_with_compression(
+    compression: std::borrow::Cow<'static, [russh::compression::Name]>,
+) -> std::io::Result<u16> {
     let config = Arc::new(russh::server::Config {
+        preferred: russh::Preferred {
+            compression,
+            ..Default::default()
+        },
         // 认证失败后的等待:测试里要快,生产上防爆破。
         auth_rejection_time: Duration::from_millis(10),
         auth_rejection_time_initial: Some(Duration::from_millis(0)),

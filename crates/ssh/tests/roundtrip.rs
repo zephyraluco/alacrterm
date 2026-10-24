@@ -817,7 +817,9 @@ async fn shared_x11_server_survives_disconnecting_another_session() {
     tokio::time::timeout(Duration::from_secs(20), async {
         while ssh::wayx_status() != ssh::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(50)).await; }
     }).await.unwrap();
-    let port = local_server::serve().await.expect("local SSH server");
+    let port = local_server::serve_with_compression(vec![russh::compression::ZLIB_LEGACY].into())
+        .await
+        .expect("local SSH server with delayed compression");
     let known_hosts = temp_known_hosts("x11-forwarding");
     let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
     params.host_key = HostKeyPolicy::AcceptNew;
@@ -902,4 +904,43 @@ async fn rejects_x11_silently_and_preserves_interactive_shell() {
     assert_eq!(ssh::wayx_status(), ssh::WayxStatus::Stopped);
     session.disconnect();
     let _ = std::fs::remove_file(known_hosts);
+}
+
+/// A single offered algorithm forces negotiation to use it, rather than silently
+/// succeeding without compression. Exercise both directions and the SFTP connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compression_algorithms_round_trip_shell_and_sftp() {
+    use russh::compression::{NONE, ZLIB, ZLIB_LEGACY};
+    for (index, algorithm) in [ZLIB_LEGACY, ZLIB, NONE].into_iter().enumerate() {
+        let port = local_server::serve_with_compression(vec![algorithm].into())
+            .await
+            .unwrap();
+        let known_hosts = temp_known_hosts(&format!("compression-{index}"));
+        let (session, mut events) =
+            connect(port, known_hosts.clone(), SshSize::cells(80, 24)).await;
+        let (banner, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+            text.contains(PROMPT)
+        })
+        .await;
+        assert!(
+            banner.contains(BANNER),
+            "shell did not start with {algorithm:?}"
+        );
+        let payload = "compressible-data-".repeat(1024);
+        session.write(format!("{payload}\n").as_bytes());
+        let expected = format!("REPLY:{payload}");
+        let (reply, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+            text.contains(&expected)
+        })
+        .await;
+        assert!(
+            reply.contains(&expected),
+            "payload round trip failed with {algorithm:?}"
+        );
+        let fs = session.fs();
+        let home = fs.home_dir().await.unwrap();
+        fs.list_dir(home).await.unwrap();
+        session.disconnect();
+        let _ = std::fs::remove_file(known_hosts);
+    }
 }
