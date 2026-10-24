@@ -13,6 +13,7 @@ mod contrast;
 mod path_suggestions;
 mod scrollbar;
 mod suggestion_popup;
+mod command_specs;
 mod suggestions;
 pub mod terminal_element;
 

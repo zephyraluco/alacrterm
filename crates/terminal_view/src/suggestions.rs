@@ -12,6 +12,7 @@ pub(super) struct Suggestions {
     pending: Option<String>,
     pub candidates: Vec<String>,
     pub selected: usize,
+    pub descriptions: std::collections::HashMap<String, &'static str>,
     dismissed: bool,
     prompt_ready: bool,
 }
@@ -135,6 +136,7 @@ impl Suggestions {
     }
     pub fn refresh(&mut self, manual: bool) {
         self.candidates.clear();
+        self.descriptions.clear();
         self.selected = 0;
         if !self.active
             || self.dismissed
@@ -151,6 +153,19 @@ impl Suggestions {
                 .cloned(),
         );
         self.append_commands();
+        let command = self.text.split_whitespace().next().unwrap_or("");
+        if self
+            .commands
+            .binary_search_by(|name| name.as_str().cmp(command))
+            .is_ok()
+        {
+            for (candidate, description) in crate::command_specs::candidates(&self.text) {
+                self.descriptions.insert(candidate.clone(), description);
+                if self.candidates.len() < 8 && !self.candidates.contains(&candidate) {
+                    self.candidates.push(candidate);
+                }
+            }
+        }
     }
     fn append_commands(&mut self) {
         if self.text.chars().any(char::is_whitespace) {
@@ -205,6 +220,21 @@ mod tests {
         state.input(command);
         state.submit();
         state.phase(PromptEvent::Execute);
+    }
+    #[test]
+    fn command_specs_require_current_shell_inventory() {
+        let mut state = Suggestions::default();
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("git sta");
+        state.refresh(false);
+        assert!(state.candidates.is_empty());
+        state.add_command("git");
+        state.refresh(false);
+        assert_eq!(state.candidates, ["git status"]);
+        assert_eq!(state.descriptions.get("git status"), Some(&"查看工作区状态"));
+        assert_eq!(state.accept().as_deref(), Some("tus"));
+        assert!(state.active);
     }
     #[test]
     fn only_confirmed_commands_become_history_and_accept_never_submits() {

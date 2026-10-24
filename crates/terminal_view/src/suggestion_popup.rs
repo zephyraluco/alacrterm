@@ -29,7 +29,7 @@ impl TerminalView {
         if width < px(120.) {
             return None;
         }
-        let row_height = px(28.);
+        let row_height = px(46.);
         let height = row_height * (self.suggestions.candidates.len() + 1) as f32 + px(8.);
         let caret_y = bounds.line_height * content.cursor.point.line.max(0) as f32;
         let below = caret_y + bounds.line_height;
@@ -69,7 +69,15 @@ impl TerminalView {
                 .text_sm()
                 .overflow_hidden()
                 .cursor_pointer()
-                .child(command.clone());
+                .child(div().child(command.clone()));
+            if let Some(description) = self.suggestions.descriptions.get(command) {
+                row = row.child(
+                    div()
+                        .text_xs()
+                        .text_color(foreground.opacity(0.65))
+                        .child(*description),
+                );
+            }
             if selected {
                 row = row.bg(self.settings.selection_color);
             }
