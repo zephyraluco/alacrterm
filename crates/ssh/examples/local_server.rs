@@ -85,6 +85,7 @@ pub struct LocalServer {
     shell: Option<ChannelId>,
     x11_cookie: Option<[u8; 16]>,
     reject_x11: bool,
+    suggest_integration: bool,
 }
 
 impl LocalServer {
@@ -95,6 +96,7 @@ impl LocalServer {
             shell: None,
             x11_cookie: None,
             reject_x11: false,
+            suggest_integration: false,
         }
     }
 
@@ -342,6 +344,11 @@ impl russh::server::Handler for LocalServer {
                         session.close(channel)?;
                         return Ok(());
                     }
+                    if line.trim() == "suggestion-integration" {
+                        self.suggest_integration = true;
+                        session.data(channel, b"\x1b]633;D;0\x07\x1b]633;A\x07$ \x1b]633;B\x07".to_vec())?;
+                        return Ok(());
+                    }
                     if line.trim() == "scrollbar-probe" {
                         let output: String = (0..500).map(|line| format!("SCROLLROW{line:04}\r\n")).collect();
                         session.data(channel, output.into_bytes())?;
@@ -366,7 +373,11 @@ impl russh::server::Handler for LocalServer {
                     if line.trim() == "x11" {
                         self.probe_x11(channel, session);
                     }
-                    session.data(channel, format!("REPLY:{line}\r\n{PROMPT}").into_bytes())?;
+                    if self.suggest_integration {
+                        session.data(channel, format!("\x1b]633;C\x07REPLY:{line}\r\n\x1b]633;D;0\x07\x1b]633;A\x07{PROMPT}\x1b]633;B\x07").into_bytes())?;
+                    } else {
+                        session.data(channel, format!("REPLY:{line}\r\n{PROMPT}").into_bytes())?;
+                    }
                 }
                 // 退格:只回显(玩具 shell 不做真正的行编辑)。
                 '\u{7f}' | '\u{8}' => {}

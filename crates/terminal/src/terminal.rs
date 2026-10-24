@@ -2,6 +2,10 @@ mod mappings;
 
 mod alacritty;
 mod backend;
+mod integration;
+mod observed_pty;
+mod prompt;
+pub use prompt::PromptEvent;
 mod parser_events;
 mod pty_info;
 mod shell_integration;
@@ -636,6 +640,7 @@ pub fn insert_zed_terminal_env(env: &mut HashMap<String, String>) {
 ///Upward flowing events, for changing the title and such
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    Prompt(PromptEvent),
     TitleChanged,
     BreadcrumbsChanged,
     CloseTerminal,
@@ -697,6 +702,7 @@ type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send 
 
 #[derive(Clone)]
 pub(crate) enum TerminalBackendEvent {
+    Prompt(PromptEvent),
     MouseCursorDirty,
     Title(String),
     ResetTitle,
@@ -728,6 +734,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Bell => f.write_str("Bell"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
+            Self::Prompt(event) => write!(f, "Prompt({event:?})"),
         }
     }
 }
@@ -996,12 +1003,19 @@ impl TerminalBuilder {
                     // supported remoting into windows.
                     let shell_kind = shell.shell_kind(cfg!(windows));
 
-                    let alacritty_shell = shell_params.as_ref().map(|params| {
+                    let mut alacritty_shell = shell_params.as_ref().map(|params| {
                         (
                             params.program.clone(),
                             params.args.clone().unwrap_or_default(),
                         )
                     });
+                    let program = alacritty_shell.as_ref().map(|(program, _)| program.clone()).unwrap_or_else(|| shell.program());
+                    let args = alacritty_shell.as_ref().map(|(_, args)| args.as_slice()).unwrap_or(&[]);
+                    let integration_files = match integration::prepare(&program, args, &mut env) {
+                        Ok(Some((args, files))) => { alacritty_shell = Some((program, args)); Some(files) }
+                        Ok(None) => None,
+                        Err(error) => { log::debug!("Shell integration: {error:#}"); None }
+                    };
                     let pty_options = pty_options(
                         alacritty_shell,
                         working_directory.clone(),
@@ -1036,6 +1050,7 @@ impl TerminalBuilder {
                         events_tx.clone(),
                         pty,
                         pty_options.drain_on_exit,
+                        integration_files,
                     )?;
 
                     (
@@ -1053,12 +1068,14 @@ impl TerminalBuilder {
             let parser_events = parser_events::ParserEvents::new(events_rx);
             let terminal = Terminal {
                 parser_events: parser_events.clone(),
+                parser_events_sender: events_tx.clone(),
                 backend,
                 ssh_events,
                 ssh_pending: None,
                 remote_cwd: None,
                 osc7_seen: false,
                 directory_scanner: DirectoryScanner::default(),
+                prompt_scanner: Default::default(),
                 resized_once: false,
                 ssh_status_shown: false,
                 // 本地：PTY 建好就算可用；远端：等 `SshEvent::Connected`（见 `is_connected`）。
@@ -1200,6 +1217,7 @@ pub struct Terminal {
     /// 谁在搬字节：本地 PTY 或远端 SSH（见 [`backend`]）。
     backend: TerminalBackend,
     parser_events: parser_events::ParserEvents,
+    parser_events_sender: futures::channel::mpsc::UnboundedSender<TerminalBackendEvent>,
     /// SSH 事件流（**只**在 SSH 后端下为 `Some`），[`Terminal::subscribe`] 会把它取走并
     /// 起一个任务把远端字节喂进模拟器 —— 本地 PTY 那条由 alacritty 事件循环代劳。
     ssh_events: Option<UnboundedReceiver<SshEvent>>,
@@ -1217,6 +1235,7 @@ pub struct Terminal {
     osc7_seen: bool,
     /// OSC 扫描器（跨块状态，见 [`crate::shell_integration::DirectoryScanner`]）。
     directory_scanner: DirectoryScanner,
+    prompt_scanner: prompt::PromptScanner,
     /// 是否已经按真实尺寸重排过一次（见 [`Terminal::feed_remote_bytes`]）。
     resized_once: bool,
     /// 屏幕上是否正摆着一行 SSH 进度（远端一开口就擦掉，见 [`Terminal::process_ssh_event`]）。
@@ -1424,6 +1443,9 @@ impl Terminal {
     /// （[`crate::shell_integration`] 里解释了为什么模拟器那条路不行）。
     /// 攒着不写的那一段同样要扫 —— 远端第一条上报往往就在里面。
     fn feed_remote_bytes(&mut self, bytes: &[u8]) {
+        for event in self.prompt_scanner.feed(bytes) {
+            let _ = self.parser_events_sender.unbounded_send(TerminalBackendEvent::Prompt(event));
+        }
         if bytes.is_empty() {
             return;
         }
@@ -1463,6 +1485,7 @@ impl Terminal {
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         self.snapshot_dirty = true;
         match event {
+            TerminalBackendEvent::Prompt(event) => cx.emit(Event::Prompt(event)),
             TerminalBackendEvent::Title(title) => {
                 // ignore default shell program title change as windows always sends those events
                 // and it would end up showing the shell executable path in breadcrumbs
@@ -2679,6 +2702,7 @@ impl Terminal {
         self.remote_cwd = None;
         self.osc7_seen = false;
         self.directory_scanner = DirectoryScanner::default();
+        self.prompt_scanner = Default::default();
         self.sync_task = Task::ready(());
         self.output_processor = Processor::new();
         self.ssh_status_shown = false;

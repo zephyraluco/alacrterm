@@ -174,7 +174,9 @@ pub(super) fn spawn_event_loop(
     events_tx: UnboundedSender<TerminalBackendEvent>,
     pty: AlacrittyPty,
     drain_on_exit: bool,
+    integration: Option<tempfile::TempDir>,
 ) -> Result<PtySender> {
+    let pty = crate::observed_pty::ObservedPty::new(pty, events_tx.clone(), integration);
     let event_loop = EventLoop::new(term, ZedListener(events_tx), pty, drain_on_exit, false)
         .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();

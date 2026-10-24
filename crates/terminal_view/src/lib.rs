@@ -11,6 +11,8 @@
 
 mod contrast;
 mod scrollbar;
+mod suggestions;
+mod suggestion_popup;
 pub mod terminal_element;
 
 use std::{
@@ -88,6 +90,8 @@ pub struct TerminalView {
     cursor_phase: bool,
     focused: bool,
     terminal_blinking: Option<bool>,
+    suggestions: suggestions::Suggestions,
+    suggestion_task: gpui::Task<()>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
     scrollbar_target: std::rc::Rc<std::cell::Cell<Option<usize>>>,
@@ -213,6 +217,8 @@ impl TerminalView {
             cursor_phase: true,
             focused: false,
             terminal_blinking: None,
+            suggestions: Default::default(),
+            suggestion_task: gpui::Task::ready(()),
             _blink_task: blink_task,
             grid_cache: Default::default(),
             scrollbar_target: Default::default(),
@@ -228,6 +234,7 @@ impl TerminalView {
         if let Some(terminal) = &self.terminal {
             if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
                 self.exited = false;
+                self.suggestions.invalidate();
                 self.terminal_blinking = None;
                 self.ime_state = None;
                 cx.notify();
@@ -270,18 +277,19 @@ impl TerminalView {
     /// 焦点离开：通知终端应用（未聚焦时光标由渲染层显示为空心）。
     fn focus_out(&mut self, cx: &mut gpui::Context<Self>) {
         self.focused = false;
+        self.suggestions.dismiss();
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| terminal.focus_out());
         }
         cx.notify();
     }
 
-    fn handle_terminal_event(
-        &mut self,
-        event: &TerminalEvent,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    fn handle_terminal_event(&mut self, event: &TerminalEvent, cx: &mut gpui::Context<Self>) {
         match event {
+            TerminalEvent::Prompt(event) => {
+                self.suggestions.phase(*event);
+                cx.notify();
+            }
             TerminalEvent::Wakeup | TerminalEvent::SelectionsChanged => cx.notify(),
             TerminalEvent::TitleChanged | TerminalEvent::BreadcrumbsChanged => {
                 if let Some(terminal) = &self.terminal {
@@ -310,6 +318,7 @@ impl TerminalView {
                 // 已断开，用户自行关闭或新建）。终端网格会保留最后的输出，
                 // 这样 ssh 报的断开原因不会被丢掉。
                 self.exited = true;
+                self.suggestions.invalidate();
                 cx.notify();
             }
             TerminalEvent::HostKeyPrompt(prompt) => {
@@ -337,6 +346,7 @@ impl TerminalView {
         if text.is_empty() {
             return self.clear_marked_text(cx);
         }
+        self.suggestions.dismiss();
         self.ime_state = Some(ImeState { marked_text: text });
         cx.notify();
     }
@@ -359,6 +369,19 @@ impl TerminalView {
     /// 把输入法/普通字符输入写入 PTY。
     pub(crate) fn commit_text(&mut self, text: &str, cx: &mut gpui::Context<Self>) {
         if !text.is_empty() {
+            if self.terminal.as_ref().is_some_and(|terminal| {
+                let terminal = terminal.read(cx);
+                terminal.vi_mode_enabled()
+                    || terminal.last_content().display_offset != 0
+                    || terminal
+                        .last_content()
+                        .mode
+                        .intersects(Modes::ALT_SCREEN | Modes::MOUSE_MODE)
+            }) {
+                self.suggestions.invalidate();
+            }
+            self.suggestions.input(text);
+            self.schedule_suggestions(cx);
             if let Some(terminal) = &self.terminal {
                 terminal.update(cx, |term, _| {
                     term.input(text.to_string().into_bytes());
@@ -396,6 +419,7 @@ impl TerminalView {
 
     /// 粘贴剪贴板内容（`Ctrl+Shift+V`）。
     pub fn paste_text(&mut self, cx: &mut gpui::Context<Self>) {
+        self.suggestions.invalidate();
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
@@ -463,7 +487,97 @@ impl TerminalView {
         self.scroll_action(cx, b"\x1b[1;2B", |terminal| terminal.scroll_line_down());
     }
 
-    fn on_key_down(&mut self, e: &KeyDownEvent, _window: &mut Window, cx: &mut gpui::Context<Self>) {
+    fn schedule_suggestions(&mut self, cx: &mut gpui::Context<Self>) {
+        self.suggestions.candidates.clear();
+        self.suggestion_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.focused && this.ime_state.is_none() {
+                    this.suggestions.refresh(false);
+                    cx.notify();
+                }
+            });
+        });
+    }
+
+    fn accept_suggestion(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(suffix) = self.suggestions.accept() {
+            if let Some(terminal) = &self.terminal {
+                terminal.update(cx, |terminal, _| terminal.input(suffix.into_bytes()));
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_key_down(
+        &mut self,
+        e: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.ime_state.is_some() {
+            return;
+        }
+        let key = e.keystroke.key.as_str();
+        let control = e.keystroke.modifiers.control;
+        let plain = !control && !e.keystroke.modifiers.alt && !e.keystroke.modifiers.platform;
+        let allowed = self.ime_state.is_none()
+            && self.terminal.as_ref().is_some_and(|terminal| {
+                let terminal = terminal.read(cx);
+                !terminal.vi_mode_enabled()
+                    && terminal.last_content().display_offset == 0
+                    && !terminal
+                        .last_content()
+                        .mode
+                        .intersects(Modes::ALT_SCREEN | Modes::MOUSE_MODE)
+            });
+        if !allowed {
+            self.suggestions.invalidate();
+        }
+        if allowed
+            && key == "space"
+            && control
+            && !e.keystroke.modifiers.alt
+            && !e.keystroke.modifiers.platform
+        {
+            self.suggestion_task = gpui::Task::ready(());
+            self.suggestions.trigger();
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if allowed && !self.suggestions.candidates.is_empty() && plain {
+            match key {
+                "up" | "down" => {
+                    self.suggestions.step(if key == "up" { -1 } else { 1 });
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                "tab" if !e.keystroke.modifiers.shift => {
+                    self.accept_suggestion(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "escape" => {
+                    self.suggestions.dismiss();
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let printable =
+            plain && (e.keystroke.key_char.is_some() || key.chars().count() == 1 || key == "space");
+        if key == "enter" && plain {
+            self.suggestions.submit();
+        } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
+            self.suggestions.edit_key(key, control);
+            self.schedule_suggestions(cx);
+        }
         if let Some(terminal) = &self.terminal {
             // ⚠️ 复制粘贴 / 滚动 / vi 模式不在这里：那些键由 keymap 绑成应用动作
             // （`Terminal` context），动作优先于 key listener ⇒ 根本走不到这里。
@@ -479,8 +593,9 @@ impl TerminalView {
                 return;
             }
 
-            let handled =
-                terminal.update(cx, |terminal, _cx| terminal.try_keystroke(&e.keystroke, false));
+            let handled = terminal.update(cx, |terminal, _cx| {
+                terminal.try_keystroke(&e.keystroke, false)
+            });
             if handled {
                 cx.stop_propagation();
             }
@@ -614,6 +729,7 @@ impl Render for TerminalView {
             });
         }
         let focused = self.focus_handle.is_focused(window);
+        self.focused = focused;
         let cursor_visible = self.should_show_cursor(focused, cx);
 
         let mut root = div()
@@ -692,6 +808,10 @@ impl Render for TerminalView {
                         ),
                 );
             }
+        }
+
+        if let Some(popup) = self.render_suggestions(cx) {
+            root = root.child(popup);
         }
 
         if self.remote && self.exited {

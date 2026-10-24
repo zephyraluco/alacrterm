@@ -1,0 +1,81 @@
+//! Bounded OSC 133/633 shell lifecycle scanner, shared by PTY and SSH output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptEvent {
+    Prompt,
+    Input,
+    Execute,
+    Finished,
+}
+#[derive(Default)]
+pub(crate) struct PromptScanner {
+    state: u8,
+    payload: Vec<u8>,
+}
+impl PromptScanner {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<PromptEvent> {
+        let mut events = Vec::new();
+        for &byte in bytes {
+            match (self.state, byte) {
+                (0, 27) => self.state = 1,
+                (1, b']') => {
+                    self.payload.clear();
+                    self.state = 2;
+                }
+                (1, _) => self.state = 0,
+                (2, 7) | (3, b'\\') => {
+                    if let Some(event) = self.event() {
+                        events.push(event);
+                    }
+                    self.payload.clear();
+                    self.state = 0;
+                }
+                (2, 27) => self.state = 3,
+                (2, _) if self.payload.len() < 4096 => self.payload.push(byte),
+                (2, _) => {
+                    self.payload.clear();
+                    self.state = 4;
+                }
+                (3, _) => {
+                    self.payload.clear();
+                    self.state = 0;
+                }
+                (4, 7) => self.state = 0,
+                (4, 27) => self.state = 5,
+                (5, b'\\') => self.state = 0,
+                (5, _) => self.state = 4,
+                _ => {}
+            }
+        }
+        events
+    }
+    fn event(&self) -> Option<PromptEvent> {
+        let mut fields = self.payload.split(|byte| *byte == b';');
+        if !matches!(fields.next()?, b"633" | b"133") {
+            return None;
+        }
+        match fields.next()? {
+            b"A" => Some(PromptEvent::Prompt),
+            b"B" => Some(PromptEvent::Input),
+            b"C" => Some(PromptEvent::Execute),
+            b"D" => Some(PromptEvent::Finished),
+            _ => None,
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fragmented_markers_ignore_other_osc_and_recover_from_oversize() {
+        let mut scanner = PromptScanner::default();
+        assert!(scanner.feed(b"\x1b]633;").is_empty());
+        assert_eq!(
+            scanner.feed(b"B\x1b\\\x1b]2;title\x07\x1b]133;C\x07"),
+            [PromptEvent::Input, PromptEvent::Execute]
+        );
+        let mut oversized = b"\x1b]633;".to_vec();
+        oversized.extend(vec![b'A'; 5000]);
+        oversized.extend_from_slice(b"\x07\x1b]633;D;0\x07");
+        assert_eq!(scanner.feed(&oversized), [PromptEvent::Finished]);
+    }
+}
