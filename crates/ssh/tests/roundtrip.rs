@@ -137,7 +137,8 @@ async fn collect_failure_answering(
     {
         match event {
             SshEvent::Closed {
-                reason: Some(reason), ..
+                reason: Some(reason),
+                ..
             } => return reason,
             SshEvent::HostKeyPrompt(prompt) => match answer {
                 Some(decision) => prompt.respond(decision),
@@ -175,7 +176,10 @@ async fn connects_authenticates_and_round_trips_bytes() {
         text.contains("REPLY:hello from client")
     })
     .await;
-    assert!(text.contains("REPLY:hello from client"), "回执没回来:{text:?}");
+    assert!(
+        text.contains("REPLY:hello from client"),
+        "回执没回来:{text:?}"
+    );
 
     // resize 也要到远端。
     session.resize(SshSize::cells(120, 40));
@@ -209,7 +213,8 @@ async fn trusts_a_recorded_host_on_the_second_connection() {
     let known_hosts = temp_known_hosts("tofu");
 
     for _ in 0..2 {
-        let (session, mut events) = connect(port, known_hosts.clone(), SshSize::cells(80, 24)).await;
+        let (session, mut events) =
+            connect(port, known_hosts.clone(), SshSize::cells(80, 24)).await;
         let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
             text.contains(BANNER)
         })
@@ -466,9 +471,7 @@ async fn filesystem_uploads_a_directory_recursively() {
 
     // 远端那两层的文件都在,内容也对(远端就是本机,所以这里的断言是真的在查「远端」)。
     for (relative, expected) in [("a.txt", "top level"), ("nested/b.txt", "nested level")] {
-        let remote = remote_root_path
-            .join("alacrterm-upload-src")
-            .join(relative);
+        let remote = remote_root_path.join("alacrterm-upload-src").join(relative);
         let meta = fs
             .stat(remote.to_string_lossy().to_string())
             .await
@@ -534,11 +537,7 @@ async fn filesystem_writes_back_a_single_file() {
         "远端内容应当是写回的那一份"
     );
     let meta = fs.stat(remote.clone()).await.expect("取远端元数据");
-    assert_eq!(
-        meta.size,
-        edited.len() as u64,
-        "远端大小应当是写回后的大小"
-    );
+    assert_eq!(meta.size, edited.len() as u64, "远端大小应当是写回后的大小");
 
     // 目标目录不存在时要给一句可读的失败,而不是静默成功。
     let missing = format!(
@@ -589,13 +588,7 @@ async fn filesystem_creates_renames_and_removes() {
 
     let root = temp_dir("fs-edit-work");
     // 服务端那边的路径用 `/` 分隔(它只把绝对路径原样交给 std::fs,Windows 也吃得下 `/`)。
-    let at = |name: &str| {
-        format!(
-            "{}/{}",
-            root.to_string_lossy().replace('\\', "/"),
-            name
-        )
-    };
+    let at = |name: &str| format!("{}/{}", root.to_string_lossy().replace('\\', "/"), name);
 
     // ---- 新建文件夹 ----
     let dir = at("logs");
@@ -631,10 +624,7 @@ async fn filesystem_creates_renames_and_removes() {
         fs.stat(renamed.clone()).await.is_ok(),
         "改名之后新名字应当存在"
     );
-    assert!(
-        fs.stat(file).await.is_err(),
-        "改名之后旧名字不该还在"
-    );
+    assert!(fs.stat(file).await.is_err(), "改名之后旧名字不该还在");
 
     // ---- 删除一个文件 ----
     let mut remove_file = fs.remove(renamed.clone(), false);
@@ -765,10 +755,7 @@ async fn filesystem_reports_when_it_has_no_prompt_channel() {
         Ok(home) => panic!("未知主机不该连上,却拿到家目录 {home:?}"),
         Err(error) => error.to_string(),
     };
-    assert!(
-        error.contains("确认通道"),
-        "应当提示没有确认通道:{error:?}"
-    );
+    assert!(error.contains("确认通道"), "应当提示没有确认通道:{error:?}");
     let _ = std::fs::remove_file(&known_hosts);
 }
 
@@ -813,4 +800,147 @@ async fn unreachable_host_reports_the_address() {
         reason.contains(&format!("127.0.0.1:{port}")),
         "失败原因应当带上地址:{reason:?}"
     );
+}
+
+/// Concurrent SSH sessions share WayX, and closing one must not disrupt the other.
+#[tokio::test]
+#[ignore = "requires a host display and bundled WayX runtime"]
+async fn shared_x11_server_survives_disconnecting_another_session() {
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            ssh::shutdown_wayx();
+        }
+    }
+    let _cleanup = Cleanup;
+    ssh::start_wayx();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while ssh::wayx_status() != ssh::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(50)).await; }
+    }).await.unwrap();
+    let port = local_server::serve_with_compression(vec![russh::compression::ZLIB_LEGACY].into())
+        .await
+        .expect("local SSH server with delayed compression");
+    let known_hosts = temp_known_hosts("x11-forwarding");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let (tx, mut events) = futures::channel::mpsc::unbounded();
+    let first = SshSession::connect(params.clone(), SshSize::cells(80, 24), tx).unwrap();
+    let (tx, mut other_events) = futures::channel::mpsc::unbounded();
+    let second = SshSession::connect(params, SshSize::cells(80, 24), tx).unwrap();
+    let text = collect_until(&mut events, Duration::from_secs(25), None, |text, _| {
+        text.contains("X11:OK") || text.contains("X11:FAILED")
+    })
+    .await;
+    assert!(text.0.contains("X11:OK"), "{text:?}");
+    let text = collect_until(
+        &mut other_events,
+        Duration::from_secs(25),
+        None,
+        |text, _| text.contains("X11:OK") || text.contains("X11:FAILED"),
+    )
+    .await;
+    assert!(text.0.contains("X11:OK"), "{text:?}");
+    first.write(b"exit\r");
+    let (_, exit) = collect_until(&mut events, Duration::from_secs(5), None, |_, _| false).await;
+    assert_eq!(exit, Some(EXIT_CODE));
+    drop(first);
+    second.write(b"x11\r");
+    let text = collect_until(
+        &mut other_events,
+        Duration::from_secs(5),
+        None,
+        |text, _| text.contains("X11:OK") || text.contains("X11:FAILED"),
+    )
+    .await;
+    assert!(text.0.contains("X11:OK"), "{text:?}");
+    ssh::stop_wayx();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while ssh::wayx_status() != ssh::WayxStatus::Stopped { tokio::time::sleep(Duration::from_millis(20)).await; }
+    }).await.unwrap();
+    second.write(b"still-connected\r");
+    let (text, _) = collect_until(&mut other_events, Duration::from_secs(5), None, |text, _| text.contains("REPLY:still-connected")).await;
+    assert!(text.contains("REPLY:still-connected"));
+    ssh::start_wayx();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while ssh::wayx_status() != ssh::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(20)).await; }
+    }).await.unwrap();
+    second.write(b"x11\r");
+    let (text, _) = collect_until(&mut other_events, Duration::from_secs(5), None, |text, _| text.contains("X11:OK") || text.contains("X11:FAILED")).await;
+    assert!(text.contains("X11:OK"), "{text}");
+    second.write(b"exit\r");
+    let (_, exit) = collect_until(&mut other_events, Duration::from_secs(5), None, |_, _| {
+        false
+    })
+    .await;
+    assert_eq!(exit, Some(EXIT_CODE));
+    drop(second);
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+
+#[tokio::test]
+async fn rejects_x11_silently_and_preserves_interactive_shell() {
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("x11-refusal");
+    let mut params = SshParams::new("127.0.0.1", port, "no-x11").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let (tx, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect(params, SshSize::cells(80, 24), tx).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = events.next().await {
+            match event {
+                SshEvent::Status(text) => assert!(!text.contains("X11") && !text.contains("WayX")),
+                SshEvent::Connected => break,
+                SshEvent::Closed { reason, .. } => panic!("shell closed: {reason:?}"),
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    session.write(b"fallback-ok\r");
+    let (text, _) = collect_until(&mut events, Duration::from_secs(5), None, |text, _| text.contains("REPLY:fallback-ok")).await;
+    assert!(text.contains("REPLY:fallback-ok"));
+    assert_eq!(ssh::wayx_status(), ssh::WayxStatus::Stopped);
+    session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+/// A single offered algorithm forces negotiation to use it, rather than silently
+/// succeeding without compression. Exercise both directions and the SFTP connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compression_algorithms_round_trip_shell_and_sftp() {
+    use russh::compression::{NONE, ZLIB, ZLIB_LEGACY};
+    for (index, algorithm) in [ZLIB_LEGACY, ZLIB, NONE].into_iter().enumerate() {
+        let port = local_server::serve_with_compression(vec![algorithm].into())
+            .await
+            .unwrap();
+        let known_hosts = temp_known_hosts(&format!("compression-{index}"));
+        let (session, mut events) =
+            connect(port, known_hosts.clone(), SshSize::cells(80, 24)).await;
+        let (banner, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+            text.contains(PROMPT)
+        })
+        .await;
+        assert!(
+            banner.contains(BANNER),
+            "shell did not start with {algorithm:?}"
+        );
+        let payload = "compressible-data-".repeat(1024);
+        session.write(format!("{payload}\n").as_bytes());
+        let expected = format!("REPLY:{payload}");
+        let (reply, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+            text.contains(&expected)
+        })
+        .await;
+        assert!(
+            reply.contains(&expected),
+            "payload round trip failed with {algorithm:?}"
+        );
+        let fs = session.fs();
+        let home = fs.home_dir().await.unwrap();
+        fs.list_dir(home).await.unwrap();
+        session.disconnect();
+        let _ = std::fs::remove_file(known_hosts);
+    }
 }

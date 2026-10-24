@@ -13,8 +13,8 @@ use gpui_kit::component::{
     v_flex,
 };
 
-use crate::sidebar_panel::sessions::{SessionPath, SessionRecord};
 use crate::AppRoot;
+use crate::sidebar_panel::sessions::{SessionPath, SessionRecord};
 
 const DEFAULT_SSH_PORT: u16 = 22;
 
@@ -45,6 +45,20 @@ impl ConnectionForm {
         }
     }
 
+    fn from_record(record: &SessionRecord, window: &mut Window, cx: &mut Context<AppRoot>) -> Self {
+        let form = Self::new(window, cx);
+        for (input, value) in [
+            (&form.host, record.host.clone()),
+            (&form.port, record.port.to_string()),
+            (&form.name, record.name.to_string()),
+            (&form.user, record.user.clone()),
+            (&form.password, record.password.clone().unwrap_or_default()),
+        ] {
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+        form
+    }
+
     /// 去掉首尾空白的输入值。
     fn trimmed(&self, input: &Entity<InputState>, cx: &App) -> String {
         input.read(cx).value().trim().to_string()
@@ -72,7 +86,7 @@ impl ConnectionForm {
         if !self.is_valid(cx) {
             return None;
         }
-        let password = self.trimmed(&self.password, cx);
+        let password = self.password.read(cx).value().to_string();
         Some(SessionRecord {
             id: 0,
             name: SharedString::from(self.trimmed(&self.name, cx)),
@@ -154,6 +168,46 @@ fn field_label(text: &'static str, cx: &App) -> AnyElement {
 }
 
 impl AppRoot {
+    pub(crate) fn open_edit_session_dialog(
+        &mut self,
+        path: &[usize],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(record) = self.sessions.read(cx).record(path) else {
+            return;
+        };
+        let id = record.id;
+        let form = ConnectionForm::from_record(&record, window, cx);
+        let sessions = self.sessions.clone();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let form_for_ok = form.clone();
+            let sessions_for_ok = sessions.clone();
+            dialog
+                .title("编辑会话")
+                .w(px(420.))
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().child(Button::new("cancel").label("取消")))
+                        .child(
+                            DialogAction::new().child(
+                                Button::new("confirm")
+                                    .label("保存")
+                                    .primary()
+                                    .disabled(!form.is_valid(cx)),
+                            ),
+                        ),
+                )
+                .on_ok(move |_, _, cx| {
+                    let Some(record) = form_for_ok.build(cx) else {
+                        return false;
+                    };
+                    sessions_for_ok.update(cx, |state, cx| state.update_record(id, record, cx))
+                })
+                .child(form.render_fields(cx))
+        });
+    }
+
     /// 弹出「新建会话」对话框。
     pub(crate) fn open_new_session_dialog(
         &mut self,
@@ -172,12 +226,14 @@ impl AppRoot {
 
             let footer = DialogFooter::new()
                 .child(DialogClose::new().child(Button::new("cancel").label("取消")))
-                .child(DialogAction::new().child(
-                    Button::new("confirm")
-                        .label("添加")
-                        .primary()
-                        .disabled(!valid),
-                ));
+                .child(
+                    DialogAction::new().child(
+                        Button::new("confirm")
+                            .label("添加")
+                            .primary()
+                            .disabled(!valid),
+                    ),
+                );
 
             dialog
                 .title("新建会话")

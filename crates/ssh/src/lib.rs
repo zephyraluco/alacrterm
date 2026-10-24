@@ -43,11 +43,13 @@
 //! 文本写回远端(见 [`SshFs::upload_one`])。它是**懒连接**:不用就不连。
 
 mod auth;
+mod compression;
 mod error;
 mod fs;
 mod handler;
 mod params;
 mod session;
+mod wayx;
 
 pub use error::SshError;
 pub use fs::{
@@ -57,3 +59,5 @@ pub use fs::{
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
 pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize};
 pub use session::{SshEvent, SshSession};
+
+pub use wayx::{WayxStatus, start_wayx, stop_wayx, wayx_status, shutdown_wayx};

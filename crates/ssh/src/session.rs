@@ -231,6 +231,7 @@ async fn run_session(
     sink: &EventSink,
     commands: &mut UnboundedReceiver<Command>,
 ) -> Result<Option<u32>, SshError> {
+    let x11 = crate::wayx::Forwarder::session();
     sink.status(format!("正在连接 {} …", params.endpoint()));
     let socket = tokio::net::TcpStream::connect((params.host.as_str(), params.port))
         .await
@@ -241,6 +242,7 @@ async fn run_session(
         })?;
 
     let config = Arc::new(client::Config {
+        preferred: crate::compression::preferred(),
         // 交互式终端:关掉 Nagle,否则每次敲键要等 40ms 的延迟确认,手感发黏。
         nodelay: true,
         // 空闲的 SSH 连接会被中间设备(路由器 / 防火墙)静默掐断,而且不会通知两端。
@@ -248,7 +250,7 @@ async fn run_session(
         keepalive_interval: Some(Duration::from_secs(30)),
         ..Default::default()
     });
-    let handler = ClientHandler::new(
+    let mut handler = ClientHandler::new(
         params.user.clone(),
         params.host.clone(),
         params.port,
@@ -257,14 +259,38 @@ async fn run_session(
         // 终端会话这条路有人可问(界面弹窗);没人的情况见 `HostKeyPolicy::Ask`。
         Some(sink.clone()),
     );
+    handler.x11 = Some(x11.clone());
     let mut handle = client::connect_stream(config, socket, handler).await?;
 
     auth::authenticate(&mut handle, params, sink).await?;
 
-    let channel = handle
+    let mut channel = handle
         .channel_open_session()
         .await
         .map_err(|error| SshError::ChannelOpen(error.to_string()))?;
+    // Declining X11 must not prevent a normal SSH terminal from opening.
+    let accepted = if channel
+        .request_x11(true, false, "MIT-MAGIC-COOKIE-1", x11.cookie_hex(), 0)
+        .await
+        .is_ok()
+    {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Success) => return true,
+                    Some(ChannelMsg::Failure | ChannelMsg::Close) | None => return false,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    if !accepted {
+        x11.disable();
+    }
     let interactive = match launch {
         Launch::Shell(size) => {
             let size = size.sanitized();
@@ -343,8 +369,6 @@ async fn run_session(
     }
 
     // 礼貌地告别:服务端据此清理 shell 与 PTY,不等 TCP 超时。
-    let _ = handle
-        .disconnect(Disconnect::ByApplication, "", "en")
-        .await;
+    let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
     Ok(exit_status)
 }

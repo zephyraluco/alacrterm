@@ -22,6 +22,7 @@ mod tab_bar;
 mod terminal_panel;
 mod transfer_manager;
 mod welcome;
+mod wayx_control;
 
 use components::ACTIVITY_BAR_WIDTH;
 use gpui::{
@@ -126,6 +127,11 @@ fn main() {
         .with_assets(assets::Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
+            cx.on_app_quit(|_| {
+                terminal::shutdown_wayx();
+                async {}
+            })
+            .detach();
             gpui_kit::init(cx);
             config::install(cx);
             config::load_themes(cx);
@@ -157,6 +163,7 @@ fn main() {
             )
             .expect("failed to open window");
         });
+    terminal::shutdown_wayx();
 }
 
 /// 应用根视图（只存共享状态）。
@@ -190,6 +197,8 @@ struct AppRoot {
     last_context: Option<ActiveContext>,
     /// 已经安排了一次延后的上下文同步（合并同一帧内的多次触发）。
     context_sync_scheduled: bool,
+    wayx_status: terminal::WayxStatus,
+    _wayx_watch: gpui::Task<()>,
 }
 
 /// 当前活动会话的「快照」。
@@ -340,6 +349,16 @@ impl AppRoot {
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
         let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
 
+        terminal::start_wayx();
+        let wayx_watch = cx.spawn(async move |root, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                let status = terminal::wayx_status();
+                if root.update(cx, |root, cx| {
+                    if root.wayx_status != status { root.wayx_status = status; cx.notify(); }
+                }).is_err() { break; }
+            }
+        });
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -357,6 +376,8 @@ impl AppRoot {
             background_focus: cx.focus_handle(),
             last_context: None,
             context_sync_scheduled: false,
+            wayx_status: terminal::wayx_status(),
+            _wayx_watch: wayx_watch,
         };
         this.dock_layout_sub = Some(cx.subscribe_in(
             &this.dock,
@@ -609,7 +630,8 @@ impl Render for AppRoot {
                                 .text_size(px(13.))
                                 .text_color(cx.theme().secondary_foreground)
                                 .child("Alacrterm"),
-                        ),
+                        )
+                        .child(self.wayx_button(cx)),
                 ),
             )
             .child(
