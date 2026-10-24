@@ -7429,6 +7429,7 @@ dependencies = [
 name = "terminal_view"
 version = "0.1.0"
 dependencies = [
+ "gpui-kit",
  "gpui-pre",
  "itertools 0.15.0",
  "log",

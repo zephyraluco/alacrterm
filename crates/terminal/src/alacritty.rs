@@ -822,6 +822,17 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+/// Compute an absolute history scroll using the grid's current history and viewport.
+pub(super) fn history_scroll(term: &Term<ZedListener>, line: usize) -> Option<Scroll> {
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return None;
+    }
+    let offset = term.grid().history_size().saturating_sub(line);
+    Some(Scroll::Delta(
+        offset as i32 - term.grid().display_offset() as i32,
+    ))
+}
+
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
 }
@@ -1085,6 +1096,36 @@ mod tests {
         parser.stop_sync(&mut *term);
         assert!(content_text(&term).contains("DEFERRED"));
         assert!(parser.sync_timeout().sync_timeout().is_none());
+    }
+
+    #[test]
+    fn absolute_history_scroll_tracks_output_and_ignores_alternate_screen() {
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+        let (sender, _receiver) = futures::channel::mpsc::unbounded();
+        let term = new_term(
+            &AlacrittyTermConfig::default(),
+            TerminalBounds::default(),
+            sender,
+        );
+        let mut term = term.lock();
+        let mut parser = Processor::<StdSyncHandler>::new();
+        parser.advance(&mut *term, "line\r\n".repeat(40).as_bytes());
+        assert!(term.grid().history_size() > 0);
+        let scroll = history_scroll(&term, 0).unwrap();
+        scroll_display(&mut term, scroll);
+        assert_eq!(term.grid().display_offset(), term.grid().history_size());
+        parser.advance(&mut *term, "new\r\n".repeat(10).as_bytes());
+        let scroll = history_scroll(&term, 10).unwrap();
+        scroll_display(&mut term, scroll);
+        assert_eq!(
+            term.grid().display_offset(),
+            term.grid().history_size() - 10
+        );
+        let scroll = history_scroll(&term, usize::MAX).unwrap();
+        scroll_display(&mut term, scroll);
+        assert_eq!(term.grid().display_offset(), 0);
+        parser.advance(&mut *term, b"\x1b[?1049h");
+        assert!(history_scroll(&term, 0).is_none());
     }
 
 }

@@ -10,6 +10,7 @@
 //! - 高性能网格渲染（批量文本 / 背景矩形 / 块字符 / 光标 / 高亮）
 
 mod contrast;
+mod scrollbar;
 pub mod terminal_element;
 
 use std::{
@@ -89,6 +90,7 @@ pub struct TerminalView {
     terminal_blinking: Option<bool>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
+    scrollbar_target: std::rc::Rc<std::cell::Cell<Option<usize>>>,
     /// 主机密钥确认的回调（仅远端会话有）。
     host_key_prompt: Option<HostKeyPromptHandler>,
 }
@@ -213,6 +215,7 @@ impl TerminalView {
             terminal_blinking: None,
             _blink_task: blink_task,
             grid_cache: Default::default(),
+            scrollbar_target: Default::default(),
             host_key_prompt: host_key,
         }
     }
@@ -599,6 +602,17 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let requested_line = self.scrollbar_target.take();
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |terminal, cx| {
+                if let Some(line) = requested_line {
+                    terminal.scroll_to_history_line(line);
+                }
+                // Wheel and keyboard scrolling are queued too. Apply them before
+                // constructing the handle so its thumb matches this frame's grid.
+                terminal.sync(window, cx);
+            });
+        }
         let focused = self.focus_handle.is_focused(window);
         let cursor_visible = self.should_show_cursor(focused, cx);
 
@@ -637,6 +651,47 @@ impl Render for TerminalView {
                     .text_color(self.settings.colors.terminal_foreground)
                     .child("正在启动终端…"),
             );
+        }
+
+        if let Some(terminal) = &self.terminal {
+            if let Some((history, offset)) = terminal
+                .read(cx)
+                .scrollback_state()
+                .filter(|(history, _)| *history > 0)
+            {
+                let line_height = terminal
+                    .read(cx)
+                    .last_content()
+                    .terminal_bounds
+                    .line_height
+                    .max(gpui::px(1.));
+                let handle = scrollbar::HistoryScrollbar::new(
+                    history,
+                    offset,
+                    line_height,
+                    self.scrollbar_target.clone(),
+                );
+                let geometry = handle.clone();
+                root = root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(
+                            gpui::canvas(
+                                move |bounds, _, _| geometry.set_bounds(bounds),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        )
+                        .child(
+                            gpui_kit::component::scroll::Scrollbar::vertical(&handle)
+                                .id("terminal-history-scrollbar"),
+                        ),
+                );
+            }
         }
 
         if self.remote && self.exited {

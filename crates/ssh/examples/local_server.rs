@@ -342,6 +342,19 @@ impl russh::server::Handler for LocalServer {
                         session.close(channel)?;
                         return Ok(());
                     }
+                    if line.trim() == "scrollbar-probe" {
+                        let output: String = (0..500).map(|line| format!("SCROLLROW{line:04}\r\n")).collect();
+                        session.data(channel, output.into_bytes())?;
+                        return Ok(());
+                    }
+                    if line.trim() == "alternate-screen" {
+                        session.data(channel, b"\x1b[?1049hALTSCREEN".to_vec())?;
+                        return Ok(());
+                    }
+                    if line.trim() == "normal-screen" {
+                        session.data(channel, b"\x1b[?1049l".to_vec())?;
+                        return Ok(());
+                    }
                     if line.trim() == "protocol-probe" {
                         session.data(channel, b"\x1b]2;RuntimeProbe\x07\x1b[6n\x1b[c\x1b]11;?\x07".to_vec())?;
                         return Ok(());

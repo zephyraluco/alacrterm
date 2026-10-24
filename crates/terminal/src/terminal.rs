@@ -7,6 +7,7 @@ mod pty_info;
 mod shell_integration;
 
 use anyhow::{Context as _, Result, bail};
+use alacritty_terminal::grid::Dimensions as _;
 use log::trace;
 
 use futures::{
@@ -676,6 +677,7 @@ enum InternalEvent {
     Clear,
     // FocusNextMatch,
     Scroll(Scroll),
+    ScrollToHistoryLine(usize),
     ScrollToPoint(Point),
     SetSelection(Option<Selection>),
     UpdateSelection(GpuiPoint<Pixels>),
@@ -1582,6 +1584,11 @@ impl Terminal {
                 clear_saved_screen(term);
                 cx.emit(Event::Wakeup);
             }
+            InternalEvent::ScrollToHistoryLine(line) => {
+                if let Some(scroll) = crate::alacritty::history_scroll(term, *line) {
+                    self.process_terminal_event(&InternalEvent::Scroll(scroll), term, window, cx);
+                }
+            }
             InternalEvent::Scroll(scroll) => {
                 trace!("Scrolling: scroll={scroll:?}");
                 scroll_display(term, *scroll);
@@ -1811,6 +1818,24 @@ impl Terminal {
 
     pub fn total_lines(&self) -> usize {
         total_lines(&self.term.lock_unfair())
+    }
+
+    /// Live history size and distance from the bottom; alternate screens have no scrollback UI.
+    pub fn scrollback_state(&self) -> Option<(usize, usize)> {
+        let term = self.term.lock_unfair();
+        if term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        {
+            return None;
+        }
+        Some((term.grid().history_size(), term.grid().display_offset()))
+    }
+
+    /// Queue an absolute history position, evaluated after earlier scroll/resize events.
+    pub fn scroll_to_history_line(&mut self, line: usize) {
+        self.events
+            .push_back(InternalEvent::ScrollToHistoryLine(line));
     }
 
     pub fn viewport_lines(&self) -> usize {
@@ -2099,6 +2124,7 @@ impl Terminal {
     }
 
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.snapshot_dirty && self.events.is_empty() { return; }
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
         //Note that the ordering of events matters for event processing

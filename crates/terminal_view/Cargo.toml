@@ -6,6 +6,7 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 gpui = { workspace = true }
+gpui-kit = { workspace = true }
 itertools.workspace = true
 log.workspace = true
 terminal = { workspace = true }

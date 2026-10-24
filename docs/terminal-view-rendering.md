@@ -531,7 +531,7 @@ impl InputHandler for TerminalInputHandler {
 **要点归纳**
 
 1. **输入是「元素 → 模型」**:`TerminalElement` 直接调 `terminal.mouse_down / mouse_drag`,同时把 `cx.notify()` 打在 `Terminal` 上 —— `Terminal` 没有 `impl Render`,它的通知只对观察者有意义。
-2. **命令是排队的**:`SetSelection` / `UpdateSelection` / `Copy` / `Scroll` 都进 `Terminal::events`,而**唯一的消费点是 `Terminal::sync`**(`terminal.rs:1826`,`pop_front` 全仓仅此一处),由 `TerminalElement::prepaint`(`:1291`)调用 ⇒ **「鼠标操作生效」⟺「视图重绘一次」**。
+2. **命令是排队的**:`SetSelection` / `UpdateSelection` / `Copy` / `Scroll` 都进 `Terminal::events`,而**消费点仍是 `Terminal::sync`**(`terminal.rs:1826`,`pop_front` 全仓仅此一处),由 `TerminalElement::prepaint`(`:1291`)调用 ⇒ **「鼠标操作生效」⟺「视图重绘一次」**。
 3. **两座桥都是「视图主动订阅模型」**:模型不转发、也不知道视图存在 ⇒ 模型改了状态而视图没接到信号,表现就是「操作没反应 / 慢半拍」。
 4. **一次拖拽事件 ≈ 一帧**:`sync` 在 `layout_grid` **之前**,所以本轮就画出新选区;`SelectionsChanged` 再触发一次 `notify`(与下一次鼠标事件的重绘合并)。
 5. **输出 / 打字 / 滚轮不需要第一座桥**:输出走 `Event::Wakeup`、打字靠 PTY 回显、滚轮在 `TerminalElement::on_scroll_wheel` 里用**视图的** `Context` 调 `cx.notify()`,都直接落到「视图重绘」。
@@ -554,7 +554,15 @@ impl InputHandler for TerminalInputHandler {
 - `Moved` → 累加 `delta.pixel_delta × multiplier`,`(scroll_px / line_height) as i32` 前后差值即为滚动行数;每次滚动后 `scroll_px %= terminal_bounds.height()`(触到边界即回绕,方向切换响应快)
 - `Ended | Cancelled` → 返回 `None`(不滚动)
 
-> 滚动完全由鼠标滚轮驱动,不提供滚动条 UI(见 §9)。
+`TerminalView::render` 先调用 `sync` 消费待处理输入和滚动，再读取滚动条状态；
+`TerminalElement::prepaint` 继续在尺寸更新后调用 `sync`。无脏状态且无待处理命令时
+`sync` 直接返回，避免光标闪烁等重绘重复生成快照。
+
+终端右侧使用 gpui-kit 的垂直滚动条，按历史行数与当前显示偏移计算滑块位置。
+拖动滑块或点击轨道会排入绝对历史位置请求，与滚轮共用终端的滚动处理流程；
+请求在 `sync` 时按最新网格计算，保留 vi 选择和悬停状态更新。
+滚动条覆盖在终端上，不改变字符列数；无历史或进入 alternate screen 时隐藏。
+各分屏独立持有滚动目标，滚动条采用组件主题的显示与淡出规则。
 
 ---
 
