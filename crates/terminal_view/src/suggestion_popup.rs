@@ -89,7 +89,7 @@ impl TerminalView {
                         .px_3()
                         .text_xs()
                         .text_color(foreground.opacity(0.65))
-                        .child("历史命令 · ↑↓ 选择 · Tab 插入 · Esc 关闭"),
+                        .child("命令建议 · ↑↓ 选择 · Tab 插入 · Esc 关闭"),
                 )
                 .into_any_element(),
         )

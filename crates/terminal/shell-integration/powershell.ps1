@@ -17,3 +17,12 @@ if (Test-Path Function:PSConsoleHostReadLine) {
         return $line
     }
 }
+function global:alacrterm_refresh_completions {
+    [Console]::Write("$([char]27)]633;CommandReset$([char]7)")
+    Get-Command -CommandType Application,Alias,Function,Cmdlet | ForEach-Object {
+        if ($_.Name -cmatch '^[a-zA-Z0-9_.:+-]{1,256}$') {
+            [Console]::Write("$([char]27)]633;Command;$($_.Name)$([char]7)")
+        }
+    }
+}
+alacrterm_refresh_completions

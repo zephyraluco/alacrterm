@@ -110,7 +110,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(
             home.path().join(".bashrc"),
-            "printf 'PROFILE_LOADED\\n'\nPS1='test$ '\n",
+            "printf 'PROFILE_LOADED\\n'\nPS1='test$ '\nalias demoalias='echo alias'\ndemofunc() { :; }\n",
         )
         .unwrap();
         let mut env = HashMap::from([("HOME".into(), home.path().to_string_lossy().into_owned())]);
@@ -133,6 +133,15 @@ mod tests {
         assert!(output.status.success());
         let mut bytes = output.stdout;
         bytes.extend(output.stderr);
+        for command in ["demoalias", "demofunc", "printf"] {
+            let expected = format!("\x1b]633;Command;{command}\x07");
+            assert!(
+                bytes
+                    .windows(expected.len())
+                    .any(|part| part == expected.as_bytes()),
+                "missing shell command {command}"
+            );
+        }
         assert!(
             bytes
                 .windows(b"PROFILE_LOADED".len())
@@ -163,7 +172,11 @@ mod tests {
         };
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join(".zshenv"), "printf 'USER_ZSHENV\\n'\n").unwrap();
-        std::fs::write(home.path().join(".zshrc"), "PROMPT='test%% '\n").unwrap();
+        std::fs::write(
+            home.path().join(".zshrc"),
+            "PROMPT='test%% '\nalias demoalias='echo alias'\ndemofunc() { :; }\n",
+        )
+        .unwrap();
         let mut env = HashMap::from([("HOME".into(), home.path().to_string_lossy().into_owned())]);
         let (args, _files) = prepare(program, &[], &mut env).unwrap().unwrap();
         let mut child = Command::new(program)
@@ -184,6 +197,15 @@ mod tests {
         assert!(output.status.success());
         let mut bytes = output.stdout;
         bytes.extend(output.stderr);
+        for command in ["demoalias", "demofunc", "printf"] {
+            let expected = format!("\x1b]633;Command;{command}\x07");
+            assert!(
+                bytes
+                    .windows(expected.len())
+                    .any(|part| part == expected.as_bytes()),
+                "missing shell command {command}"
+            );
+        }
         assert_eq!(
             String::from_utf8_lossy(&bytes)
                 .matches("USER_ZSHENV")

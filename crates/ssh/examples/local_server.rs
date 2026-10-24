@@ -346,7 +346,7 @@ impl russh::server::Handler for LocalServer {
                     }
                     if line.trim() == "suggestion-integration" {
                         self.suggest_integration = true;
-                        session.data(channel, b"\x1b]633;D;0\x07\x1b]633;A\x07$ \x1b]633;B\x07".to_vec())?;
+                        session.data(channel, b"\x1b]633;CommandReset\x07\x1b]633;Command;remote-command\x07\x1b]633;D;0\x07\x1b]633;A\x07$ \x1b]633;B\x07".to_vec())?;
                         return Ok(());
                     }
                     if line.trim() == "scrollbar-probe" {

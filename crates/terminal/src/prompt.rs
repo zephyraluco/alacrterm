@@ -10,6 +10,7 @@ pub enum PromptEvent {
 pub(crate) struct PromptScanner {
     state: u8,
     payload: Vec<u8>,
+    commands: Vec<String>,
 }
 impl PromptScanner {
     pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<PromptEvent> {
@@ -23,6 +24,22 @@ impl PromptScanner {
                 }
                 (1, _) => self.state = 0,
                 (2, 7) | (3, b'\\') => {
+                    if self.payload == b"633;CommandReset" {
+                        self.commands.push(String::new());
+                    } else if let Some(name) = self
+                        .payload
+                        .strip_prefix(b"633;Command;")
+                        .and_then(|name| std::str::from_utf8(name).ok())
+                    {
+                        if !name.is_empty()
+                            && name.len() <= 256
+                            && name
+                                .chars()
+                                .all(|ch| ch.is_ascii_alphanumeric() || "_.:+-".contains(ch))
+                        {
+                            self.commands.push(name.to_string());
+                        }
+                    }
                     if let Some(event) = self.event() {
                         events.push(event);
                     }
@@ -48,6 +65,10 @@ impl PromptScanner {
         }
         events
     }
+    pub(crate) fn commands(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.commands)
+    }
+
     fn event(&self) -> Option<PromptEvent> {
         let mut fields = self.payload.split(|byte| *byte == b';');
         if !matches!(fields.next()?, b"633" | b"133") {
@@ -77,5 +98,17 @@ mod tests {
         oversized.extend(vec![b'A'; 5000]);
         oversized.extend_from_slice(b"\x07\x1b]633;D;0\x07");
         assert_eq!(scanner.feed(&oversized), [PromptEvent::Finished]);
+    }
+    #[test]
+    fn command_inventory_is_bounded_to_literal_command_names() {
+        let mut scanner = PromptScanner::default();
+        assert!(
+            scanner
+                .feed(b"\x1b]633;CommandReset\x07\x1b]633;Command;remote-")
+                .is_empty()
+        );
+        scanner.feed(b"tool\x07\x1b]633;Command;bad;command\x07\x1b]633;Command;bad name\x07");
+        assert_eq!(scanner.commands(), ["", "remote-tool"]);
+        assert!(scanner.commands().is_empty());
     }
 }

@@ -39,6 +39,11 @@ impl Read for ObservedPty {
                 .events
                 .unbounded_send(TerminalBackendEvent::Prompt(event));
         }
+        for command in self.scanner.commands() {
+            let _ = self
+                .events
+                .unbounded_send(TerminalBackendEvent::ShellCommand(command));
+        }
         Ok(count)
     }
 }

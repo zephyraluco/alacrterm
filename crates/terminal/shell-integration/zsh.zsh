@@ -13,3 +13,13 @@ __alacrterm_precmd() {
 __alacrterm_preexec() { printf '\033]633;C\007'; }
 add-zsh-hook precmd __alacrterm_precmd
 add-zsh-hook preexec __alacrterm_preexec
+alacrterm_refresh_completions() {
+    rehash
+    printf '\033]633;CommandReset\007'
+    local alacrterm_name
+    for alacrterm_name in ${(k)aliases} ${(k)functions} ${(k)builtins} ${(k)commands}; do
+        case "$alacrterm_name" in ''|*[!a-zA-Z0-9_.:+-]*) continue ;; esac
+        printf '\033]633;Command;%s\007' "$alacrterm_name"
+    done
+}
+alacrterm_refresh_completions

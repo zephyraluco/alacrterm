@@ -6,6 +6,7 @@ pub(super) struct Suggestions {
     pub text: String,
     cursor: usize,
     history: Vec<String>,
+    commands: Vec<String>,
     pending: Option<String>,
     pub candidates: Vec<String>,
     pub selected: usize,
@@ -13,6 +14,18 @@ pub(super) struct Suggestions {
     prompt_ready: bool,
 }
 impl Suggestions {
+    pub fn add_command(&mut self, name: &str) {
+        if name.is_empty() {
+            self.commands.clear();
+            return;
+        }
+        if self.commands.len() >= 4096 {
+            return;
+        }
+        if let Err(index) = self.commands.binary_search_by(|old| old.as_str().cmp(name)) {
+            self.commands.insert(index, name.to_string());
+        }
+    }
     pub fn phase(&mut self, event: PromptEvent) {
         if event == PromptEvent::Input && self.active && self.text.is_empty() {
             return;
@@ -112,6 +125,23 @@ impl Suggestions {
                 .take(8)
                 .cloned(),
         );
+        self.append_commands();
+    }
+    fn append_commands(&mut self) {
+        if self.text.chars().any(char::is_whitespace) {
+            return;
+        }
+        for command in &self.commands {
+            if self.candidates.len() >= 8 {
+                break;
+            }
+            if command.starts_with(&self.text)
+                && *command != self.text
+                && !self.candidates.contains(command)
+            {
+                self.candidates.push(command.clone());
+            }
+        }
     }
     pub fn trigger(&mut self) {
         self.dismissed = false;
@@ -208,5 +238,25 @@ mod tests {
         state.phase(PromptEvent::Input);
         state.trigger();
         assert!(state.candidates.is_empty());
+    }
+    #[test]
+    fn shell_commands_merge_with_history_and_reset_per_shell() {
+        let mut state = Suggestions::default();
+        state.add_command("git");
+        state.add_command("grep");
+        state.add_command("git");
+        execute(&mut state, "git status");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("g");
+        state.refresh(false);
+        assert_eq!(state.candidates, ["git status", "git", "grep"]);
+        state.add_command("");
+        state.add_command("remote-command");
+        state.refresh(false);
+        assert_eq!(state.candidates, ["git status"]);
+        state.input("it ");
+        state.refresh(false);
+        assert_eq!(state.candidates, ["git status"]);
     }
 }

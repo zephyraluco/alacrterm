@@ -640,6 +640,7 @@ pub fn insert_zed_terminal_env(env: &mut HashMap<String, String>) {
 ///Upward flowing events, for changing the title and such
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    ShellCommand(String),
     Prompt(PromptEvent),
     TitleChanged,
     BreadcrumbsChanged,
@@ -702,6 +703,7 @@ type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send 
 
 #[derive(Clone)]
 pub(crate) enum TerminalBackendEvent {
+    ShellCommand(String),
     Prompt(PromptEvent),
     MouseCursorDirty,
     Title(String),
@@ -735,6 +737,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
             Self::Prompt(event) => write!(f, "Prompt({event:?})"),
+            Self::ShellCommand(_) => f.write_str("ShellCommand"),
         }
     }
 }
@@ -1446,6 +1449,9 @@ impl Terminal {
         for event in self.prompt_scanner.feed(bytes) {
             let _ = self.parser_events_sender.unbounded_send(TerminalBackendEvent::Prompt(event));
         }
+        for command in self.prompt_scanner.commands() {
+            let _ = self.parser_events_sender.unbounded_send(TerminalBackendEvent::ShellCommand(command));
+        }
         if bytes.is_empty() {
             return;
         }
@@ -1486,6 +1492,7 @@ impl Terminal {
         self.snapshot_dirty = true;
         match event {
             TerminalBackendEvent::Prompt(event) => cx.emit(Event::Prompt(event)),
+            TerminalBackendEvent::ShellCommand(command) => cx.emit(Event::ShellCommand(command)),
             TerminalBackendEvent::Title(title) => {
                 // ignore default shell program title change as windows always sends those events
                 // and it would end up showing the shell executable path in breadcrumbs

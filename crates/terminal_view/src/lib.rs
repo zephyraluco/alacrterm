@@ -235,6 +235,7 @@ impl TerminalView {
             if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
                 self.exited = false;
                 self.suggestions.invalidate();
+                self.suggestions.add_command("");
                 self.terminal_blinking = None;
                 self.ime_state = None;
                 cx.notify();
@@ -286,6 +287,7 @@ impl TerminalView {
 
     fn handle_terminal_event(&mut self, event: &TerminalEvent, cx: &mut gpui::Context<Self>) {
         match event {
+            TerminalEvent::ShellCommand(command) => self.suggestions.add_command(command),
             TerminalEvent::Prompt(event) => {
                 self.suggestions.phase(*event);
                 cx.notify();

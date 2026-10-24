@@ -16,3 +16,13 @@ else
     PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__alacrterm_prompt"
 fi
 PS0='\e]633;C\a'"${PS0-}"
+# The shell supplies its own PATH, aliases, builtins and functions; nothing is executed.
+alacrterm_refresh_completions() {
+    printf '\033]633;CommandReset\007'
+    local alacrterm_name
+    while IFS= read -r alacrterm_name; do
+        case "$alacrterm_name" in ''|*[!a-zA-Z0-9_.:+-]*) continue ;; esac
+        printf '\033]633;Command;%s\007' "$alacrterm_name"
+    done < <(compgen -c)
+}
+alacrterm_refresh_completions
