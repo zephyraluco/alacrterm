@@ -10,8 +10,8 @@ mod parser_events;
 mod pty_info;
 mod shell_integration;
 
-use anyhow::{Context as _, Result, bail};
 use alacritty_terminal::grid::Dimensions as _;
+use anyhow::{Context as _, Result, bail};
 use log::trace;
 
 use futures::{
@@ -32,6 +32,8 @@ use std::collections::{HashMap, VecDeque};
 
 use util::{paths::PathStyle, shell::Shell, truncate_and_trailoff};
 
+use alacritty_terminal::vte::ansi::{Attr, Handler, Processor, StdSyncHandler};
+pub use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use std::{
     borrow::Cow,
     cmp::{self, min},
@@ -43,8 +45,6 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use alacritty_terminal::vte::ansi::{Attr, Handler, Processor, StdSyncHandler};
-pub use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 pub use crate::backend::TerminalTarget;
 use crate::backend::{INITIAL_PTY_SIZE, TerminalBackend};
@@ -53,7 +53,8 @@ use crate::backend::{INITIAL_PTY_SIZE, TerminalBackend};
 /// 视图层与应用层不必自己依赖 `ssh`。
 pub use ssh::{
     CancelToken, HostKeyDecision, HostKeyPrompt, RemoteEntry, RemoteMeta, SessionId, SshAuth,
-    SshError, SshFs, SshParams, Transfer, TransferEvent, TransferProgress, shutdown_wayx, WayxStatus, start_wayx, stop_wayx, wayx_status,
+    SshError, SshFs, SshParams, Transfer, TransferEvent, TransferProgress, WayxStatus,
+    shutdown_wayx, start_wayx, stop_wayx, wayx_status,
 };
 
 use gpui::{
@@ -65,13 +66,12 @@ use gpui::{
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, RegexSearches, apply_config,
-    clear_saved_screen, content_text, display_offset,
-    find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
-    open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
-    search_matches, selection_text, set_default_cursor_style, set_selection as set_term_selection,
-    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
-    update_selection as update_term_selection, update_selection_to_vi_cursor,
-    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    clear_saved_screen, content_text, display_offset, find_from_terminal_point, full_content_range,
+    last_non_empty_lines, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
+    set_default_cursor_style, set_selection as set_term_selection, spawn_event_loop,
+    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
+    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -640,6 +640,7 @@ pub fn insert_zed_terminal_env(env: &mut HashMap<String, String>) {
 ///Upward flowing events, for changing the title and such
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    ShellContext(&'static str, String),
     ShellCommand(String),
     Prompt(PromptEvent),
     TitleChanged,
@@ -703,6 +704,7 @@ type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send 
 
 #[derive(Clone)]
 pub(crate) enum TerminalBackendEvent {
+    ShellContext(&'static str, String),
     ShellCommand(String),
     Prompt(PromptEvent),
     MouseCursorDirty,
@@ -738,6 +740,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
             Self::Prompt(event) => write!(f, "Prompt({event:?})"),
             Self::ShellCommand(_) => f.write_str("ShellCommand"),
+            Self::ShellContext(_, _) => f.write_str("ShellContext"),
         }
     }
 }
@@ -1012,12 +1015,24 @@ impl TerminalBuilder {
                             params.args.clone().unwrap_or_default(),
                         )
                     });
-                    let program = alacritty_shell.as_ref().map(|(program, _)| program.clone()).unwrap_or_else(|| shell.program());
-                    let args = alacritty_shell.as_ref().map(|(_, args)| args.as_slice()).unwrap_or(&[]);
+                    let program = alacritty_shell
+                        .as_ref()
+                        .map(|(program, _)| program.clone())
+                        .unwrap_or_else(|| shell.program());
+                    let args = alacritty_shell
+                        .as_ref()
+                        .map(|(_, args)| args.as_slice())
+                        .unwrap_or(&[]);
                     let integration_files = match integration::prepare(&program, args, &mut env) {
-                        Ok(Some((args, files))) => { alacritty_shell = Some((program, args)); Some(files) }
+                        Ok(Some((args, files))) => {
+                            alacritty_shell = Some((program, args));
+                            Some(files)
+                        }
                         Ok(None) => None,
-                        Err(error) => { log::debug!("Shell integration: {error:#}"); None }
+                        Err(error) => {
+                            log::debug!("Shell integration: {error:#}");
+                            None
+                        }
                     };
                     let pty_options = pty_options(
                         alacritty_shell,
@@ -1124,7 +1139,10 @@ impl TerminalBuilder {
                 },
             };
 
-            Ok(TerminalBuilder { terminal, events_rx: parser_events })
+            Ok(TerminalBuilder {
+                terminal,
+                events_rx: parser_events,
+            })
         };
         cx.background_spawn(fut)
     }
@@ -1409,7 +1427,10 @@ impl Terminal {
                 cx.emit(Event::HostKeyPrompt(prompt));
                 return;
             }
-            SshEvent::Closed { exit_status, reason } => {
+            SshEvent::Closed {
+                exit_status,
+                reason,
+            } => {
                 self.connected = false;
                 if self.ssh_status_shown {
                     self.ssh_status_shown = false;
@@ -1447,10 +1468,19 @@ impl Terminal {
     /// 攒着不写的那一段同样要扫 —— 远端第一条上报往往就在里面。
     fn feed_remote_bytes(&mut self, bytes: &[u8]) {
         for event in self.prompt_scanner.feed(bytes) {
-            let _ = self.parser_events_sender.unbounded_send(TerminalBackendEvent::Prompt(event));
+            let _ = self
+                .parser_events_sender
+                .unbounded_send(TerminalBackendEvent::Prompt(event));
         }
         for command in self.prompt_scanner.commands() {
-            let _ = self.parser_events_sender.unbounded_send(TerminalBackendEvent::ShellCommand(command));
+            let _ = self
+                .parser_events_sender
+                .unbounded_send(TerminalBackendEvent::ShellCommand(command));
+        }
+        for (key, value) in self.prompt_scanner.context() {
+            let _ = self
+                .parser_events_sender
+                .unbounded_send(TerminalBackendEvent::ShellContext(key, value));
         }
         if bytes.is_empty() {
             return;
@@ -1482,7 +1512,12 @@ impl Terminal {
         if !pending.is_empty() {
             self.output_processor.advance(&mut *term, &pending);
         }
-        if self.output_processor.sync_timeout().sync_timeout().is_some_and(|deadline| deadline <= std::time::Instant::now()) {
+        if self
+            .output_processor
+            .sync_timeout()
+            .sync_timeout()
+            .is_some_and(|deadline| deadline <= std::time::Instant::now())
+        {
             self.output_processor.stop_sync(&mut *term);
         }
         self.output_processor.advance(&mut *term, bytes);
@@ -1493,6 +1528,9 @@ impl Terminal {
         match event {
             TerminalBackendEvent::Prompt(event) => cx.emit(Event::Prompt(event)),
             TerminalBackendEvent::ShellCommand(command) => cx.emit(Event::ShellCommand(command)),
+            TerminalBackendEvent::ShellContext(key, value) => {
+                cx.emit(Event::ShellContext(key, value))
+            }
             TerminalBackendEvent::Title(title) => {
                 // ignore default shell program title change as windows always sends those events
                 // and it would end up showing the shell executable path in breadcrumbs
@@ -1560,8 +1598,9 @@ impl Terminal {
                 // we might respond with out of date value if a "set color" sequence is immediately
                 // followed by a color request sequence.
 
-                let color = self.term.lock().colors()[index]
-                    .unwrap_or_else(|| to_vte_rgb(get_color_at_index(index, &TerminalColors::dark())));
+                let color = self.term.lock().colors()[index].unwrap_or_else(|| {
+                    to_vte_rgb(get_color_at_index(index, &TerminalColors::dark()))
+                });
                 self.write_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
@@ -2154,7 +2193,9 @@ impl Terminal {
     }
 
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.snapshot_dirty && self.events.is_empty() { return; }
+        if !self.snapshot_dirty && self.events.is_empty() {
+            return;
+        }
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
         //Note that the ordering of events matters for event processing

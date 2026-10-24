@@ -7,6 +7,8 @@ pub(super) struct Suggestions {
     cursor: usize,
     history: Vec<String>,
     commands: Vec<String>,
+    pub cwd: Option<String>,
+    pub powershell: Option<bool>,
     pending: Option<String>,
     pub candidates: Vec<String>,
     pub selected: usize,
@@ -14,6 +16,29 @@ pub(super) struct Suggestions {
     prompt_ready: bool,
 }
 impl Suggestions {
+    pub fn context(&mut self, key: &str, value: &str) {
+        match key {
+            "cwd" => self.cwd = (!value.is_empty()).then(|| value.into()),
+            "shell" => self.powershell = Some(value == "powershell"),
+            _ => {}
+        }
+    }
+    pub fn path_query(&self) -> Option<crate::path_suggestions::PathQuery> {
+        if !self.active || self.dismissed || self.cursor != self.text.len() {
+            return None;
+        }
+        crate::path_suggestions::PathQuery::parse(&self.text, self.powershell?)
+    }
+    pub fn add_paths(&mut self, candidates: Vec<String>) {
+        for candidate in candidates {
+            if self.candidates.len() >= 8 {
+                break;
+            }
+            if candidate.starts_with(&self.text) && !self.candidates.contains(&candidate) {
+                self.candidates.push(candidate);
+            }
+        }
+    }
     pub fn add_command(&mut self, name: &str) {
         if name.is_empty() {
             self.commands.clear();

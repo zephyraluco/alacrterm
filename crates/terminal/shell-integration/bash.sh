@@ -5,6 +5,10 @@
 __alacrterm_integrated=1
 __alacrterm_prompt() {
     local alacrterm_status=$?
+    case "$PWD" in
+        *$'\e'*|*$'\a'*|*$'\n'*|*$'\r'*) printf '\033]633;AlacrtermCwd;\007' ;;
+        *) printf '\033]633;AlacrtermCwd;%s\007' "$PWD" ;;
+    esac
     printf '\033]633;D;%s\007\033]633;A\007' "$alacrterm_status"
     local marker='\[\e]633;B\a\]'
     case "$PS1" in *"$marker") ;; *) PS1+="$marker" ;; esac
@@ -26,3 +30,4 @@ alacrterm_refresh_completions() {
     done < <(compgen -c)
 }
 alacrterm_refresh_completions
+printf '\033]633;AlacrtermShell;posix\007'

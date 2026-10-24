@@ -5,6 +5,9 @@ $global:AlacrtermIntegrated = $true
 $global:AlacrtermOriginalPrompt = (Get-Item Function:prompt).ScriptBlock
 function global:prompt {
     $ok = $?
+    $alacrtermCwd = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath
+    if ($alacrtermCwd -match '[\x00-\x1f]') { $alacrtermCwd = '' }
+    [Console]::Write("$([char]27)]633;AlacrtermCwd;$alacrtermCwd$([char]7)")
     [Console]::Write("$([char]27)]633;D;$([int](!$ok))$([char]7)$([char]27)]633;A$([char]7)")
     $value = & $global:AlacrtermOriginalPrompt
     return "$value$([char]27)]633;B$([char]7)"
@@ -26,3 +29,4 @@ function global:alacrterm_refresh_completions {
     }
 }
 alacrterm_refresh_completions
+[Console]::Write("$([char]27)]633;AlacrtermShell;powershell$([char]7)")

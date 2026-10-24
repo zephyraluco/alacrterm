@@ -5,6 +5,10 @@ __alacrterm_integrated=1
 autoload -Uz add-zsh-hook
 __alacrterm_precmd() {
     local alacrterm_status=$?
+    case "$PWD" in
+        *$'\e'*|*$'\a'*|*$'\n'*|*$'\r'*) printf '\033]633;AlacrtermCwd;\007' ;;
+        *) printf '\033]633;AlacrtermCwd;%s\007' "$PWD" ;;
+    esac
     printf '\033]633;D;%s\007\033]633;A\007' "$alacrterm_status"
     local marker=$'%{\e]633;B\a%}'
     [[ $PROMPT == *$marker ]] || PROMPT+=$marker
@@ -23,3 +27,4 @@ alacrterm_refresh_completions() {
     done
 }
 alacrterm_refresh_completions
+printf '\033]633;AlacrtermShell;posix\007'

@@ -10,26 +10,22 @@
 //! - 高性能网格渲染（批量文本 / 背景矩形 / 块字符 / 光标 / 高亮）
 
 mod contrast;
+mod path_suggestions;
 mod scrollbar;
-mod suggestions;
 mod suggestion_popup;
+mod suggestions;
 pub mod terminal_element;
 
-use std::{
-    ops::Range as StdRange,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    App, AppContext as _, AsyncApp, Entity, FocusHandle, IntoElement, InteractiveElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, rgb,
+    App, AppContext as _, AsyncApp, Entity, FocusHandle, InteractiveElement, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, rgb,
 };
 use terminal::{
-    Event as TerminalEvent, HostKeyPrompt, Modes, SshFs, Terminal, TerminalBounds,
-    TerminalBuilder, TerminalTarget,
+    Event as TerminalEvent, HostKeyPrompt, Modes, SshFs, Terminal, TerminalBounds, TerminalBuilder,
+    TerminalTarget,
 };
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
@@ -92,6 +88,7 @@ pub struct TerminalView {
     terminal_blinking: Option<bool>,
     suggestions: suggestions::Suggestions,
     suggestion_task: gpui::Task<()>,
+    path_cache: Option<(String, std::time::Instant, Vec<path_suggestions::Entry>)>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
     scrollbar_target: std::rc::Rc<std::cell::Cell<Option<usize>>>,
@@ -219,6 +216,7 @@ impl TerminalView {
             terminal_blinking: None,
             suggestions: Default::default(),
             suggestion_task: gpui::Task::ready(()),
+            path_cache: None,
             _blink_task: blink_task,
             grid_cache: Default::default(),
             scrollbar_target: Default::default(),
@@ -236,6 +234,9 @@ impl TerminalView {
                 self.exited = false;
                 self.suggestions.invalidate();
                 self.suggestions.add_command("");
+                self.suggestions.cwd = None;
+                self.suggestions.powershell = None;
+                self.path_cache = None;
                 self.terminal_blinking = None;
                 self.ime_state = None;
                 cx.notify();
@@ -288,6 +289,7 @@ impl TerminalView {
     fn handle_terminal_event(&mut self, event: &TerminalEvent, cx: &mut gpui::Context<Self>) {
         match event {
             TerminalEvent::ShellCommand(command) => self.suggestions.add_command(command),
+            TerminalEvent::ShellContext(key, value) => self.suggestions.context(key, value),
             TerminalEvent::Prompt(event) => {
                 self.suggestions.phase(*event);
                 cx.notify();
@@ -383,7 +385,7 @@ impl TerminalView {
                 self.suggestions.invalidate();
             }
             self.suggestions.input(text);
-            self.schedule_suggestions(cx);
+            self.schedule_suggestions(false, cx);
             if let Some(terminal) = &self.terminal {
                 terminal.update(cx, |term, _| {
                     term.input(text.to_string().into_bytes());
@@ -489,15 +491,127 @@ impl TerminalView {
         self.scroll_action(cx, b"\x1b[1;2B", |terminal| terminal.scroll_line_down());
     }
 
-    fn schedule_suggestions(&mut self, cx: &mut gpui::Context<Self>) {
-        self.suggestions.candidates.clear();
+    fn schedule_suggestions(&mut self, manual: bool, cx: &mut gpui::Context<Self>) {
+        if !manual {
+            self.suggestions.candidates.clear();
+        }
+        if !self.suggestions.active {
+            self.suggestion_task = gpui::Task::ready(());
+            return;
+        }
         self.suggestion_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(100))
+                .timer(if manual {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(100)
+                })
                 .await;
+            let Ok(request) = this.update(cx, |this, cx| {
+                if !this.focused || this.ime_state.is_some() {
+                    return None;
+                }
+                this.suggestions.refresh(manual);
+                cx.notify();
+                let query = this.suggestions.path_query()?;
+                let cwd = this.suggestions.cwd.clone().unwrap_or_default();
+                Some((
+                    query,
+                    cwd,
+                    this.remote,
+                    this.remote_fs(cx),
+                    this.path_cache.clone(),
+                ))
+            }) else {
+                return;
+            };
+            let Some((query, cwd, remote, fs, cache)) = request else {
+                return;
+            };
+            let directory = if remote {
+                let Some(fs) = &fs else {
+                    return;
+                };
+                let home = if query.directory.starts_with("~/") {
+                    fs.home_dir().await.ok()
+                } else {
+                    None
+                };
+                let Some(directory) =
+                    path_suggestions::remote_directory(&cwd, &query.directory, home.as_deref())
+                else {
+                    return;
+                };
+                directory
+            } else {
+                let path = if query.directory.starts_with("~/") {
+                    let Some(home) =
+                        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+                    else {
+                        return;
+                    };
+                    std::path::PathBuf::from(home).join(&query.directory[2..])
+                } else if std::path::Path::new(&query.directory).is_absolute() {
+                    std::path::PathBuf::from(&query.directory)
+                } else {
+                    if cwd.is_empty() {
+                        return;
+                    }
+                    std::path::Path::new(&cwd).join(&query.directory)
+                };
+                path.to_string_lossy().into_owned()
+            };
+            let entries = if let Some((key, time, entries)) = cache.filter(|(key, time, _)| {
+                !manual && *key == directory && time.elapsed() < Duration::from_secs(3)
+            }) {
+                let _ = (key, time);
+                entries
+            } else if remote {
+                let Some(fs) = fs else {
+                    return;
+                };
+                let Ok(entries) = fs.list_dir(directory.clone()).await else {
+                    return;
+                };
+                entries
+                    .into_iter()
+                    .take(4096)
+                    .map(|entry| path_suggestions::Entry {
+                        name: entry.name,
+                        directory: entry.is_dir,
+                    })
+                    .collect()
+            } else {
+                let directory = directory.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        std::fs::read_dir(directory)
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .take(4096)
+                            .filter_map(|entry| {
+                                let entry = entry.ok()?;
+                                Some(path_suggestions::Entry {
+                                    name: entry.file_name().into_string().ok()?,
+                                    directory: entry.file_type().ok()?.is_dir(),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+            };
+            let candidates = query.candidates(entries.clone());
             let _ = this.update(cx, |this, cx| {
-                if this.focused && this.ime_state.is_none() {
-                    this.suggestions.refresh(false);
+                // Cancellation and identity checks prevent late network results from
+                // updating a different command line, prompt, or working directory.
+                if this.focused
+                    && this.ime_state.is_none()
+                    && this.suggestions.path_query().as_ref() == Some(&query)
+                    && this.suggestions.cwd.as_deref().unwrap_or("") == cwd
+                {
+                    this.path_cache = Some((directory, std::time::Instant::now(), entries));
+                    this.suggestions.add_paths(candidates);
                     cx.notify();
                 }
             });
@@ -546,6 +660,7 @@ impl TerminalView {
         {
             self.suggestion_task = gpui::Task::ready(());
             self.suggestions.trigger();
+            self.schedule_suggestions(true, cx);
             cx.notify();
             cx.stop_propagation();
             return;
@@ -578,7 +693,7 @@ impl TerminalView {
             self.suggestions.submit();
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
             self.suggestions.edit_key(key, control);
-            self.schedule_suggestions(cx);
+            self.schedule_suggestions(false, cx);
         }
         if let Some(terminal) = &self.terminal {
             // ⚠️ 复制粘贴 / 滚动 / vi 模式不在这里：那些键由 keymap 绑成应用动作
@@ -684,8 +799,9 @@ impl TerminalView {
     /// ⚠️ 可能是 `~` / `~/x`（标题那条路缩写了家目录），展开由应用层做。
     pub fn remote_directory(&self, cx: &App) -> Option<String> {
         self.terminal.as_ref().and_then(|terminal| {
-            terminal
-                .read_with(cx, |terminal, _| terminal.remote_directory().map(str::to_string))
+            terminal.read_with(cx, |terminal, _| {
+                terminal.remote_directory().map(str::to_string)
+            })
         })
     }
 

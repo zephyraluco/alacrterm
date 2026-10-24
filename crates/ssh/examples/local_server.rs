@@ -222,7 +222,10 @@ impl russh::server::Handler for LocalServer {
         _screen: u32,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.reject_x11 { session.channel_failure(channel)?; return Ok(()); }
+        if self.reject_x11 {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         let decoded: Option<Vec<u8>> = if cookie.len() == 32 && cookie.is_ascii() {
             (0..16)
                 .map(|index| u8::from_str_radix(&cookie[index * 2..index * 2 + 2], 16).ok())
@@ -346,11 +349,21 @@ impl russh::server::Handler for LocalServer {
                     }
                     if line.trim() == "suggestion-integration" {
                         self.suggest_integration = true;
+                        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+                        session.data(
+                            channel,
+                            format!(
+                                "\x1b]633;AlacrtermShell;posix\x07\x1b]633;AlacrtermCwd;{cwd}\x07"
+                            )
+                            .into_bytes(),
+                        )?;
                         session.data(channel, b"\x1b]633;CommandReset\x07\x1b]633;Command;remote-command\x07\x1b]633;D;0\x07\x1b]633;A\x07$ \x1b]633;B\x07".to_vec())?;
                         return Ok(());
                     }
                     if line.trim() == "scrollbar-probe" {
-                        let output: String = (0..500).map(|line| format!("SCROLLROW{line:04}\r\n")).collect();
+                        let output: String = (0..500)
+                            .map(|line| format!("SCROLLROW{line:04}\r\n"))
+                            .collect();
                         session.data(channel, output.into_bytes())?;
                         return Ok(());
                     }
@@ -363,7 +376,10 @@ impl russh::server::Handler for LocalServer {
                         return Ok(());
                     }
                     if line.trim() == "protocol-probe" {
-                        session.data(channel, b"\x1b]2;RuntimeProbe\x07\x1b[6n\x1b[c\x1b]11;?\x07".to_vec())?;
+                        session.data(
+                            channel,
+                            b"\x1b]2;RuntimeProbe\x07\x1b[6n\x1b[c\x1b]11;?\x07".to_vec(),
+                        )?;
                         return Ok(());
                     }
                     if line.trim() == "sync-probe" {
