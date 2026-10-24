@@ -6,6 +6,77 @@ use gpui::{
 };
 use terminal::Modes;
 impl TerminalView {
+    pub(crate) fn render_inline_suggestion(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.focused || self.ime_state.is_some() || self.exited {
+            return None;
+        }
+        let suffix = self.suggestions.preview_suffix()?.to_owned();
+        let terminal = self.terminal.as_ref()?.read(cx);
+        let content = terminal.last_content();
+        if content.display_offset != 0
+            || terminal.vi_mode_enabled()
+            || content
+                .mode
+                .intersects(Modes::ALT_SCREEN | Modes::MOUSE_MODE)
+        {
+            return None;
+        }
+        let bounds = content.terminal_bounds;
+        let left = bounds.cell_width * content.cursor.point.column as f32;
+        let top = bounds.line_height * content.cursor.point.line.max(0) as f32;
+        let width = (bounds.bounds.size.width - left).max(px(0.));
+        if width < bounds.cell_width {
+            return None;
+        }
+        let settings = self.settings.clone();
+        Some(
+            gpui::canvas(
+                |_, _, _| {},
+                move |canvas_bounds, _, window, cx| {
+                    let style = gpui::TextStyle {
+                        font_family: settings.font_family.clone(),
+                        font_weight: settings.font_weight,
+                        font_features: gpui::FontFeatures::disable_ligatures(),
+                        ..Default::default()
+                    };
+                    let line = window.text_system().shape_line(
+                        suffix.clone().into(),
+                        settings.font_size,
+                        &[gpui::TextRun {
+                            len: suffix.len(),
+                            font: style.font(),
+                            color: settings.colors.terminal_foreground.opacity(0.45),
+                            ..Default::default()
+                        }],
+                        Some(bounds.cell_width),
+                    );
+                    window.with_content_mask(
+                        Some(gpui::ContentMask {
+                            bounds: canvas_bounds,
+                        }),
+                        |window| {
+                            if let Err(error) = line.paint(
+                                canvas_bounds.origin,
+                                bounds.line_height,
+                                gpui::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            ) {
+                                log::debug!("failed to paint terminal suggestion: {error}");
+                            }
+                        },
+                    );
+                },
+            )
+            .absolute()
+            .left(left)
+            .top(top)
+            .w(width)
+            .h(bounds.line_height)
+            .into_any_element(),
+        )
+    }
     pub(crate) fn render_suggestions(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.focused
             || self.ime_state.is_some()
@@ -29,8 +100,19 @@ impl TerminalView {
         if width < px(120.) {
             return None;
         }
-        let row_height = px(46.);
-        let height = row_height * (self.suggestions.candidates.len() + 1) as f32 + px(8.);
+        let row_height = px(28.);
+        let height =
+            self.suggestions
+                .candidates
+                .iter()
+                .fold(row_height + px(8.), |height, candidate| {
+                    height
+                        + if self.suggestions.descriptions.contains_key(candidate) {
+                            px(46.)
+                        } else {
+                            row_height
+                        }
+                });
         let caret_y = bounds.line_height * content.cursor.point.line.max(0) as f32;
         let below = caret_y + bounds.line_height;
         let top = if below + height <= bounds.bounds.size.height {
@@ -64,7 +146,11 @@ impl TerminalView {
             let selected = index == self.suggestions.selected;
             let mut row = div()
                 .id(("terminal-suggestion", index))
-                .h(row_height)
+                .h(if self.suggestions.descriptions.contains_key(command) {
+                    px(46.)
+                } else {
+                    row_height
+                })
                 .px_3()
                 .text_sm()
                 .overflow_hidden()
@@ -97,7 +183,7 @@ impl TerminalView {
                         .px_3()
                         .text_xs()
                         .text_color(foreground.opacity(0.65))
-                        .child("命令建议 · ↑↓ 选择 · Tab 插入 · Esc 关闭"),
+                        .child("命令建议 · ↑↓ 选择 · Tab/→ 插入 · Esc 关闭"),
                 )
                 .into_any_element(),
         )

@@ -674,7 +674,7 @@ impl TerminalView {
                     cx.stop_propagation();
                     return;
                 }
-                "tab" if !e.keystroke.modifiers.shift => {
+                key if !e.keystroke.modifiers.shift && (key == "tab" || (key == "right" && self.suggestions.preview_suffix().is_some())) => {
                     self.accept_suggestion(cx);
                     cx.stop_propagation();
                     return;
@@ -929,6 +929,9 @@ impl Render for TerminalView {
             }
         }
 
+        if let Some(inline) = self.render_inline_suggestion(cx) {
+            root = root.child(inline);
+        }
         if let Some(popup) = self.render_suggestions(cx) {
             root = root.child(popup);
         }

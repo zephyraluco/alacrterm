@@ -197,6 +197,16 @@ impl Suggestions {
                 .rem_euclid(self.candidates.len() as isize) as usize;
         }
     }
+    pub fn preview_suffix(&self) -> Option<&str> {
+        if !self.active || self.dismissed || self.text.is_empty() || self.cursor != self.text.len()
+        {
+            return None;
+        }
+        self.candidates
+            .get(self.selected)?
+            .strip_prefix(&self.text)
+            .filter(|suffix| !suffix.is_empty() && !suffix.chars().any(char::is_control))
+    }
     pub fn accept(&mut self) -> Option<String> {
         if !self.active || self.cursor != self.text.len() {
             return None;
@@ -222,6 +232,25 @@ mod tests {
         state.phase(PromptEvent::Execute);
     }
     #[test]
+    fn inline_preview_follows_selection_and_disappears_on_edit_or_dismiss() {
+        let mut state = Suggestions::default();
+        execute(&mut state, "echo 你好");
+        execute(&mut state, "echo world");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("echo ");
+        state.refresh(false);
+        assert_eq!(state.preview_suffix(), Some("world"));
+        state.step(1);
+        assert_eq!(state.preview_suffix(), Some("你好"));
+        state.edit_key("left", false);
+        assert!(state.preview_suffix().is_none());
+        state.edit_key("end", false);
+        assert_eq!(state.preview_suffix(), Some("你好"));
+        state.dismiss();
+        assert!(state.preview_suffix().is_none());
+    }
+    #[test]
     fn command_specs_require_current_shell_inventory() {
         let mut state = Suggestions::default();
         state.phase(PromptEvent::Prompt);
@@ -232,7 +261,10 @@ mod tests {
         state.add_command("git");
         state.refresh(false);
         assert_eq!(state.candidates, ["git status"]);
-        assert_eq!(state.descriptions.get("git status"), Some(&"查看工作区状态"));
+        assert_eq!(
+            state.descriptions.get("git status"),
+            Some(&"查看工作区状态")
+        );
         assert_eq!(state.accept().as_deref(), Some("tus"));
         assert!(state.active);
     }
