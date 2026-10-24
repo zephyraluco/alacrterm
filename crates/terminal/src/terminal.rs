@@ -1315,6 +1315,7 @@ impl Terminal {
                 return;
             }
             SshEvent::Closed { exit_status, reason } => {
+                self.connected = false;
                 if self.ssh_status_shown {
                     self.ssh_status_shown = false;
                     self.feed_remote_bytes(b"\r\x1b[2K");
@@ -2545,6 +2546,42 @@ impl Terminal {
     /// （主机密钥可能还没确认，那条连接没有确认通道，只会失败）。
     pub fn remote_fs(&self) -> Option<SshFs> {
         self.backend.remote_fs()
+    }
+
+    /// Reconnect a finished SSH session while retaining its terminal grid and history.
+    pub fn reconnect(&mut self, cx: &mut Context<Self>) -> bool {
+        let TerminalTarget::Ssh(params) = &self.template.target else {
+            return false;
+        };
+        let (sender, mut events) = unbounded::<SshEvent>();
+        let Ok(session) = SshSession::connect(
+            params.clone(),
+            crate::backend::ssh_size_from_bounds(self.last_content.terminal_bounds),
+            sender,
+        ) else {
+            return false;
+        };
+        self.backend.shutdown();
+        self.backend = TerminalBackend::Ssh(session);
+        self.connected = false;
+        self.remote_cwd = None;
+        self.osc7_seen = false;
+        self.directory_scanner = DirectoryScanner::default();
+        self.output_processor = Processor::new();
+        self.ssh_status_shown = false;
+        self.child_exited = None;
+        self.keyboard_input_sent = false;
+        self.feed_remote_bytes(b"\r\n\x1b[0m");
+        // Replacing the retained task cancels the previous event pump, so late events
+        // from the old connection cannot affect this terminal after reconnecting.
+        self.event_loop_task = cx.spawn(async move |terminal, cx| {
+            while let Some(event) = events.next().await {
+                terminal.update(cx, |terminal, cx| terminal.process_ssh_event(event, cx))?;
+            }
+            anyhow::Ok(())
+        });
+        cx.notify();
+        true
     }
 
     /// 这个会话是否可用了（本地会话恒为真；远端会话要等连接建立）。

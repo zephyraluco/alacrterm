@@ -22,7 +22,7 @@ use std::{
 use gpui::{
     App, AppContext as _, AsyncApp, Entity, FocusHandle, IntoElement, InteractiveElement,
     KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollWheelEvent, SharedString,
-    Styled, Subscription, WeakEntity, Window, div, rgb,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, rgb,
 };
 use terminal::{
     Event as TerminalEvent, HostKeyPrompt, Modes, SshFs, Terminal, TerminalBounds,
@@ -78,6 +78,7 @@ pub struct TerminalView {
     /// 由 `CloseTerminal` 事件置位；应用据此在状态栏显示「已断开」，
     /// 但不会因此退出程序（见 `handle_terminal_event`）。
     exited: bool,
+    remote: bool,
     settings: Arc<TerminalRenderSettings>,
     title: SharedString,
     /// IME 组合文本状态（由 `TerminalElement` 在渲染时读取）。
@@ -103,6 +104,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
+        let remote = target.is_ssh();
         let env = std::env::vars().collect();
         let builder = TerminalBuilder::new(working_directory, target, env, cx);
         let focus_handle = cx.focus_handle();
@@ -178,11 +180,26 @@ impl TerminalView {
             _subscriptions: vec![focus_in, focus_out],
             error: None,
             exited: false,
+            remote,
             settings,
             title: "终端".into(),
             ime_state: None,
             cursor_phase: true,
             host_key_prompt: host_key,
+        }
+    }
+
+    /// Retry only a disconnected SSH pane; keep the same view and scrollback.
+    pub fn reconnect(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.remote || !self.exited {
+            return;
+        }
+        if let Some(terminal) = &self.terminal {
+            if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
+                self.exited = false;
+                self.ime_state = None;
+                cx.notify();
+            }
         }
     }
 
@@ -553,6 +570,7 @@ impl Render for TerminalView {
             // （`TerminalElement` 自己不贡献 element id）。
             .id(("terminal-view", cx.entity_id()))
             .size_full()
+            .relative()
             .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -584,6 +602,25 @@ impl Render for TerminalView {
             );
         }
 
+        if self.remote && self.exited {
+            root = root.child(
+                div().absolute().top_0().right_0().p_2().child(
+                    div()
+                        .id("reconnect-ssh")
+                        .px_3()
+                        .py_1()
+                        .bg(self.settings.colors.terminal_background)
+                        .text_color(self.settings.colors.terminal_foreground)
+                        .cursor_pointer()
+                        .child("已断开 · 重新连接")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.reconnect(cx);
+                            window.focus(&this.focus_handle, cx);
+                        })),
+                ),
+            );
+        }
         root
     }
 }

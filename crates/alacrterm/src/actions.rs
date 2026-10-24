@@ -94,6 +94,13 @@ pub(crate) struct OpenSession {
     pub(crate) path: SessionPath,
 }
 
+/// Edit a saved connection without changing any live terminal.
+#[derive(Clone, Action, PartialEq, Eq, Deserialize)]
+#[action(namespace = alacrterm, no_json)]
+pub(crate) struct EditSession {
+    pub(crate) path: SessionPath,
+}
+
 /// 把列表里的一个条目挪到另一个目录下。
 #[derive(Clone, Action, PartialEq, Eq, Deserialize)]
 #[action(namespace = alacrterm, no_json)]
@@ -141,6 +148,14 @@ impl AppRoot {
             let path = action.path.clone();
             Self::defer_after_update(open_root.clone(), cx, move |this, window, cx| {
                 this.open_session_record(&path, window, cx)
+            });
+        });
+
+        let edit_root = root.clone();
+        cx.on_action(move |action: &EditSession, cx: &mut App| {
+            let path = action.path.clone();
+            Self::defer_after_update(edit_root.clone(), cx, move |this, window, cx| {
+                this.open_edit_session_dialog(&path, window, cx)
             });
         });
 

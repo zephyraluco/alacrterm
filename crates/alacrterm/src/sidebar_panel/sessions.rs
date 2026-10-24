@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::empty_state;
 use super::shared::{DragPreview, RowCache, row_content, row_shell};
-use crate::actions::{MoveEntry, NewFolder, NewSession, OpenSession, RemoveEntry};
+use crate::actions::{EditSession, MoveEntry, NewFolder, NewSession, OpenSession, RemoveEntry};
 use crate::assets::IconName;
 use crate::terminal_panel::SessionRequest;
 use terminal::{SshParams, TerminalTarget};
@@ -65,6 +65,7 @@ impl SessionFolder {
 }
 
 /// 一条会话记录(连接参数)。
+#[derive(Clone)]
 pub(crate) struct SessionRecord {
     pub(crate) id: u64,
     pub(crate) name: SharedString,
@@ -366,6 +367,48 @@ impl SessionsState {
         }
     }
 
+    pub(crate) fn record(&self, path: &[usize]) -> Option<SessionRecord> {
+        match self.entry(path)? {
+            SessionEntry::Session(record) => Some(record.clone()),
+            SessionEntry::Folder(_) => None,
+        }
+    }
+
+    /// Locate by stable ID, since a tree path may change while the dialog is open.
+    fn replace_record(entries: &mut [SessionEntry], id: u64, record: &SessionRecord) -> bool {
+        for entry in entries {
+            match entry {
+                SessionEntry::Session(existing) if existing.id == id => {
+                    *existing = record.clone();
+                    existing.id = id;
+                    return true;
+                }
+                SessionEntry::Folder(folder) => {
+                    if Self::replace_record(&mut folder.children, id, record) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    pub(crate) fn update_record(
+        &mut self,
+        id: u64,
+        record: SessionRecord,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !Self::replace_record(&mut self.entries, id, &record) {
+            return false;
+        }
+        self.persist();
+        self.rows.bump();
+        cx.notify();
+        true
+    }
+
     /// 往列表里加一条记录。
     pub(crate) fn add_record(
         &mut self,
@@ -643,6 +686,10 @@ fn session_row_element(
                         path: menu_path.clone(),
                     }),
                 )
+                .menu(
+                    "编辑会话",
+                    Box::new(EditSession { path: menu_path.clone() }),
+                )
                 .separator()
                 .menu(
                     "删除会话",
@@ -658,6 +705,56 @@ fn session_row_element(
 #[cfg(test)]
 mod tests {
     use super::{PersistedEntry, SessionEntry, SessionFolder, SessionRecord};
+
+    #[test]
+    fn editing_finds_moved_record_by_id_and_preserves_neighbors() {
+        let make = |id, host: &str| SessionRecord {
+            id,
+            name: "server".into(),
+            user: "user".into(),
+            host: host.into(),
+            port: 22,
+            password: Some(" old password ".into()),
+        };
+        let mut entries = vec![SessionEntry::Folder(SessionFolder {
+            id: 1,
+            name: "group".into(),
+            children: vec![
+                SessionEntry::Session(make(2, "neighbor")),
+                SessionEntry::Session(make(3, "before")),
+            ],
+        })];
+        let mut replacement = make(0, "after");
+        replacement.port = 2222;
+        replacement.password = None;
+        assert!(super::SessionsState::replace_record(
+            &mut entries,
+            3,
+            &replacement
+        ));
+        let SessionEntry::Folder(folder) = &entries[0] else {
+            panic!("expected folder");
+        };
+        let SessionEntry::Session(neighbor) = &folder.children[0] else {
+            panic!("expected session");
+        };
+        let SessionEntry::Session(edited) = &folder.children[1] else {
+            panic!("expected session");
+        };
+        assert_eq!(neighbor.host, "neighbor");
+        assert_eq!(edited.id, 3);
+        assert_eq!(edited.host, "after");
+        assert_eq!(edited.port, 2222);
+        assert!(edited.password.is_none());
+        assert!(!super::SessionsState::replace_record(
+            &mut entries,
+            99,
+            &replacement
+        ));
+        let stored = serde_json::to_string(&PersistedEntry::from(&entries[0])).unwrap();
+        assert!(stored.contains("after"));
+        assert!(!stored.contains("before"));
+    }
 
     #[test]
     fn old_x11_setting_is_ignored_and_no_longer_persisted() {
