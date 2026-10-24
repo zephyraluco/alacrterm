@@ -1,6 +1,9 @@
 //! Application-level WayX control: icon-only status and explicit confirmation.
 use crate::{AppRoot, assets::IconName};
-use gpui::{App, Context, IntoElement, ParentElement as _, Styled as _, Window, div, px};
+use gpui::{
+    App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
+    Styled as _, Window, div, px,
+};
 use gpui_kit::component::{
     Disableable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -17,15 +20,24 @@ impl AppRoot {
             WayxStatus::Stopping => (IconName::Loader, "WayX 正在停止"),
             WayxStatus::Failed => (IconName::TriangleAlert, "重试启动 WayX"),
         };
-        Button::new("wayx-control")
-            .icon(icon)
-            .ghost()
-            .accessibility_label(label)
-            .disabled(matches!(
-                self.wayx_status,
-                WayxStatus::Starting | WayxStatus::Stopping
-            ))
-            .on_click(cx.listener(|_, _, window, cx| Self::confirm_wayx(window, cx)))
+        // Occlusion excludes the ancestor's Drag hitbox from native Windows
+        // hit testing. Stopping propagation also prevents title-bar movement
+        // when an ordinary mouse event reaches the control on Linux/macOS.
+        div()
+            .id("wayx-control-area")
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new("wayx-control")
+                    .icon(icon)
+                    .ghost()
+                    .accessibility_label(label)
+                    .disabled(matches!(
+                        self.wayx_status,
+                        WayxStatus::Starting | WayxStatus::Stopping
+                    ))
+                    .on_click(cx.listener(|_, _, window, cx| Self::confirm_wayx(window, cx))),
+            )
     }
 
     fn confirm_wayx(window: &mut Window, cx: &mut App) {
