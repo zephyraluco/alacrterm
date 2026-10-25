@@ -89,6 +89,7 @@ pub struct TerminalView {
     terminal_blinking: Option<bool>,
     suggestions: suggestions::Suggestions,
     suggestion_task: gpui::Task<()>,
+    suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
     path_cache: Option<(String, std::time::Instant, Vec<path_suggestions::Entry>)>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
@@ -217,6 +218,7 @@ impl TerminalView {
             terminal_blinking: None,
             suggestions: Default::default(),
             suggestion_task: gpui::Task::ready(()),
+            suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             path_cache: None,
             _blink_task: blink_task,
             grid_cache: Default::default(),
@@ -513,6 +515,7 @@ impl TerminalView {
                     return None;
                 }
                 this.suggestions.refresh(manual);
+                this.suggestion_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
                 let query = this.suggestions.path_query()?;
                 let cwd = this.suggestions.cwd.clone().unwrap_or_default();
@@ -670,6 +673,7 @@ impl TerminalView {
             match key {
                 "up" | "down" => {
                     self.suggestions.step(if key == "up" { -1 } else { 1 });
+                    self.suggestion_scroll.scroll_to_item(self.suggestions.selected, gpui::ScrollStrategy::Nearest);
                     cx.notify();
                     cx.stop_propagation();
                     return;

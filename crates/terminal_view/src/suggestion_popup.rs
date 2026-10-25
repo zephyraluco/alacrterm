@@ -1,8 +1,12 @@
-//! Cursor-anchored history menu. Accepting a candidate only writes its suffix.
+//! Non-focusing, virtualized terminal completion surface.
 use crate::TerminalView;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement as _, MouseButton,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
+    ParentElement as _, Styled as _, div, point, px, size,
+};
+use gpui_kit::{
+    base::Positioner,
+    component::{list::ListItem, scroll::Scrollbar, v_virtual_list},
 };
 use terminal::Modes;
 impl TerminalView {
@@ -25,15 +29,25 @@ impl TerminalView {
             return None;
         }
         let bounds = content.terminal_bounds;
-        let width = bounds.bounds.size.width.min(px(420.)).max(px(0.));
-        if width < px(120.) {
+        let width = bounds.bounds.size.width.min(px(480.)).max(px(0.));
+        let row_height = px(42.);
+        let footer = px(28.);
+        let caret_y = bounds.line_height * content.cursor.point.line.max(0) as f32;
+        let below = (caret_y + bounds.line_height).min(bounds.bounds.size.height);
+        let available_below = (bounds.bounds.size.height - below).max(px(0.));
+        let available_above = caret_y.min(bounds.bounds.size.height).max(px(0.));
+        let desired =
+            row_height * self.suggestions.candidates.len().min(8) as f32 + footer + px(2.);
+        let place_below = desired <= available_below || available_below >= available_above;
+        let height = desired.min(if place_below {
+            available_below
+        } else {
+            available_above
+        });
+        if width < px(120.) || height < row_height + footer {
             return None;
         }
-        let row_height = px(46.);
-        let height = row_height * (self.suggestions.candidates.len() + 1) as f32 + px(8.);
-        let caret_y = bounds.line_height * content.cursor.point.line.max(0) as f32;
-        let below = caret_y + bounds.line_height;
-        let top = if below + height <= bounds.bounds.size.height {
+        let top = if place_below {
             below
         } else {
             (caret_y - height).max(px(0.))
@@ -41,65 +55,108 @@ impl TerminalView {
         let left = (bounds.cell_width * content.cursor.point.column as f32)
             .min((bounds.bounds.size.width - width).max(px(0.)));
         let foreground = self.settings.colors.terminal_foreground;
-        let mut popup = div()
+        let item_sizes = std::rc::Rc::new(vec![
+            size(width, row_height);
+            self.suggestions.candidates.len()
+        ]);
+        let list = v_virtual_list(
+            cx.entity(),
+            "terminal-candidates",
+            item_sizes,
+            move |this, range, _, cx| {
+                range
+                    .filter_map(|index| {
+                        let command = this.suggestions.candidates.get(index)?;
+                        let mut text = div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(div().truncate().child(command.clone()));
+                        if let Some(description) = this.suggestions.descriptions.get(command) {
+                            text = text.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(foreground.opacity(0.65))
+                                    .truncate()
+                                    .child(*description),
+                            );
+                        }
+                        Some(
+                            ListItem::new(("terminal-candidate", index))
+                                .h(row_height)
+                                .w_full()
+                                .px_3()
+                                .text_sm()
+                                .selected(index == this.suggestions.selected)
+                                .child(text)
+                                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if this.ime_state.is_none() {
+                                        this.suggestions.selected = index;
+                                        this.accept_suggestion(cx);
+                                        window.focus(&this.focus_handle, cx);
+                                    }
+                                })),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.suggestion_scroll)
+        .size_full();
+        let surface = div()
             .id("terminal-suggestions")
-            .absolute()
-            .left(left)
-            .top(top)
             .w(width)
-            .max_h(bounds.bounds.size.height)
-            .overflow_hidden()
-            .py_1()
+            .h(height)
+            .flex()
+            .flex_col()
             .border_1()
             .border_color(foreground.opacity(0.3))
             .rounded_md()
             .bg(self.settings.colors.terminal_background)
             .text_color(foreground)
+            .overflow_hidden()
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
-            });
-        for (index, command) in self.suggestions.candidates.iter().enumerate() {
-            let selected = index == self.suggestions.selected;
-            let mut row = div()
-                .id(("terminal-suggestion", index))
-                .h(row_height)
-                .px_3()
-                .text_sm()
-                .overflow_hidden()
-                .cursor_pointer()
-                .child(div().child(command.clone()));
-            if let Some(description) = self.suggestions.descriptions.get(command) {
-                row = row.child(
-                    div()
-                        .text_xs()
-                        .text_color(foreground.opacity(0.65))
-                        .child(*description),
-                );
-            }
-            if selected {
-                row = row.bg(self.settings.selection_color);
-            }
-            popup = popup.child(row.on_click(cx.listener(move |this, _, window, cx| {
-                if this.ime_state.is_none() {
-                    this.suggestions.selected = index;
-                    this.accept_suggestion(cx);
-                    window.focus(&this.focus_handle, cx);
-                }
-            })));
-        }
+            })
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(list)
+                    .child(Scrollbar::vertical(&self.suggestion_scroll).viewport_from_layout()),
+            )
+            .child(
+                div()
+                    .h(footer)
+                    .px_3()
+                    .text_xs()
+                    .text_color(foreground.opacity(0.65))
+                    .child(format!(
+                        "{} 项 · ↑↓ 选择 · Tab 插入 · Esc 关闭",
+                        self.suggestions.candidates.len()
+                    )),
+            );
+        // Pane-local geometry above prevents a window-positioned surface spilling into
+        // a neighboring split. Positioner supplies deferred overlay layout and clamping.
         Some(
-            popup
-                .child(
-                    div()
-                        .h(row_height)
-                        .px_3()
-                        .text_xs()
-                        .text_color(foreground.opacity(0.65))
-                        .child("命令建议 · ↑↓ 选择 · Tab 插入 · Esc 关闭"),
+            gpui::deferred(
+                Positioner::corner(
+                    gpui::Anchor::TopLeft,
+                    bounds.bounds.origin + point(left, top),
                 )
-                .into_any_element(),
+                .margin(px(0.))
+                .occlude()
+                .child(surface),
+            )
+            .into_any_element(),
         )
     }
 }

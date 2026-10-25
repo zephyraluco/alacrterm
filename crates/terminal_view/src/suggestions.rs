@@ -32,7 +32,7 @@ impl Suggestions {
     }
     pub fn add_paths(&mut self, candidates: Vec<String>) {
         for candidate in candidates {
-            if self.candidates.len() >= 8 {
+            if self.candidates.len() >= 4096 {
                 break;
             }
             if candidate.starts_with(&self.text) && !self.candidates.contains(&candidate) {
@@ -149,7 +149,7 @@ impl Suggestions {
             self.history
                 .iter()
                 .filter(|command| command.starts_with(&self.text) && **command != self.text)
-                .take(8)
+                .take(256)
                 .cloned(),
         );
         self.append_commands();
@@ -161,7 +161,7 @@ impl Suggestions {
         {
             for (candidate, description) in crate::command_specs::candidates(&self.text) {
                 self.descriptions.insert(candidate.clone(), description);
-                if self.candidates.len() < 8 && !self.candidates.contains(&candidate) {
+                if self.candidates.len() < 4096 && !self.candidates.contains(&candidate) {
                     self.candidates.push(candidate);
                 }
             }
@@ -172,7 +172,7 @@ impl Suggestions {
             return;
         }
         for command in &self.commands {
-            if self.candidates.len() >= 8 {
+            if self.candidates.len() >= 4096 {
                 break;
             }
             if command.starts_with(&self.text)
@@ -222,6 +222,23 @@ mod tests {
         state.phase(PromptEvent::Execute);
     }
     #[test]
+    fn all_candidates_remain_navigable_beyond_the_visible_rows() {
+        let mut state = Suggestions::default();
+        for index in 0..40 {
+            state.add_command(&format!("demo{index:02}"));
+        }
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("demo");
+        state.refresh(false);
+        assert_eq!(state.candidates.len(), 40);
+        for _ in 0..12 {
+            state.step(1);
+        }
+        assert_eq!(state.accept().as_deref(), Some("12"));
+        assert_eq!(state.text, "demo12");
+    }
+    #[test]
     fn command_specs_require_current_shell_inventory() {
         let mut state = Suggestions::default();
         state.phase(PromptEvent::Prompt);
@@ -232,7 +249,10 @@ mod tests {
         state.add_command("git");
         state.refresh(false);
         assert_eq!(state.candidates, ["git status"]);
-        assert_eq!(state.descriptions.get("git status"), Some(&"查看工作区状态"));
+        assert_eq!(
+            state.descriptions.get("git status"),
+            Some(&"查看工作区状态")
+        );
         assert_eq!(state.accept().as_deref(), Some("tus"));
         assert!(state.active);
     }
