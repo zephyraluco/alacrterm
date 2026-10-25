@@ -5,7 +5,9 @@ use terminal::PromptEvent;
 pub(super) struct Suggestions {
     pub active: bool,
     pub text: String,
-    cursor: usize,
+    pub cursor: usize,
+    pub revision: u64,
+    candidate_revision: u64,
     history: Vec<String>,
     commands: Vec<String>,
     pub cwd: Option<String>,
@@ -25,33 +27,17 @@ impl Suggestions {
         }
     }
     pub fn path_query(&self) -> Option<crate::path_suggestions::PathQuery> {
-        if !self.active || self.dismissed || self.cursor != self.text.len() {
+        if !self.active || self.dismissed {
             return None;
         }
-        crate::path_suggestions::PathQuery::parse(&self.text, self.powershell?)
+        crate::path_suggestions::PathQuery::parse(&self.text, self.cursor, self.powershell?)
     }
-    pub fn add_paths(&mut self, candidates: Vec<String>) {
+    pub fn add_paths(&mut self, candidates: Vec<Candidate>) {
         let selected = self
             .candidates
             .get(self.selected)
             .map(|item| (item.insert_text.clone(), item.replacement.clone()));
-        for text in candidates {
-            if text.starts_with(&self.text) {
-                let directory = text.ends_with('/');
-                let kind = if directory {
-                    Kind::Directory
-                } else {
-                    Kind::File
-                };
-                self.candidates.push(Candidate::new(
-                    text,
-                    self.text.len(),
-                    kind,
-                    Source::Filesystem,
-                    if directory { 1600 } else { 1500 },
-                ));
-            }
-        }
+        self.candidates.extend(candidates);
         rank(&mut self.candidates);
         if let Some((text, range)) = selected {
             self.selected = self
@@ -74,6 +60,7 @@ impl Suggestions {
         }
     }
     pub fn phase(&mut self, event: PromptEvent) {
+        self.revision = self.revision.wrapping_add(1);
         if event == PromptEvent::Input && self.active && self.text.is_empty() {
             return;
         }
@@ -106,6 +93,7 @@ impl Suggestions {
             self.invalidate();
             return;
         }
+        self.revision = self.revision.wrapping_add(1);
         self.text.insert_str(self.cursor, text);
         self.cursor += text.len();
         self.dismissed = false;
@@ -119,6 +107,7 @@ impl Suggestions {
         self.dismiss();
     }
     pub fn edit_key(&mut self, key: &str, control: bool) {
+        self.revision = self.revision.wrapping_add(1);
         if !self.active {
             return;
         }
@@ -157,65 +146,66 @@ impl Suggestions {
     }
     pub fn refresh(&mut self, manual: bool) {
         self.candidates.clear();
+        self.candidate_revision = self.revision;
         self.selected = 0;
-        if !self.active
-            || self.dismissed
-            || self.cursor != self.text.len()
-            || (!manual && self.text.is_empty())
-        {
+        if !self.active || self.dismissed || (!manual && self.text.is_empty()) {
             return;
         }
-        self.candidates.extend(
-            self.history
-                .iter()
-                .enumerate()
-                .filter(|(_, command)| command.starts_with(&self.text) && **command != self.text)
-                .map(|(index, command)| {
-                    Candidate::new(
-                        command.clone(),
-                        self.text.len(),
-                        Kind::History,
-                        Source::History,
-                        1800 - index as i64,
-                    )
-                }),
-        );
-        if !self.text.chars().any(char::is_whitespace) {
+        if self.cursor == self.text.len() {
             self.candidates.extend(
-                self.commands
+                self.history
                     .iter()
-                    .filter(|command| command.starts_with(&self.text) && **command != self.text)
-                    .map(|command| {
+                    .enumerate()
+                    .filter(|(_, command)| {
+                        command.starts_with(&self.text) && **command != self.text
+                    })
+                    .map(|(index, command)| {
                         Candidate::new(
                             command.clone(),
                             self.text.len(),
-                            Kind::Command,
-                            Source::Shell,
-                            1700,
+                            Kind::History,
+                            Source::History,
+                            1800 - index as i64,
                         )
                     }),
             );
-        }
-        let command = self.text.split_whitespace().next().unwrap_or("");
-        if self
-            .commands
-            .binary_search_by(|name| name.as_str().cmp(command))
-            .is_ok()
-        {
-            for (text, description) in crate::command_specs::candidates(&self.text) {
-                let kind = if text
-                    .split_whitespace()
-                    .last()
-                    .is_some_and(|word| word.starts_with('-'))
-                {
-                    Kind::Option
-                } else {
-                    Kind::Subcommand
-                };
-                let mut item =
-                    Candidate::new(text, self.text.len(), kind, Source::Specification, 2000);
-                item.description = Some(description.into());
-                self.candidates.push(item);
+            if !self.text.chars().any(char::is_whitespace) {
+                self.candidates.extend(
+                    self.commands
+                        .iter()
+                        .filter(|command| command.starts_with(&self.text) && **command != self.text)
+                        .map(|command| {
+                            Candidate::new(
+                                command.clone(),
+                                self.text.len(),
+                                Kind::Command,
+                                Source::Shell,
+                                1700,
+                            )
+                        }),
+                );
+            }
+            let command = self.text.split_whitespace().next().unwrap_or("");
+            if self
+                .commands
+                .binary_search_by(|name| name.as_str().cmp(command))
+                .is_ok()
+            {
+                for (text, description) in crate::command_specs::candidates(&self.text) {
+                    let kind = if text
+                        .split_whitespace()
+                        .last()
+                        .is_some_and(|word| word.starts_with('-'))
+                    {
+                        Kind::Option
+                    } else {
+                        Kind::Subcommand
+                    };
+                    let mut item =
+                        Candidate::new(text, self.text.len(), kind, Source::Specification, 2000);
+                    item.description = Some(description.into());
+                    self.candidates.push(item);
+                }
             }
         }
         rank(&mut self.candidates);
@@ -235,22 +225,40 @@ impl Suggestions {
         }
     }
     pub fn accept(&mut self) -> Option<String> {
-        if !self.active || self.cursor != self.text.len() {
+        if !self.active || self.candidate_revision != self.revision {
             return None;
         }
-        let candidate = self.candidates.get(self.selected)?;
-        if candidate.replacement != (0..self.text.len()) {
+        let item = self.candidates.get(self.selected)?;
+        let range = item.replacement.clone();
+        if self.cursor < range.start || self.cursor > range.end {
             return None;
         }
-        let suffix = self
-            .candidates
-            .get(self.selected)?
-            .insert_text
-            .strip_prefix(&self.text)?
-            .to_string();
-        self.input(&suffix);
+        let old = self.text.get(range.clone())?;
+        if item.insert_text.chars().any(char::is_control) {
+            return None;
+        }
+        let mut bytes = if self.cursor == range.end && item.insert_text.starts_with(old) {
+            item.insert_text[old.len()..].to_string()
+        } else {
+            // Non-ASCII line editors disagree about combining-character movement.
+            // Keep their native behavior unless accepting a suffix requires no edit.
+            if !old.is_ascii() {
+                return None;
+            }
+            format!(
+                "{}{}{}",
+                "\x1b[D".repeat(self.cursor - range.start),
+                "\x1b[3~".repeat(old.len()),
+                item.insert_text
+            )
+        };
+        bytes.push_str(&"\x1b[D".repeat(item.cursor_back));
+        let new_cursor = range.start + item.insert_text.len() - item.cursor_back;
+        self.text.replace_range(range, &item.insert_text);
+        self.cursor = new_cursor;
+        self.revision = self.revision.wrapping_add(1);
         self.dismiss();
-        Some(suffix)
+        Some(bytes)
     }
 }
 #[cfg(test)]
@@ -285,7 +293,22 @@ mod tests {
         assert_eq!(state.candidates.len(), 21);
         state.step(3);
         let selected = state.candidates[state.selected].insert_text.clone();
-        state.add_paths(vec!["git station/".into(), "git status".into()]);
+        state.add_paths(vec![
+            Candidate::new(
+                "git station/".into(),
+                state.text.len(),
+                Kind::Directory,
+                Source::Filesystem,
+                1950,
+            ),
+            Candidate::new(
+                "git status".into(),
+                state.text.len(),
+                Kind::File,
+                Source::Filesystem,
+                1900,
+            ),
+        ]);
         assert_eq!(state.candidates[state.selected].insert_text, selected);
         assert_eq!(
             state
@@ -301,6 +324,29 @@ mod tests {
                 .iter()
                 .any(|item| item.kind == Kind::Directory)
         );
+    }
+    #[test]
+    fn replacement_preserves_following_arguments_and_rejects_stale_candidates() {
+        let mut state = Suggestions::default();
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.context("shell", "posix");
+        state.input("cat saZZ other");
+        for _ in 0..8 {
+            state.edit_key("left", false);
+        }
+        state.refresh(false);
+        let query = state.path_query().unwrap();
+        state.add_paths(query.candidates(vec![crate::path_suggestions::Entry {
+            name: "sample file".into(),
+            directory: false,
+        }]));
+        let edit = state.accept().unwrap();
+        assert_eq!(state.text, "cat sample\\ file other");
+        assert!(!edit.contains('\n'));
+        state.refresh(false);
+        state.input("x");
+        assert!(state.accept().is_none());
     }
     #[test]
     fn all_candidates_remain_navigable_beyond_the_visible_rows() {

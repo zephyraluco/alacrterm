@@ -519,6 +519,7 @@ impl TerminalView {
                 this.suggestion_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
                 let query = this.suggestions.path_query()?;
+                let revision = this.suggestions.revision;
                 let cwd = this.suggestions.cwd.clone().unwrap_or_default();
                 Some((
                     query,
@@ -526,30 +527,31 @@ impl TerminalView {
                     this.remote,
                     this.remote_fs(cx),
                     this.path_cache.clone(),
+                    revision,
                 ))
             }) else {
                 return;
             };
-            let Some((query, cwd, remote, fs, cache)) = request else {
+            let Some((query, cwd, remote, fs, cache, revision)) = request else {
                 return;
             };
             let directory = if remote {
                 let Some(fs) = &fs else {
                     return;
                 };
-                let home = if query.directory.starts_with("~/") {
+                let home = if query.expand_home {
                     fs.home_dir().await.ok()
                 } else {
                     None
                 };
                 let Some(directory) =
-                    path_suggestions::remote_directory(&cwd, &query.directory, home.as_deref())
+                    query.remote_directory(&cwd, home.as_deref())
                 else {
                     return;
                 };
                 directory
             } else {
-                let path = if query.directory.starts_with("~/") {
+                let path = if query.expand_home {
                     let Some(home) =
                         std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
                     else {
@@ -575,7 +577,7 @@ impl TerminalView {
                 let Some(fs) = fs else {
                     return;
                 };
-                let Ok(entries) = fs.list_dir(directory.clone()).await else {
+                let Ok(entries) = fs.list_completion_dir(directory.clone()).await else {
                     return;
                 };
                 entries
@@ -599,7 +601,7 @@ impl TerminalView {
                                 let entry = entry.ok()?;
                                 Some(path_suggestions::Entry {
                                     name: entry.file_name().into_string().ok()?,
-                                    directory: entry.file_type().ok()?.is_dir(),
+                                    directory: entry.path().is_dir(),
                                 })
                             })
                             .collect::<Vec<_>>()
@@ -612,6 +614,7 @@ impl TerminalView {
                 // updating a different command line, prompt, or working directory.
                 if this.focused
                     && this.ime_state.is_none()
+                    && this.suggestions.revision == revision
                     && this.suggestions.path_query().as_ref() == Some(&query)
                     && this.suggestions.cwd.as_deref().unwrap_or("") == cwd
                 {

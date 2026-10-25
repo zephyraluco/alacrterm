@@ -264,6 +264,13 @@ impl SshFs {
         })
     }
 
+    /// Completion queries have a deadline and never keep canceled requests queued.
+    pub fn list_completion_dir(&self, path: impl Into<String>) -> BoxFuture<'static, Result<Vec<RemoteEntry>, SshError>> {
+        expect(self.send(RequestKind::CompletionList(path.into())), |reply| match reply {
+            Reply::Entries(entries) => Ok(entries), _ => Err(unexpected()),
+        })
+    }
+
     /// 这个路径是不是目录(输入框跳转前用它把关)。
     pub fn is_dir(&self, path: impl Into<String>) -> BoxFuture<'static, Result<bool, SshError>> {
         expect(self.send(RequestKind::IsDir(path.into())), |reply| {
@@ -482,6 +489,7 @@ enum RequestKind {
     Home,
     /// 列一层目录(POSIX 路径)。
     List(String),
+    CompletionList(String),
     /// 这个路径是不是目录。
     IsDir(String),
     /// 这个路径的元数据。
@@ -557,8 +565,13 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
     let mut sftp: Option<SftpSession> = None;
 
     while let Some(request) = requests.recv().await {
+        if request.reply.is_canceled() { continue; }
         if sftp.is_none() {
-            match connect(&params).await {
+            let connection = if matches!(request.kind, RequestKind::CompletionList(_)) {
+                tokio::time::timeout(std::time::Duration::from_secs(5), connect(&params)).await
+                    .unwrap_or_else(|_| Err(SshError::Sftp("补全连接超时".into())))
+            } else { connect(&params).await };
+            match connection {
                 Ok(session) => sftp = Some(session),
                 Err(error) => {
                     let _ = request.reply.send(Err(error));
@@ -571,6 +584,11 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
         let outcome = match &request.kind {
             RequestKind::Home => session.canonicalize(".").await.map(Reply::Home),
             RequestKind::List(path) => list_dir(session, path).await.map(Reply::Entries),
+            RequestKind::CompletionList(path) => {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), completion_dir(session, path)).await {
+                    Ok(result) => result.map(Reply::Entries), Err(_) => Err(SftpError::Timeout),
+                }
+            },
             RequestKind::IsDir(path) => session
                 .metadata(path)
                 .await
@@ -666,6 +684,20 @@ async fn connect(params: &SshParams) -> Result<SftpSession, SshError> {
 }
 
 /// 列一层目录,顺序与本地一致:目录在前、名字不区分大小写。
+async fn completion_dir(session: &SftpSession, path: &str) -> Result<Vec<RemoteEntry>, SftpError> {
+    let entries = session.read_dir(path).await?;
+    let mut result = Vec::new();
+    for entry in entries.take(4096) {
+        let name = entry.file_name();
+        if matches!(name.as_str(), "." | "..") { continue; }
+        let is_dir = if entry.file_type().is_symlink() {
+            session.metadata(format!("{}/{name}", path.trim_end_matches('/'))).await.map(|meta| meta.is_dir()).unwrap_or(false)
+        } else { entry.file_type().is_dir() };
+        result.push(RemoteEntry { name, is_dir, size: entry.metadata().len() });
+    }
+    Ok(result)
+}
+
 async fn list_dir(session: &SftpSession, path: &str) -> Result<Vec<RemoteEntry>, SftpError> {
     let entries = session.read_dir(path).await?;
     let mut items: Vec<RemoteEntry> = entries

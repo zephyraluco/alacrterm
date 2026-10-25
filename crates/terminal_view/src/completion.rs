@@ -48,6 +48,7 @@ pub(super) struct Candidate {
     pub description: Option<String>,
     pub score: i64,
     pub retrigger: bool,
+    pub cursor_back: usize,
 }
 impl Candidate {
     pub fn new(text: String, input_len: usize, kind: Kind, source: Source, score: i64) -> Self {
@@ -60,6 +61,7 @@ impl Candidate {
             description: None,
             score,
             retrigger: kind == Kind::Directory,
+            cursor_back: 0,
         }
     }
 }
