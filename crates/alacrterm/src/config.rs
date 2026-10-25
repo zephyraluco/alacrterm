@@ -1,77 +1,17 @@
 //! 应用配置：终端渲染参数（`config/terminal.json`）与界面主题（`themes/*.json` + `config/app.json`）。
 //! 运行期状态在 [`Settings`] 全局，查找顺序「exe 同级」→「仓库根」，缺失项回退默认值。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui::{App, FontWeight, Hsla, SharedString, px};
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use terminal::{CursorShape, TerminalColors, rgba_color};
 use terminal_view::RenderSettings;
-
-
-const TERMINAL_CONFIG_RELATIVE_PATH: &str = "config/terminal.json";
-
-const APP_CONFIG_RELATIVE_PATH: &str = "config/app.json";
-
+use settings::{TerminalFile, candidates,
+    load_app_config, save_theme_choice};
+pub(crate) use settings::{read_config_file, sessions_config_path, shown_path};
 const THEMES_DIR: &str = "themes";
-
-const SESSIONS_CONFIG_RELATIVE_PATH: &str = "config/sessions.json";
-
-/// 候选路径：可执行文件同级 → 仓库根。
-fn candidates(relative: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(PathBuf::from))
-    {
-        paths.push(dir.join(relative));
-    }
-    paths.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(relative),
-    );
-    paths
-}
-
-/// 读第一个命中的配置文件。
-pub(crate) fn read_config_file(relative: &str) -> Option<(PathBuf, String)> {
-    candidates(relative).into_iter().find_map(|path| {
-        std::fs::read_to_string(&path)
-            .ok()
-            .map(|text| (path, text))
-    })
-}
-
-/// 写回目标：优先已存在的那份。
-fn write_target(relative: &str) -> PathBuf {
-    let paths = candidates(relative);
-    if let Some(existing) = paths.iter().find(|path| path.exists()) {
-        return existing.clone();
-    }
-    paths
-        .iter()
-        .find(|path| path.parent().is_some_and(Path::is_dir))
-        .or_else(|| paths.last())
-        .cloned()
-        .expect("candidates() 至少给一条路径")
-}
-
-pub(crate) fn sessions_config_path() -> PathBuf {
-    write_target(SESSIONS_CONFIG_RELATIVE_PATH)
-}
-
-/// 去掉 Windows 路径的 `\\?\` 前缀。
-pub(crate) fn shown_path(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .trim_start_matches(r"\\?\")
-        .to_string()
-}
 
 
 pub(crate) struct Settings {
@@ -104,59 +44,18 @@ pub(crate) fn settings_mut(cx: &mut App) -> &mut Settings {
 }
 
 
-/// `config/terminal.json` 的结构；字段全可选。
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct TerminalFile {
-    font_family: Option<String>,
-    font_size: Option<f32>,
-    font_weight: Option<f32>,
-    line_height_multiplier: Option<f32>,
-    minimum_contrast: Option<f32>,
-    cursor_shape: Option<String>,
-    cursor_blinks: Option<bool>,
-    suggestions: Option<terminal_view::SuggestionSettings>,
-    /// ANSI 调色板：键名 = `TerminalColors` 的字段名。
-    colors: HashMap<String, String>,
-    selection_color: Option<String>,
-    search_match_color: Option<String>,
-    link_color: Option<String>,
-}
-
 /// 读取并应用终端渲染配置。
 pub(crate) fn load_render_settings() -> RenderSettings {
     let mut settings = RenderSettings::default();
 
-    let Some((path, text)) = read_config_file(TERMINAL_CONFIG_RELATIVE_PATH) else {
-        eprintln!("[config] 未找到 {TERMINAL_CONFIG_RELATIVE_PATH}，终端渲染参数使用默认值");
-        return settings;
-    };
-
-    let file: TerminalFile = match serde_json::from_str(&text) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!(
-                "[config] 终端渲染参数 {} 解析失败（改用默认值）：{error}",
-                path.display()
-            );
-            return settings;
-        }
-    };
-
+    let file = settings::load_terminal_config();
     apply_render_settings(&mut settings, file);
-    eprintln!("[config] 终端渲染参数已加载：{}", shown_path(&path));
     settings
 }
 
 /// 把终端渲染参数写回 `config/terminal.json`（只覆盖设置窗口管的键）。
 pub(crate) fn save_render_settings(settings: &RenderSettings) {
-    let path = write_target(TERMINAL_CONFIG_RELATIVE_PATH);
-    let mut doc = read_json_value(&path);
-    let Some(map) = doc.as_object_mut() else {
-        eprintln!("[config] {} 不是 JSON 对象，放弃保存", path.display());
-        return;
-    };
-
+    let mut map = serde_json::Map::new();
     map.insert("font_family".into(), json!(settings.font_family));
     map.insert("font_size".into(), json!(as_number(settings.font_size.as_f32())));
     map.insert("font_weight".into(), json!(as_number(settings.font_weight.0)));
@@ -175,7 +74,7 @@ pub(crate) fn save_render_settings(settings: &RenderSettings) {
     map.insert("cursor_blinks".into(), json!(settings.cursor_blinks));
     map.insert("suggestions".into(), json!(settings.suggestions));
 
-    write_json_doc(&path, &doc, "终端渲染参数");
+    settings::save_terminal_preferences(map);
 }
 
 /// f32 按 3 位小数收成数字。
@@ -191,34 +90,6 @@ pub(crate) fn cursor_shape_name(shape: CursorShape) -> &'static str {
         CursorShape::Bar => "Bar",
         CursorShape::HollowBlock => "HollowBlock",
         CursorShape::Hidden => "Hidden",
-    }
-}
-
-/// 读 JSON 文档；失败时给空对象。
-fn read_json_value(path: &Path) -> serde_json::Value {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| json!({}))
-}
-
-fn write_json_doc(path: &Path, doc: &serde_json::Value, what: &str) {
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        eprintln!("[config] {what}保存失败（建目录 {}）：{error}", parent.display());
-        return;
-    }
-
-    match serde_json::to_string_pretty(doc) {
-        Ok(mut text) => {
-            text.push('\n');
-            match std::fs::write(path, text) {
-                Ok(()) => eprintln!("[config] {what}已保存：{}", shown_path(path)),
-                Err(error) => eprintln!("[config] {what}保存失败：{error}"),
-            }
-        }
-        Err(error) => eprintln!("[config] {what}序列化失败：{error}"),
     }
 }
 
@@ -467,38 +338,3 @@ fn apply_theme_slot(name: Option<&SharedString>, mode: ThemeMode, cx: &mut App) 
 }
 
 
-/// `config/app.json`：应用级偏好。
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
-struct AppFile {
-    /// 深色 / 浅色槽位用的主题名；`null` = 跟随内置主题。
-    dark_theme: Option<String>,
-    light_theme: Option<String>,
-}
-
-fn load_app_config() -> AppFile {
-    let Some((path, text)) = read_config_file(APP_CONFIG_RELATIVE_PATH) else {
-        return AppFile::default();
-    };
-
-    match serde_json::from_str(&text) {
-        Ok(file) => {
-            eprintln!("[config] 应用偏好已加载：{}", shown_path(&path));
-            file
-        }
-        Err(error) => {
-            eprintln!(
-                "[config] 应用偏好 {} 解析失败（改用默认）：{error}",
-                path.display()
-            );
-            AppFile::default()
-        }
-    }
-}
-
-/// 把主题选择写回 `config/app.json`。
-pub(crate) fn save_theme_choice(dark: Option<&str>, light: Option<&str>) {
-    let path = write_target(APP_CONFIG_RELATIVE_PATH);
-    let doc = json!({ "dark_theme": dark, "light_theme": light });
-    write_json_doc(&path, &doc, "应用偏好");
-}

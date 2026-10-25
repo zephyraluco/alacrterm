@@ -35,3 +35,4 @@ serde_json = { workspace = true }
 terminal = { workspace = true }
 terminal_view = { workspace = true }
 util = { workspace = true }
+settings.workspace = true

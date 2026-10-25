@@ -14,5 +14,7 @@ serde_json.workspace = true
 futures.workspace = true
 terminal = { workspace = true }
 
+settings.workspace = true
+
 [lib]
 path = "src/lib.rs"

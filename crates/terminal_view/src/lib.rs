@@ -20,9 +20,9 @@ mod project_completions;
 mod prompt_input;
 mod scrollbar;
 mod suggestion_popup;
-mod suggestion_settings;
+
 mod suggestions;
-pub use suggestion_settings::SuggestionSettings;
+pub use settings::SuggestionSettings;
 pub mod terminal_element;
 
 use std::{ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
