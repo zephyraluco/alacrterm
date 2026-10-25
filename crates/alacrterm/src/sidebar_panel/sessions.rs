@@ -9,169 +9,15 @@ use gpui::{
     Window, div, px,
 };
 use gpui_kit::component::{ActiveTheme as _, menu::ContextMenuExt as _};
-use serde::{Deserialize, Serialize};
 
 use super::empty_state;
 use super::shared::{DragPreview, RowCache, row_content, row_shell};
 use crate::actions::{EditSession, MoveEntry, NewFolder, NewSession, OpenSession, RemoveEntry};
 use crate::assets::IconName;
 use crate::terminal_panel::SessionRequest;
-use terminal::{SshParams, TerminalTarget};
 
-
-/// 条目路径:顶层开始的下标链(`[]` = 顶层)。
-pub(crate) type SessionPath = Vec<usize>;
-
-/// 会话列表里的一个条目。
-pub(crate) enum SessionEntry {
-    Folder(SessionFolder),
-    Session(SessionRecord),
-}
-
-impl SessionEntry {
-    pub(crate) fn label(&self) -> SharedString {
-        match self {
-            Self::Folder(folder) => folder.name.clone(),
-            Self::Session(record) => record.name.clone(),
-        }
-    }
-
-    pub(crate) fn id(&self) -> u64 {
-        match self {
-            Self::Folder(folder) => folder.id,
-            Self::Session(record) => record.id,
-        }
-    }
-
-    pub(crate) fn is_folder(&self) -> bool {
-        matches!(self, Self::Folder(_))
-    }
-}
-
-pub(crate) struct SessionFolder {
-    pub(crate) id: u64,
-    pub(crate) name: SharedString,
-    pub(crate) children: Vec<SessionEntry>,
-}
-
-impl SessionFolder {
-    pub(crate) fn new(id: u64, name: SharedString) -> Self {
-        Self {
-            id,
-            name,
-            children: Vec::new(),
-        }
-    }
-}
-
-/// 一条会话记录(连接参数)。
-#[derive(Clone)]
-pub(crate) struct SessionRecord {
-    pub(crate) id: u64,
-    pub(crate) name: SharedString,
-    pub(crate) user: String,
-    pub(crate) host: String,
-    pub(crate) port: u16,
-    pub(crate) password: Option<String>,
-}
-
-impl SessionRecord {
-    /// 这条记录的会话参数。
-    pub(crate) fn request(&self) -> SessionRequest {
-        let params = SshParams::new(self.host.clone(), self.port, self.user.clone());
-        let params = match &self.password {
-            Some(password) => params.with_password(password.clone()),
-            None => params,
-        };
-        SessionRequest {
-            name: Some(self.name.clone()),
-            target: TerminalTarget::Ssh(params),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum PersistedEntry {
-    Folder {
-        id: u64,
-        name: String,
-        children: Vec<PersistedEntry>,
-    },
-    Session {
-        id: u64,
-        name: String,
-        user: String,
-        host: String,
-        port: u16,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        password: Option<String>,
-    },
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(default)]
-struct PersistedSessions {
-    entries: Vec<PersistedEntry>,
-    expanded: Vec<u64>,
-}
-
-impl Default for PersistedSessions {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            expanded: Vec::new(),
-        }
-    }
-}
-
-impl From<&SessionEntry> for PersistedEntry {
-    fn from(entry: &SessionEntry) -> Self {
-        match entry {
-            SessionEntry::Folder(folder) => Self::Folder {
-                id: folder.id,
-                name: folder.name.to_string(),
-                children: folder.children.iter().map(Self::from).collect(),
-            },
-            SessionEntry::Session(record) => Self::Session {
-                id: record.id,
-                name: record.name.to_string(),
-                user: record.user.clone(),
-                host: record.host.clone(),
-                port: record.port,
-                password: record.password.clone(),
-            },
-        }
-    }
-}
-
-impl From<PersistedEntry> for SessionEntry {
-    fn from(entry: PersistedEntry) -> Self {
-        match entry {
-            PersistedEntry::Folder { id, name, children } => Self::Folder(SessionFolder {
-                id,
-                name: name.into(),
-                children: children.into_iter().map(Self::from).collect(),
-            }),
-            PersistedEntry::Session {
-                id,
-                name,
-                user,
-                host,
-                port,
-                password,
-            } => Self::Session(SessionRecord {
-                id,
-                name: name.into(),
-                user,
-                host,
-                port,
-                password,
-            }),
-        }
-    }
-}
-
+use session::{SessionEntry, SessionTree};
+pub(crate) use session::{SessionPath, SessionRecord};
 
 #[derive(Clone)]
 struct SessionRow {
@@ -185,86 +31,25 @@ struct SessionRow {
 
 /// 「会话」视图的状态。
 pub(crate) struct SessionsState {
-    entries: Vec<SessionEntry>,
+    tree: SessionTree,
     expanded: Vec<u64>,
     selected: Option<SessionPath>,
     rows: RowCache<SessionRow>,
-    next_id: u64,
 }
 
 impl SessionsState {
     pub(crate) fn new() -> Self {
-        let (entries, expanded) = Self::load();
-        let next_id = Self::max_id(&entries);
+        let (entries, expanded) = SessionTree::load();
         Self {
-            entries,
+            tree: SessionTree::new(entries),
             expanded,
             selected: None,
             rows: RowCache::default(),
-            next_id,
         }
-    }
-
-    fn load() -> (Vec<SessionEntry>, Vec<u64>) {
-        let path = crate::config::sessions_config_path();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return (Vec::new(), Vec::new());
-            }
-            Err(error) => {
-                eprintln!("[sessions] 读取会话记录 {} 失败：{error}", path.display());
-                return (Vec::new(), Vec::new());
-            }
-        };
-
-        match serde_json::from_str::<PersistedSessions>(&text) {
-            Ok(stored) => (
-                stored.entries.into_iter().map(Into::into).collect(),
-                stored.expanded,
-            ),
-            Err(error) => {
-                eprintln!("[sessions] 解析会话记录 {} 失败：{error}", path.display());
-                (Vec::new(), Vec::new())
-            }
-        }
-    }
-
-    fn max_id(entries: &[SessionEntry]) -> u64 {
-        entries
-            .iter()
-            .map(|entry| match entry {
-                SessionEntry::Folder(folder) => folder.id.max(Self::max_id(&folder.children)),
-                SessionEntry::Session(record) => record.id,
-            })
-            .max()
-            .unwrap_or_default()
     }
 
     fn persist(&self) {
-        let path = crate::config::sessions_config_path();
-        let stored = PersistedSessions {
-            entries: self.entries.iter().map(PersistedEntry::from).collect(),
-            expanded: self.expanded.clone(),
-        };
-
-        let result = serde_json::to_string_pretty(&stored)
-            .map_err(std::io::Error::other)
-            .and_then(|mut text| {
-                text.push('\n');
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&path, text)
-            });
-        if let Err(error) = result {
-            eprintln!("[sessions] 保存会话记录 {} 失败：{error}", path.display());
-        }
-    }
-
-    fn alloc_id(&mut self) -> u64 {
-        self.next_id += 1;
-        self.next_id
+        SessionTree::persist(&self.tree.entries, &self.expanded);
     }
 
     fn rows(&mut self) -> Rc<Vec<SessionRow>> {
@@ -273,7 +58,7 @@ impl SessionsState {
         }
         let mut out = Vec::new();
         let mut path = SessionPath::new();
-        Self::flatten(&self.entries, &self.expanded, &mut path, &mut out);
+        Self::flatten(&self.tree.entries, &self.expanded, &mut path, &mut out);
         self.rows.store(out)
     }
 
@@ -289,15 +74,13 @@ impl SessionsState {
             let is_open = is_folder && expanded.contains(&entry.id());
             out.push(SessionRow {
                 path: path.clone(),
-                label: entry.label(),
+                label: entry.label().into(),
                 depth: path.len() - 1,
                 is_folder,
                 has_children: matches!(entry, SessionEntry::Folder(folder) if !folder.children.is_empty()),
                 expanded: is_open,
             });
-            if is_open
-                && let SessionEntry::Folder(folder) = entry
-            {
+            if is_open && let SessionEntry::Folder(folder) = entry {
                 Self::flatten(&folder.children, expanded, path, out);
             }
             path.pop();
@@ -328,9 +111,7 @@ impl SessionsState {
     /// 点一行:文件夹切换展开,会话行记选中。
     fn activate_row(&mut self, path: SessionPath, is_folder: bool, cx: &mut Context<Self>) {
         self.selected = Some(path.clone());
-        if is_folder
-            && let Some(id) = self.entry(&path).map(SessionEntry::id)
-        {
+        if is_folder && let Some(id) = self.entry(&path).map(SessionEntry::id) {
             let was_open = self.expanded.contains(&id);
             self.expanded.retain(|open| *open != id);
             if !was_open {
@@ -343,28 +124,7 @@ impl SessionsState {
     }
 
     fn entry(&self, path: &[usize]) -> Option<&SessionEntry> {
-        let (ix, parent) = path.split_last()?;
-        let mut entries: &[SessionEntry] = &self.entries;
-        for step in parent {
-            entries = match entries.get(*step)? {
-                SessionEntry::Folder(folder) => &folder.children,
-                SessionEntry::Session(_) => return None,
-            };
-        }
-        entries.get(*ix)
-    }
-
-    fn children_mut<'a>(
-        entries: &'a mut Vec<SessionEntry>,
-        path: &[usize],
-    ) -> Option<&'a mut Vec<SessionEntry>> {
-        match path.split_first() {
-            None => Some(entries),
-            Some((ix, rest)) => match entries.get_mut(*ix)? {
-                SessionEntry::Folder(folder) => Self::children_mut(&mut folder.children, rest),
-                SessionEntry::Session(_) => None,
-            },
-        }
+        self.tree.entry(path)
     }
 
     pub(crate) fn record(&self, path: &[usize]) -> Option<SessionRecord> {
@@ -374,33 +134,13 @@ impl SessionsState {
         }
     }
 
-    /// Locate by stable ID, since a tree path may change while the dialog is open.
-    fn replace_record(entries: &mut [SessionEntry], id: u64, record: &SessionRecord) -> bool {
-        for entry in entries {
-            match entry {
-                SessionEntry::Session(existing) if existing.id == id => {
-                    *existing = record.clone();
-                    existing.id = id;
-                    return true;
-                }
-                SessionEntry::Folder(folder) => {
-                    if Self::replace_record(&mut folder.children, id, record) {
-                        return true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
     pub(crate) fn update_record(
         &mut self,
         id: u64,
         record: SessionRecord,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !Self::replace_record(&mut self.entries, id, &record) {
+        if !SessionTree::replace_record(&mut self.tree.entries, id, &record) {
             return false;
         }
         self.persist();
@@ -412,14 +152,12 @@ impl SessionsState {
     /// 往列表里加一条记录。
     pub(crate) fn add_record(
         &mut self,
-        mut record: SessionRecord,
+        record: SessionRecord,
         folder: Option<SessionPath>,
         cx: &mut Context<Self>,
     ) {
-        record.id = self.alloc_id();
         let target = folder.unwrap_or_default();
-        if let Some(children) = Self::children_mut(&mut self.entries, &target) {
-            children.push(SessionEntry::Session(record));
+        if self.tree.add_record(record, &target) {
             self.expand_folder(&target);
             self.persist();
         }
@@ -433,10 +171,8 @@ impl SessionsState {
         parent: Option<SessionPath>,
         cx: &mut Context<Self>,
     ) {
-        let id = self.alloc_id();
         let target = parent.unwrap_or_default();
-        if let Some(children) = Self::children_mut(&mut self.entries, &target) {
-            children.push(SessionEntry::Folder(SessionFolder::new(id, name)));
+        if self.tree.add_folder(name.to_string(), &target) {
             self.expand_folder(&target);
             self.persist();
         }
@@ -446,17 +182,7 @@ impl SessionsState {
 
     /// 删除一个条目(文件夹连带内容)。
     pub(crate) fn remove_entry(&mut self, path: &[usize], cx: &mut Context<Self>) {
-        let Some((ix, parent)) = path.split_last() else {
-            return;
-        };
-        let mut removed = false;
-        if let Some(children) = Self::children_mut(&mut self.entries, parent)
-            && *ix < children.len()
-        {
-            children.remove(*ix);
-            removed = true;
-        }
-        if removed {
+        if self.tree.remove(path) {
             self.persist();
         }
         self.rows.bump();
@@ -465,33 +191,13 @@ impl SessionsState {
 
     /// 把条目挪到 `into` 文件夹下。
     pub(crate) fn move_entry(&mut self, from: &[usize], into: &[usize], cx: &mut Context<Self>) {
-        if from.is_empty()
-            || into.starts_with(from)
-            || !self.folder_exists(into)
-            || self.entry(from).is_none()
-        {
+        let Some(removed) = self.tree.move_entry(from, into) else {
             return;
-        }
-
-        let removed = Self::shift_path_after_removal(into.to_vec(), from);
-        let entry = Self::take_entry(&mut self.entries, from).expect("刚刚确认过这条路径有条目");
-        let destination =
-            Self::children_mut(&mut self.entries, &removed).expect("目标文件夹刚刚校验过");
-        destination.push(entry);
+        };
         self.expand_folder(&removed);
         self.rows.bump();
         self.persist();
         cx.notify();
-    }
-
-    fn take_entry(entries: &mut Vec<SessionEntry>, path: &[usize]) -> Option<SessionEntry> {
-        let (ix, parent) = path.split_last()?;
-        let children = Self::children_mut(entries, parent)?;
-        (*ix < children.len()).then(|| children.remove(*ix))
-    }
-
-    fn folder_exists(&self, path: &[usize]) -> bool {
-        path.is_empty() || matches!(self.entry(path), Some(SessionEntry::Folder(_)))
     }
 
     fn expand_folder(&mut self, path: &[usize]) {
@@ -500,15 +206,6 @@ impl SessionsState {
         {
             self.expanded.push(id);
         }
-    }
-
-    /// 取出 `removed` 后修正路径下标。
-    fn shift_path_after_removal(mut path: SessionPath, removed: &[usize]) -> SessionPath {
-        let (removed_ix, parent) = removed.split_last().expect("removed 不会是空路径");
-        if path.len() > parent.len() && path.starts_with(parent) && path[parent.len()] > *removed_ix {
-            path[parent.len()] -= 1;
-        }
-        path
     }
 
     /// 按记录生成开终端参数;非会话返回 `None`。
@@ -534,7 +231,6 @@ impl crate::AppRoot {
         self.spawn_session(request, window, cx);
     }
 }
-
 
 #[derive(Clone)]
 pub(super) enum SessionsItem {
@@ -688,7 +384,9 @@ fn session_row_element(
                 )
                 .menu(
                     "编辑会话",
-                    Box::new(EditSession { path: menu_path.clone() }),
+                    Box::new(EditSession {
+                        path: menu_path.clone(),
+                    }),
                 )
                 .separator()
                 .menu(
@@ -700,105 +398,4 @@ fn session_row_element(
             }
         })
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PersistedEntry, SessionEntry, SessionFolder, SessionRecord};
-
-    #[test]
-    fn editing_finds_moved_record_by_id_and_preserves_neighbors() {
-        let make = |id, host: &str| SessionRecord {
-            id,
-            name: "server".into(),
-            user: "user".into(),
-            host: host.into(),
-            port: 22,
-            password: Some(" old password ".into()),
-        };
-        let mut entries = vec![SessionEntry::Folder(SessionFolder {
-            id: 1,
-            name: "group".into(),
-            children: vec![
-                SessionEntry::Session(make(2, "neighbor")),
-                SessionEntry::Session(make(3, "before")),
-            ],
-        })];
-        let mut replacement = make(0, "after");
-        replacement.port = 2222;
-        replacement.password = None;
-        assert!(super::SessionsState::replace_record(
-            &mut entries,
-            3,
-            &replacement
-        ));
-        let SessionEntry::Folder(folder) = &entries[0] else {
-            panic!("expected folder");
-        };
-        let SessionEntry::Session(neighbor) = &folder.children[0] else {
-            panic!("expected session");
-        };
-        let SessionEntry::Session(edited) = &folder.children[1] else {
-            panic!("expected session");
-        };
-        assert_eq!(neighbor.host, "neighbor");
-        assert_eq!(edited.id, 3);
-        assert_eq!(edited.host, "after");
-        assert_eq!(edited.port, 2222);
-        assert!(edited.password.is_none());
-        assert!(!super::SessionsState::replace_record(
-            &mut entries,
-            99,
-            &replacement
-        ));
-        let stored = serde_json::to_string(&PersistedEntry::from(&entries[0])).unwrap();
-        assert!(stored.contains("after"));
-        assert!(!stored.contains("before"));
-    }
-
-    #[test]
-    fn old_x11_setting_is_ignored_and_no_longer_persisted() {
-        for enabled in [false, true] {
-            let json = format!(r#"{{"type":"session","id":1,"name":"old","user":"me","host":"localhost","port":22,"x11_forwarding":{enabled}}}"#);
-            let stored: PersistedEntry = serde_json::from_str(&json).unwrap();
-            let entry = SessionEntry::from(stored);
-            let json = serde_json::to_string(&PersistedEntry::from(&entry)).unwrap();
-            assert!(!json.contains("x11_forwarding"));
-        }
-    }
-
-    #[test]
-    fn persisted_ssh_session_round_trips_with_password() {
-        let entry = SessionEntry::Folder(SessionFolder {
-            id: 4,
-            name: "Production".into(),
-            children: vec![SessionEntry::Session(SessionRecord {
-                id: 5,
-                name: "Database".into(),
-                user: "admin".into(),
-                host: "db.example.com".into(),
-                port: 2222,
-                password: Some("saved password".into()),
-            })],
-        });
-
-        let json = serde_json::to_string(&PersistedEntry::from(&entry))
-            .expect("session record should serialize");
-        assert!(json.contains("saved password"));
-
-        let restored: PersistedEntry =
-            serde_json::from_str(&json).expect("session record should deserialize");
-        let SessionEntry::Folder(folder) = SessionEntry::from(restored) else {
-            panic!("folder should be restored");
-        };
-        let SessionEntry::Session(record) = &folder.children[0] else {
-            panic!("SSH session should be restored");
-        };
-
-        assert_eq!(folder.name, "Production");
-        assert_eq!(record.host, "db.example.com");
-        assert_eq!(record.port, 2222);
-
-        assert_eq!(record.password.as_deref(), Some("saved password"));
-    }
 }

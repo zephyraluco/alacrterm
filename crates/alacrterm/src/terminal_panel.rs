@@ -38,14 +38,7 @@ use crate::dialog::host_key;
 use crate::pane_layout::{Dir, Layout, ratio_at};
 use crate::AppRoot;
 
-/// 新建会话的参数。
-#[derive(Clone)]
-pub(crate) struct SessionRequest {
-    /// 显示名；`None` = 用终端标题。
-    pub(crate) name: Option<SharedString>,
-    /// 连接目标（见 [`TerminalTarget`]）。
-    pub(crate) target: TerminalTarget,
-}
+pub(crate) use session::SessionRequest;
 
 impl AppRoot {
     /// 新建本地终端标签页。
@@ -90,7 +83,7 @@ impl AppRoot {
         let SessionRequest { name, target } = request;
         let view = self.new_terminal(None, target.clone(), window, cx);
         let root = cx.weak_entity();
-        let pane = cx.new(|cx| TabPane::new(view, name, target, root, window, cx));
+        let pane = cx.new(|cx| TabPane::new(view, name.map(Into::into), target, root, window, cx));
         let handle = panel_handle(pane.clone());
         self.dock.update(cx, |area, cx| {
             area.add_panel_view(handle, DockPlacement::Center, None, window, cx);

@@ -38,3 +38,5 @@ util = { workspace = true }
 settings.workspace = true
 
 platform.workspace = true
+
+session.workspace = true

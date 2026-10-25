@@ -2,7 +2,7 @@
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _,
-    SharedString, Styled as _, Window, div, px,
+    Styled as _, Window, div, px,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, WindowExt as _,
@@ -31,7 +31,8 @@ pub(crate) struct ConnectionForm {
 impl ConnectionForm {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<AppRoot>) -> Self {
         let host = cx.new(|cx| InputState::new(window, cx).placeholder("例如：192.168.1.10"));
-        let port = cx.new(|cx| InputState::new(window, cx).default_value(DEFAULT_SSH_PORT.to_string()));
+        let port =
+            cx.new(|cx| InputState::new(window, cx).default_value(DEFAULT_SSH_PORT.to_string()));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("例如：生产服务器"));
         let user = cx.new(|cx| InputState::new(window, cx).placeholder("例如：root"));
         let password = cx.new(|cx| InputState::new(window, cx).masked(true));
@@ -89,7 +90,7 @@ impl ConnectionForm {
         let password = self.password.read(cx).value().to_string();
         Some(SessionRecord {
             id: 0,
-            name: SharedString::from(self.trimmed(&self.name, cx)),
+            name: self.trimmed(&self.name, cx),
             user: self.trimmed(&self.user, cx),
             host: self.trimmed(&self.host, cx),
             port: self.port(cx)?,

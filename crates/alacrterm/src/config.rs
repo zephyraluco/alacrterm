@@ -10,7 +10,7 @@ use terminal::{CursorShape, TerminalColors, rgba_color};
 use terminal_view::RenderSettings;
 use settings::{TerminalFile, candidates,
     load_app_config, save_theme_choice};
-pub(crate) use settings::{read_config_file, sessions_config_path, shown_path};
+pub(crate) use settings::{read_config_file, shown_path};
 const THEMES_DIR: &str = "themes";
 
 
