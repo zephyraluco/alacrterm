@@ -11,6 +11,7 @@
 
 mod command_specs;
 mod completion;
+mod completion_controller;
 mod contrast;
 mod path_suggestions;
 mod project_completions;
@@ -92,18 +93,10 @@ pub struct TerminalView {
     cursor_phase: bool,
     focused: bool,
     terminal_blinking: Option<bool>,
-    suggestions: suggestions::Suggestions,
-    suggestion_task: gpui::Task<()>,
+    completion: completion_controller::CompletionController,
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
     prompt_anchor: Option<prompt_input::PromptAnchor>,
     input_recovery: Option<(u64, std::time::Instant)>,
-    project_cache: Option<(
-        project_completions::Provider,
-        String,
-        std::time::Instant,
-        Vec<String>,
-    )>,
-    path_cache: Option<(String, std::time::Instant, Vec<path_suggestions::Entry>)>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
     scrollbar_target: std::rc::Rc<std::cell::Cell<Option<usize>>>,
@@ -234,13 +227,10 @@ impl TerminalView {
             cursor_phase: true,
             focused: false,
             terminal_blinking: None,
-            suggestions: suggestions::Suggestions::new(settings.suggestions),
-            suggestion_task: gpui::Task::ready(()),
+            completion: completion_controller::CompletionController::new(settings.suggestions),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             prompt_anchor: None,
             input_recovery: None,
-            project_cache: None,
-            path_cache: None,
             _blink_task: blink_task,
             grid_cache: Default::default(),
             scrollbar_target: Default::default(),
@@ -256,12 +246,7 @@ impl TerminalView {
         if let Some(terminal) = &self.terminal {
             if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
                 self.exited = false;
-                self.suggestions.invalidate();
-                self.suggestions.add_command("");
-                self.suggestions.cwd = None;
-                self.suggestions.powershell = None;
-                self.path_cache = None;
-                self.project_cache = None;
+                self.completion.reset_session();
                 self.prompt_anchor = None;
                 self.input_recovery = None;
                 self.terminal_blinking = None;
@@ -282,12 +267,7 @@ impl TerminalView {
         cx: &mut gpui::Context<Self>,
     ) {
         self.settings = settings;
-        self.suggestions.settings = self.settings.suggestions;
-        self.suggestions.dismiss();
-        self.suggestion_task = gpui::Task::ready(());
-        if !self.settings.suggestions.history {
-            self.suggestions.clear_history();
-        }
+        self.completion.configure(self.settings.suggestions);
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.set_cursor_shape(self.settings.cursor_shape);
@@ -317,7 +297,7 @@ impl TerminalView {
     /// 焦点离开：通知终端应用（未聚焦时光标由渲染层显示为空心）。
     fn focus_out(&mut self, cx: &mut gpui::Context<Self>) {
         self.focused = false;
-        self.suggestions.dismiss();
+        self.completion.model.dismiss();
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| terminal.focus_out());
         }
@@ -326,8 +306,8 @@ impl TerminalView {
 
     fn handle_terminal_event(&mut self, event: &TerminalEvent, cx: &mut gpui::Context<Self>) {
         match event {
-            TerminalEvent::ShellCommand(command) => self.suggestions.add_command(command),
-            TerminalEvent::ShellContext(key, value) => self.suggestions.context(key, value),
+            TerminalEvent::ShellCommand(command) => self.completion.model.add_command(command),
+            TerminalEvent::ShellContext(key, value) => self.completion.model.context(key, value),
             TerminalEvent::Prompt(event) => {
                 if *event != terminal::PromptEvent::Input {
                     self.prompt_anchor = None;
@@ -335,11 +315,11 @@ impl TerminalView {
                 }
                 if *event == terminal::PromptEvent::Input
                     && self.prompt_anchor.is_some()
-                    && !self.suggestions.text.is_empty()
+                    && !self.completion.model.text.is_empty()
                 {
                     self.request_input_recovery(cx);
                 } else {
-                    self.suggestions.phase(*event);
+                    self.completion.model.phase(*event);
                 }
                 cx.notify();
             }
@@ -371,7 +351,7 @@ impl TerminalView {
                 // 已断开，用户自行关闭或新建）。终端网格会保留最后的输出，
                 // 这样 ssh 报的断开原因不会被丢掉。
                 self.exited = true;
-                self.suggestions.invalidate();
+                self.completion.model.invalidate();
                 cx.notify();
             }
             TerminalEvent::HostKeyPrompt(prompt) => {
@@ -399,7 +379,7 @@ impl TerminalView {
         if text.is_empty() {
             return self.clear_marked_text(cx);
         }
-        self.suggestions.dismiss();
+        self.completion.model.dismiss();
         self.ime_state = Some(ImeState { marked_text: text });
         cx.notify();
     }
@@ -431,9 +411,9 @@ impl TerminalView {
                         .mode
                         .intersects(Modes::ALT_SCREEN | Modes::MOUSE_MODE)
             }) {
-                self.suggestions.invalidate();
+                self.completion.model.invalidate();
             }
-            self.suggestions.input(text);
+            self.completion.model.input(text);
             self.schedule_suggestions(false, cx);
             if let Some(terminal) = &self.terminal {
                 terminal.update(cx, |term, _| {
@@ -472,7 +452,7 @@ impl TerminalView {
 
     /// 粘贴剪贴板内容（`Ctrl+Shift+V`）。
     pub fn paste_text(&mut self, cx: &mut gpui::Context<Self>) {
-        self.suggestions.invalidate();
+        self.completion.model.invalidate();
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
@@ -541,14 +521,10 @@ impl TerminalView {
     }
 
     fn schedule_suggestions(&mut self, manual: bool, cx: &mut gpui::Context<Self>) {
-        if !manual {
-            self.suggestions.candidates.clear();
-        }
-        if !self.suggestions.active {
-            self.suggestion_task = gpui::Task::ready(());
+        if !self.completion.begin(manual) {
             return;
         }
-        self.suggestion_task = cx.spawn(async move |this, cx| {
+        self.completion.task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(if manual {
                     Duration::ZERO
@@ -560,172 +536,27 @@ impl TerminalView {
                 if !this.focused || this.ime_state.is_some() {
                     return None;
                 }
-                this.suggestions.refresh(manual);
+                this.completion.model.refresh(manual);
                 this.suggestion_scroll
                     .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
-                let query = this.suggestions.path_query()?;
-                let revision = this.suggestions.revision;
-                let project = this
-                    .suggestions
-                    .settings
-                    .dynamic
-                    .then(|| project_completions::Query::parse(&query))
-                    .flatten()
-                    .filter(|query| this.suggestions.has_command(query.command()));
-                let project_cache = this.project_cache.clone();
-                let paths = this.suggestions.settings.paths;
-                let cwd = this.suggestions.cwd.clone().unwrap_or_default();
-                Some((
-                    query,
-                    cwd,
-                    this.remote,
-                    this.remote_fs(cx),
-                    this.path_cache.clone(),
-                    revision,
-                    project,
-                    project_cache,
-                    paths,
-                ))
+                let backend = if this.remote {
+                    completion_controller::Backend::Remote(this.remote_fs(cx)?)
+                } else {
+                    completion_controller::Backend::local()
+                };
+                this.completion.request(manual, backend)
             }) else {
                 return;
             };
-            let Some((query, cwd, remote, fs, cache, revision, project, project_cache, paths)) =
-                request
-            else {
+            let Some(request) = request else {
                 return;
             };
-            if let Some(project) = project {
-                if cwd.is_empty() {
-                    return;
-                }
-                let values = if let Some((_, _, _, values)) =
-                    project_cache.filter(|(provider, key, time, _)| {
-                        !manual
-                            && *provider == project.provider
-                            && *key == cwd
-                            && time.elapsed() < Duration::from_secs(3)
-                    }) {
-                    values
-                } else if remote {
-                    let Some(fs) = &fs else {
-                        return;
-                    };
-                    let request = Box::pin(project_completions::remote(project.provider, &cwd, fs));
-                    let deadline = Box::pin(cx.background_executor().timer(Duration::from_secs(5)));
-                    match futures::future::select(request, deadline).await {
-                        futures::future::Either::Left((values, _)) => values,
-                        futures::future::Either::Right(_) => return,
-                    }
-                } else {
-                    let provider = project.provider;
-                    let directory = std::path::PathBuf::from(&cwd);
-                    cx.background_executor()
-                        .spawn(async move { project_completions::local(provider, &directory) })
-                        .await
-                };
-                let candidates = project.candidates(values.clone());
-                let _ = this.update(cx, |this, cx| {
-                    if this.focused
-                        && this.ime_state.is_none()
-                        && this.suggestions.revision == revision
-                        && this.suggestions.path_query().as_ref() == Some(&query)
-                        && this.suggestions.cwd.as_deref().unwrap_or("") == cwd
-                    {
-                        this.project_cache =
-                            Some((project.provider, cwd, std::time::Instant::now(), values));
-                        this.suggestions.add_paths(candidates);
-                        cx.notify();
-                    }
-                });
+            let Some(response) = request.resolve(cx.background_executor().clone()).await else {
                 return;
-            }
-            if !paths {
-                return;
-            }
-            let directory = if remote {
-                let Some(fs) = &fs else {
-                    return;
-                };
-                let home = if query.expand_home {
-                    fs.home_dir().await.ok()
-                } else {
-                    None
-                };
-                let Some(directory) = query.remote_directory(&cwd, home.as_deref()) else {
-                    return;
-                };
-                directory
-            } else {
-                let path = if query.expand_home {
-                    let Some(home) =
-                        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-                    else {
-                        return;
-                    };
-                    std::path::PathBuf::from(home).join(&query.directory[2..])
-                } else if std::path::Path::new(&query.directory).is_absolute() {
-                    std::path::PathBuf::from(&query.directory)
-                } else {
-                    if cwd.is_empty() {
-                        return;
-                    }
-                    std::path::Path::new(&cwd).join(&query.directory)
-                };
-                path.to_string_lossy().into_owned()
             };
-            let entries = if let Some((key, time, entries)) = cache.filter(|(key, time, _)| {
-                !manual && *key == directory && time.elapsed() < Duration::from_secs(3)
-            }) {
-                let _ = (key, time);
-                entries
-            } else if remote {
-                let Some(fs) = fs else {
-                    return;
-                };
-                let Ok(entries) = fs.list_completion_dir(directory.clone()).await else {
-                    return;
-                };
-                entries
-                    .into_iter()
-                    .take(4096)
-                    .map(|entry| path_suggestions::Entry {
-                        name: entry.name,
-                        directory: entry.is_dir,
-                    })
-                    .collect()
-            } else {
-                let directory = directory.clone();
-                cx.background_executor()
-                    .spawn(async move {
-                        std::fs::read_dir(directory)
-                            .ok()
-                            .into_iter()
-                            .flatten()
-                            .take(4096)
-                            .filter_map(|entry| {
-                                let entry = entry.ok()?;
-                                Some(path_suggestions::Entry {
-                                    name: entry.file_name().into_string().ok()?,
-                                    directory: entry.path().is_dir(),
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await
-            };
-            let candidates = query.candidates(entries.clone());
             let _ = this.update(cx, |this, cx| {
-                // Cancellation and identity checks prevent late network results from
-                // updating a different command line, prompt, or working directory.
-                if this.focused
-                    && this.ime_state.is_none()
-                    && this.suggestions.revision == revision
-                    && this.suggestions.path_query().as_ref() == Some(&query)
-                    && this.suggestions.cwd.as_deref().unwrap_or("") == cwd
-                {
-                    this.path_cache = Some((directory, std::time::Instant::now(), entries));
-                    this.suggestions.add_paths(candidates);
+                if this.focused && this.ime_state.is_none() && this.completion.apply(response) {
                     cx.notify();
                 }
             });
@@ -741,7 +572,7 @@ impl TerminalView {
             .as_ref()
             .map_or(0, |terminal| terminal.read(cx).content_generation());
         self.input_recovery = Some((generation, std::time::Instant::now()));
-        self.suggestions.invalidate();
+        self.completion.model.invalidate();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
@@ -777,7 +608,7 @@ impl TerminalView {
             .and_then(|anchor| anchor.recover(terminal.last_content()));
         if let Some((text, cursor)) = recovered {
             self.input_recovery = None;
-            self.suggestions.synchronize(text, cursor);
+            self.completion.model.synchronize(text, cursor);
             self.schedule_suggestions(false, cx);
         }
     }
@@ -788,24 +619,25 @@ impl TerminalView {
                 .as_ref()
                 .and_then(|anchor| anchor.recover(terminal.read(cx).last_content()))
         }) {
-            if text != self.suggestions.text || cursor != self.suggestions.cursor {
-                self.suggestions.synchronize(text, cursor);
+            if text != self.completion.model.text || cursor != self.completion.model.cursor {
+                self.completion.model.synchronize(text, cursor);
                 self.schedule_suggestions(false, cx);
                 return;
             }
         }
 
         let retrigger = self
-            .suggestions
+            .completion
+            .model
             .candidates
-            .get(self.suggestions.selected)
+            .get(self.completion.model.selected)
             .is_some_and(|item| item.retrigger);
-        if let Some(suffix) = self.suggestions.accept() {
+        if let Some(suffix) = self.completion.model.accept() {
             if let Some(terminal) = &self.terminal {
                 terminal.update(cx, |terminal, _| terminal.input(suffix.into_bytes()));
             }
             if retrigger {
-                self.suggestions.trigger();
+                self.completion.model.trigger();
                 self.schedule_suggestions(true, cx);
             }
         }
@@ -830,7 +662,7 @@ impl TerminalView {
                         .intersects(Modes::ALT_SCREEN | Modes::MOUSE_MODE)
             });
         if !allowed {
-            self.suggestions.invalidate();
+            self.completion.model.invalidate();
         }
         if allowed
             && key == "space"
@@ -838,20 +670,22 @@ impl TerminalView {
             && !e.keystroke.modifiers.alt
             && !e.keystroke.modifiers.platform
         {
-            self.suggestion_task = gpui::Task::ready(());
+            self.completion.cancel();
             self.recover_input(window, cx);
-            self.suggestions.trigger();
+            self.completion.model.trigger();
             self.schedule_suggestions(true, cx);
             cx.notify();
             cx.stop_propagation();
             return;
         }
-        if allowed && !self.suggestions.candidates.is_empty() && plain {
+        if allowed && !self.completion.model.candidates.is_empty() && plain {
             match key {
                 "up" | "down" => {
-                    self.suggestions.step(if key == "up" { -1 } else { 1 });
-                    self.suggestion_scroll
-                        .scroll_to_item(self.suggestions.selected, gpui::ScrollStrategy::Nearest);
+                    self.completion.model.step(if key == "up" { -1 } else { 1 });
+                    self.suggestion_scroll.scroll_to_item(
+                        self.completion.model.selected,
+                        gpui::ScrollStrategy::Nearest,
+                    );
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -862,7 +696,7 @@ impl TerminalView {
                     return;
                 }
                 "escape" => {
-                    self.suggestions.dismiss();
+                    self.completion.model.dismiss();
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -873,12 +707,12 @@ impl TerminalView {
         let printable =
             plain && (e.keystroke.key_char.is_some() || key.chars().count() == 1 || key == "space");
         if key == "enter" && plain {
-            self.suggestions.submit();
+            self.completion.model.submit();
             self.prompt_anchor = None;
             self.input_recovery = None;
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
-            self.suggestions.edit_key(key, control);
-            if !self.suggestions.active
+            self.completion.model.edit_key(key, control);
+            if !self.completion.model.active
                 && self.prompt_anchor.is_some()
                 && allowed
                 && !(control && matches!(key, "c" | "d"))
@@ -1039,8 +873,8 @@ impl Render for TerminalView {
             });
         }
         if self.prompt_anchor.is_none()
-            && self.suggestions.active
-            && self.suggestions.text.is_empty()
+            && self.completion.model.active
+            && self.completion.model.text.is_empty()
         {
             self.prompt_anchor = self.terminal.as_ref().and_then(|terminal| {
                 prompt_input::PromptAnchor::capture(terminal.read(cx).last_content())

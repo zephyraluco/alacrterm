@@ -15,8 +15,8 @@ impl TerminalView {
     pub(crate) fn render_suggestions(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.focused
             || self.ime_state.is_some()
-            || !self.suggestions.active
-            || self.suggestions.candidates.is_empty()
+            || !self.completion.model.active
+            || self.completion.model.candidates.is_empty()
         {
             return None;
         }
@@ -37,7 +37,7 @@ impl TerminalView {
         let below = (caret_y + bounds.line_height).min(bounds.bounds.size.height);
         let available_below = (bounds.bounds.size.height - below).max(px(0.));
         let available_above = caret_y.min(bounds.bounds.size.height).max(px(0.));
-        let desired = row_height * self.suggestions.candidates.len().min(10) as f32 + px(2.);
+        let desired = row_height * self.completion.model.candidates.len().min(10) as f32 + px(2.);
         let place_below = desired <= available_below || available_below >= available_above;
         let available = if place_below {
             available_below
@@ -46,7 +46,7 @@ impl TerminalView {
         };
         let visible_rows = (((available - px(2.)) / row_height).floor().max(0.) as usize)
             .min(10)
-            .min(self.suggestions.candidates.len());
+            .min(self.completion.model.candidates.len());
         if width < px(120.) || visible_rows == 0 {
             return None;
         }
@@ -65,7 +65,7 @@ impl TerminalView {
         let font_size = self.settings.font_size.clamp(px(10.), px(16.));
         let item_sizes = std::rc::Rc::new(vec![
             size(width, row_height);
-            self.suggestions.candidates.len()
+            self.completion.model.candidates.len()
         ]);
         let list = v_virtual_list(
             cx.entity(),
@@ -74,7 +74,7 @@ impl TerminalView {
             move |this, range, _, cx| {
                 range
                     .filter_map(|index| {
-                        let command = this.suggestions.candidates.get(index)?;
+                        let command = this.completion.model.candidates.get(index)?;
                         let mut detail = format!(
                             "{}\n{} · {}",
                             command.label,
@@ -107,7 +107,7 @@ impl TerminalView {
                                     gpui_kit::component::label::Label::new(command.label.clone())
                                         .highlights(
                                             gpui_kit::component::label::HighlightsMatch::Full(
-                                                this.suggestions.query_for(command).into(),
+                                                this.completion.model.query_for(command).into(),
                                             ),
                                         )
                                         .line_height(px(20.))
@@ -136,7 +136,7 @@ impl TerminalView {
                                 .text_size(font_size)
                                 .line_height(px(20.))
                                 // Preserve the component's current selected and hover styles.
-                                .selected(index == this.suggestions.selected)
+                                .selected(index == this.completion.model.selected)
                                 .tooltip(move |window, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new(detail.clone())
                                         .build(window, cx)
@@ -148,7 +148,7 @@ impl TerminalView {
                                 })
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     if this.ime_state.is_none() {
-                                        this.suggestions.selected = index;
+                                        this.completion.model.selected = index;
                                         this.accept_suggestion(cx);
                                         window.focus(&this.focus_handle, cx);
                                     }
