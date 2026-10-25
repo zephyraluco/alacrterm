@@ -9,7 +9,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogClose, DialogFooter},
 };
-use terminal::WayxStatus;
+use platform::WayxStatus;
 
 impl AppRoot {
     pub(crate) fn wayx_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -41,7 +41,7 @@ impl AppRoot {
     }
 
     fn confirm_wayx(window: &mut Window, cx: &mut App) {
-        let status = terminal::wayx_status();
+        let status = platform::wayx_status();
         if matches!(status, WayxStatus::Starting | WayxStatus::Stopping) {
             return;
         }
@@ -73,9 +73,9 @@ impl AppRoot {
                 .on_ok(move |_, _, _| {
                     // Recheck state in the service; a stale dialog cannot create duplicates.
                     if stopping {
-                        terminal::stop_wayx();
+                        platform::stop_wayx();
                     } else {
-                        terminal::start_wayx();
+                        platform::start_wayx();
                     }
                     true
                 })

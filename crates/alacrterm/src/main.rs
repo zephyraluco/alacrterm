@@ -7,8 +7,6 @@ mod actions;
 mod assets;
 mod components;
 mod config;
-#[cfg(windows)]
-mod conpty_backend;
 mod dialog;
 mod format;
 mod keymap;
@@ -121,14 +119,14 @@ mod close_tests {
 
 fn main() {
     #[cfg(windows)]
-    conpty_backend::ensure();
+    platform::initialize();
 
     gpui_kit::application()
         .with_assets(assets::Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             cx.on_app_quit(|_| {
-                terminal::shutdown_wayx();
+                platform::shutdown_wayx();
                 async {}
             })
             .detach();
@@ -163,7 +161,7 @@ fn main() {
             )
             .expect("failed to open window");
         });
-    terminal::shutdown_wayx();
+    platform::shutdown_wayx();
 }
 
 /// 应用根视图（只存共享状态）。
@@ -197,7 +195,7 @@ struct AppRoot {
     last_context: Option<ActiveContext>,
     /// 已经安排了一次延后的上下文同步（合并同一帧内的多次触发）。
     context_sync_scheduled: bool,
-    wayx_status: terminal::WayxStatus,
+    wayx_status: platform::WayxStatus,
     _wayx_watch: gpui::Task<()>,
 }
 
@@ -349,11 +347,11 @@ impl AppRoot {
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
         let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
 
-        terminal::start_wayx();
+        platform::start_wayx();
         let wayx_watch = cx.spawn(async move |root, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
-                let status = terminal::wayx_status();
+                let status = platform::wayx_status();
                 if root.update(cx, |root, cx| {
                     if root.wayx_status != status { root.wayx_status = status; cx.notify(); }
                 }).is_err() { break; }
@@ -376,7 +374,7 @@ impl AppRoot {
             background_focus: cx.focus_handle(),
             last_context: None,
             context_sync_scheduled: false,
-            wayx_status: terminal::wayx_status(),
+            wayx_status: platform::wayx_status(),
             _wayx_watch: wayx_watch,
         };
         this.dock_layout_sub = Some(cx.subscribe_in(

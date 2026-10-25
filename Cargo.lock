@@ -203,6 +203,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "log",
+ "platform",
  "rust-embed",
  "schemars",
  "serde",
@@ -5391,6 +5392,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "platform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "libc",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7048,6 +7060,7 @@ dependencies = [
  "futures",
  "libc",
  "log",
+ "platform",
  "rand 0.10.3",
  "russh",
  "russh-sftp",

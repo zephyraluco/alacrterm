@@ -36,3 +36,5 @@ terminal = { workspace = true }
 terminal_view = { workspace = true }
 util = { workspace = true }
 settings.workspace = true
+
+platform.workspace = true

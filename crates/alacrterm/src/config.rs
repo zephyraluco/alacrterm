@@ -336,5 +336,3 @@ fn apply_theme_slot(name: Option<&SharedString>, mode: ThemeMode, cx: &mut App) 
     }
     true
 }
-
-
