@@ -3,7 +3,7 @@
   "font_size": 15.0,
   "font_weight": 400.0,
   "line_height_multiplier": 1.3,
-  "minimum_contrast": 45.0,
+  "minimum_contrast": 0.0,
   "cursor_shape": "Block",
   "cursor_blinks": true,
   "colors": {
@@ -37,5 +37,18 @@
   },
   "selection_color": "#5381C673",
   "search_match_color": "#F2B20D59",
-  "link_color": "#47A2F5"
+  "link_color": "#47A2F5",
+  "color_scheme": "tokyo-night",
+  "suggestions": {
+    "enabled": true,
+    "automatic": true,
+    "history": true,
+    "commands": true,
+    "paths": true,
+    "specifications": true,
+    "dynamic": true,
+    "fuzzy": true,
+    "insert_trailing_space": false,
+    "remote_integration": true
+  }
 }
