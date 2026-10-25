@@ -8164,12 +8164,14 @@ name = "util"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "dirs 7.0.0",
  "dunce",
  "globset",
  "itertools 0.15.0",
  "log",
  "nix",
+ "notify",
  "percent-encoding",
  "pretty_assertions",
  "regex",
@@ -8177,6 +8179,7 @@ dependencies = [
  "schemars",
  "serde",
  "shlex",
+ "tempfile",
  "tendril 0.5.1",
  "url",
  "which",

@@ -1,3 +1,4 @@
+pub mod resource_registry;
 pub mod file_cache;
 pub mod format;
 pub mod paths;
