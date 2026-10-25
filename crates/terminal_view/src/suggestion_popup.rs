@@ -2,7 +2,7 @@
 use crate::TerminalView;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement as _, MouseButton,
-    ParentElement as _, Styled as _, div, point, px, size,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, point, px, size,
 };
 use gpui_kit::{
     base::Positioner,
@@ -30,7 +30,7 @@ impl TerminalView {
         }
         let bounds = content.terminal_bounds;
         let width = bounds.bounds.size.width.min(px(480.)).max(px(0.));
-        let row_height = px(42.);
+        let row_height = px(48.);
         let footer = px(28.);
         let caret_y = bounds.line_height * content.cursor.point.line.max(0) as f32;
         let below = (caret_y + bounds.line_height).min(bounds.bounds.size.height);
@@ -67,18 +67,24 @@ impl TerminalView {
                 range
                     .filter_map(|index| {
                         let command = this.suggestions.candidates.get(index)?;
-                        let mut text = div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(div().truncate().child(command.clone()));
-                        if let Some(description) = this.suggestions.descriptions.get(command) {
+                        let detail = format!("{}\n{}", command.label, command.source.label());
+                        let mut text = div().flex_1().min_w_0().overflow_hidden().child(
+                            div().truncate().child(
+                                gpui_kit::component::label::Label::new(command.label.clone())
+                                    .highlights(
+                                        gpui_kit::component::label::HighlightsMatch::Prefix(
+                                            this.suggestions.text.clone().into(),
+                                        ),
+                                    ),
+                            ),
+                        );
+                        if let Some(description) = &command.description {
                             text = text.child(
                                 div()
                                     .text_xs()
                                     .text_color(foreground.opacity(0.65))
                                     .truncate()
-                                    .child(*description),
+                                    .child(description.clone()),
                             );
                         }
                         Some(
@@ -88,7 +94,13 @@ impl TerminalView {
                                 .px_3()
                                 .text_sm()
                                 .selected(index == this.suggestions.selected)
-                                .child(text)
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(detail.clone())
+                                        .build(window, cx)
+                                })
+                                .child(div().flex().items_center().gap_2()
+                                    .child(div().w(px(44.)).flex_shrink_0().text_xs().text_color(foreground.opacity(0.65)).child(command.kind.label()))
+                                    .child(text))
                                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
                                     window.prevent_default();
                                     cx.stop_propagation();

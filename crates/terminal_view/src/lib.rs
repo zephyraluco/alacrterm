@@ -10,6 +10,7 @@
 //! - 高性能网格渲染（批量文本 / 背景矩形 / 块字符 / 光标 / 高亮）
 
 mod contrast;
+mod completion;
 mod path_suggestions;
 mod scrollbar;
 mod suggestion_popup;
@@ -623,10 +624,12 @@ impl TerminalView {
     }
 
     fn accept_suggestion(&mut self, cx: &mut gpui::Context<Self>) {
+        let retrigger = self.suggestions.candidates.get(self.suggestions.selected).is_some_and(|item| item.retrigger);
         if let Some(suffix) = self.suggestions.accept() {
             if let Some(terminal) = &self.terminal {
                 terminal.update(cx, |terminal, _| terminal.input(suffix.into_bytes()));
             }
+            if retrigger { self.suggestions.trigger(); self.schedule_suggestions(true, cx); }
         }
         cx.notify();
     }

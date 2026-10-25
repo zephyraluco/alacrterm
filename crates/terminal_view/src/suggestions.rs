@@ -1,4 +1,5 @@
 //! Per-pane, memory-only history suggestions gated by shell lifecycle markers.
+use crate::completion::{Candidate, Kind, Source, rank};
 use terminal::PromptEvent;
 #[derive(Default)]
 pub(super) struct Suggestions {
@@ -10,9 +11,8 @@ pub(super) struct Suggestions {
     pub cwd: Option<String>,
     pub powershell: Option<bool>,
     pending: Option<String>,
-    pub candidates: Vec<String>,
+    pub candidates: Vec<Candidate>,
     pub selected: usize,
-    pub descriptions: std::collections::HashMap<String, &'static str>,
     dismissed: bool,
     prompt_ready: bool,
 }
@@ -31,13 +31,34 @@ impl Suggestions {
         crate::path_suggestions::PathQuery::parse(&self.text, self.powershell?)
     }
     pub fn add_paths(&mut self, candidates: Vec<String>) {
-        for candidate in candidates {
-            if self.candidates.len() >= 4096 {
-                break;
+        let selected = self
+            .candidates
+            .get(self.selected)
+            .map(|item| (item.insert_text.clone(), item.replacement.clone()));
+        for text in candidates {
+            if text.starts_with(&self.text) {
+                let directory = text.ends_with('/');
+                let kind = if directory {
+                    Kind::Directory
+                } else {
+                    Kind::File
+                };
+                self.candidates.push(Candidate::new(
+                    text,
+                    self.text.len(),
+                    kind,
+                    Source::Filesystem,
+                    if directory { 1600 } else { 1500 },
+                ));
             }
-            if candidate.starts_with(&self.text) && !self.candidates.contains(&candidate) {
-                self.candidates.push(candidate);
-            }
+        }
+        rank(&mut self.candidates);
+        if let Some((text, range)) = selected {
+            self.selected = self
+                .candidates
+                .iter()
+                .position(|item| item.insert_text == text && item.replacement == range)
+                .unwrap_or(0);
         }
     }
     pub fn add_command(&mut self, name: &str) {
@@ -136,7 +157,6 @@ impl Suggestions {
     }
     pub fn refresh(&mut self, manual: bool) {
         self.candidates.clear();
-        self.descriptions.clear();
         self.selected = 0;
         if !self.active
             || self.dismissed
@@ -148,40 +168,57 @@ impl Suggestions {
         self.candidates.extend(
             self.history
                 .iter()
-                .filter(|command| command.starts_with(&self.text) && **command != self.text)
-                .take(256)
-                .cloned(),
+                .enumerate()
+                .filter(|(_, command)| command.starts_with(&self.text) && **command != self.text)
+                .map(|(index, command)| {
+                    Candidate::new(
+                        command.clone(),
+                        self.text.len(),
+                        Kind::History,
+                        Source::History,
+                        1800 - index as i64,
+                    )
+                }),
         );
-        self.append_commands();
+        if !self.text.chars().any(char::is_whitespace) {
+            self.candidates.extend(
+                self.commands
+                    .iter()
+                    .filter(|command| command.starts_with(&self.text) && **command != self.text)
+                    .map(|command| {
+                        Candidate::new(
+                            command.clone(),
+                            self.text.len(),
+                            Kind::Command,
+                            Source::Shell,
+                            1700,
+                        )
+                    }),
+            );
+        }
         let command = self.text.split_whitespace().next().unwrap_or("");
         if self
             .commands
             .binary_search_by(|name| name.as_str().cmp(command))
             .is_ok()
         {
-            for (candidate, description) in crate::command_specs::candidates(&self.text) {
-                self.descriptions.insert(candidate.clone(), description);
-                if self.candidates.len() < 4096 && !self.candidates.contains(&candidate) {
-                    self.candidates.push(candidate);
-                }
+            for (text, description) in crate::command_specs::candidates(&self.text) {
+                let kind = if text
+                    .split_whitespace()
+                    .last()
+                    .is_some_and(|word| word.starts_with('-'))
+                {
+                    Kind::Option
+                } else {
+                    Kind::Subcommand
+                };
+                let mut item =
+                    Candidate::new(text, self.text.len(), kind, Source::Specification, 2000);
+                item.description = Some(description.into());
+                self.candidates.push(item);
             }
         }
-    }
-    fn append_commands(&mut self) {
-        if self.text.chars().any(char::is_whitespace) {
-            return;
-        }
-        for command in &self.commands {
-            if self.candidates.len() >= 4096 {
-                break;
-            }
-            if command.starts_with(&self.text)
-                && *command != self.text
-                && !self.candidates.contains(command)
-            {
-                self.candidates.push(command.clone());
-            }
-        }
+        rank(&mut self.candidates);
     }
     pub fn trigger(&mut self) {
         self.dismissed = false;
@@ -201,9 +238,14 @@ impl Suggestions {
         if !self.active || self.cursor != self.text.len() {
             return None;
         }
+        let candidate = self.candidates.get(self.selected)?;
+        if candidate.replacement != (0..self.text.len()) {
+            return None;
+        }
         let suffix = self
             .candidates
             .get(self.selected)?
+            .insert_text
             .strip_prefix(&self.text)?
             .to_string();
         self.input(&suffix);
@@ -214,12 +256,51 @@ impl Suggestions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn texts(state: &Suggestions) -> Vec<&str> {
+        state
+            .candidates
+            .iter()
+            .map(|item| item.insert_text.as_str())
+            .collect()
+    }
     fn execute(state: &mut Suggestions, command: &str) {
         state.phase(PromptEvent::Prompt);
         state.phase(PromptEvent::Input);
         state.input(command);
         state.submit();
         state.phase(PromptEvent::Execute);
+    }
+    #[test]
+    fn providers_merge_without_starvation_and_keep_selection_on_late_results() {
+        let mut state = Suggestions::default();
+        for index in 0..20 {
+            execute(&mut state, &format!("git status{index}"));
+        }
+        state.add_command("git");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("git sta");
+        state.refresh(false);
+        assert_eq!(state.candidates[0].kind, Kind::Subcommand);
+        assert_eq!(state.candidates.len(), 21);
+        state.step(3);
+        let selected = state.candidates[state.selected].insert_text.clone();
+        state.add_paths(vec!["git station/".into(), "git status".into()]);
+        assert_eq!(state.candidates[state.selected].insert_text, selected);
+        assert_eq!(
+            state
+                .candidates
+                .iter()
+                .filter(|item| item.insert_text == "git status")
+                .count(),
+            1
+        );
+        assert!(
+            state
+                .candidates
+                .iter()
+                .any(|item| item.kind == Kind::Directory)
+        );
     }
     #[test]
     fn all_candidates_remain_navigable_beyond_the_visible_rows() {
@@ -248,10 +329,10 @@ mod tests {
         assert!(state.candidates.is_empty());
         state.add_command("git");
         state.refresh(false);
-        assert_eq!(state.candidates, ["git status"]);
+        assert_eq!(texts(&state), ["git status"]);
         assert_eq!(
-            state.descriptions.get("git status"),
-            Some(&"查看工作区状态")
+            state.candidates[0].description.as_deref(),
+            Some("查看工作区状态")
         );
         assert_eq!(state.accept().as_deref(), Some("tus"));
         assert!(state.active);
@@ -268,7 +349,7 @@ mod tests {
         state.phase(PromptEvent::Input);
         state.input("git ");
         state.refresh(false);
-        assert_eq!(state.candidates, ["git log", "git status"]);
+        assert_eq!(texts(&state), ["git log", "git status"]);
         state.step(1);
         assert_eq!(state.accept().as_deref(), Some("status"));
         assert!(state.active);
@@ -277,7 +358,12 @@ mod tests {
         state.phase(PromptEvent::Prompt);
         state.phase(PromptEvent::Input);
         state.trigger();
-        assert!(!state.candidates.iter().any(|line| line.contains("secret")));
+        assert!(
+            !state
+                .candidates
+                .iter()
+                .any(|line| line.insert_text.contains("secret"))
+        );
     }
     #[test]
     fn unicode_edits_and_unknown_shell_operations_do_not_corrupt_insertion() {
@@ -325,13 +411,13 @@ mod tests {
         state.phase(PromptEvent::Input);
         state.input("g");
         state.refresh(false);
-        assert_eq!(state.candidates, ["git status", "git", "grep"]);
+        assert_eq!(texts(&state), ["git status", "git", "grep"]);
         state.add_command("");
         state.add_command("remote-command");
         state.refresh(false);
-        assert_eq!(state.candidates, ["git status"]);
+        assert_eq!(texts(&state), ["git status"]);
         state.input("it ");
         state.refresh(false);
-        assert_eq!(state.candidates, ["git status"]);
+        assert_eq!(texts(&state), ["git status"]);
     }
 }
