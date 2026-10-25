@@ -16,10 +16,10 @@ pub enum SessionEntry {
 }
 
 impl SessionEntry {
-    pub fn label(&self) -> String {
+    pub fn label(&self) -> &str {
         match self {
-            Self::Folder(folder) => folder.name.clone(),
-            Self::Session(record) => record.name.clone(),
+            Self::Folder(folder) => &folder.name,
+            Self::Session(record) => &record.name,
         }
     }
 
@@ -79,7 +79,7 @@ impl SessionRecord {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum PersistedEntry {
+enum PersistedEntry {
     Folder {
         id: u64,
         name: String,
@@ -96,20 +96,11 @@ pub enum PersistedEntry {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PersistedSessions {
-    pub entries: Vec<PersistedEntry>,
-    pub expanded: Vec<u64>,
-}
-
-impl Default for PersistedSessions {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            expanded: Vec::new(),
-        }
-    }
+struct PersistedSessions {
+    entries: Vec<PersistedEntry>,
+    expanded: Vec<u64>,
 }
 
 impl From<&SessionEntry> for PersistedEntry {
@@ -137,7 +128,7 @@ impl From<PersistedEntry> for SessionEntry {
         match entry {
             PersistedEntry::Folder { id, name, children } => Self::Folder(SessionFolder {
                 id,
-                name: name.into(),
+                name,
                 children: children.into_iter().map(Self::from).collect(),
             }),
             PersistedEntry::Session {
@@ -149,7 +140,7 @@ impl From<PersistedEntry> for SessionEntry {
                 password,
             } => Self::Session(SessionRecord {
                 id,
-                name: name.into(),
+                name,
                 user,
                 host,
                 port,
@@ -160,10 +151,17 @@ impl From<PersistedEntry> for SessionEntry {
 }
 
 pub struct SessionTree {
-    pub entries: Vec<SessionEntry>,
+    entries: Vec<SessionEntry>,
     next_id: u64,
 }
 impl SessionTree {
+    pub fn entries(&self) -> &[SessionEntry] {
+        &self.entries
+    }
+    pub fn update_record(&mut self, id: u64, record: &SessionRecord) -> bool {
+        Self::replace_record(&mut self.entries, id, record)
+    }
+
     pub fn new(entries: Vec<SessionEntry>) -> Self {
         let next_id = Self::max_id(&entries);
         Self { entries, next_id }
@@ -239,7 +237,7 @@ impl SessionTree {
         }
     }
 
-    pub fn max_id(entries: &[SessionEntry]) -> u64 {
+    fn max_id(entries: &[SessionEntry]) -> u64 {
         entries
             .iter()
             .map(|entry| match entry {
@@ -271,7 +269,7 @@ impl SessionTree {
         }
     }
 
-    pub fn children_mut<'a>(
+    fn children_mut<'a>(
         entries: &'a mut Vec<SessionEntry>,
         path: &[usize],
     ) -> Option<&'a mut Vec<SessionEntry>> {
@@ -285,7 +283,7 @@ impl SessionTree {
     }
 
     /// Locate by stable ID, since a tree path may change while the dialog is open.
-    pub fn replace_record(entries: &mut [SessionEntry], id: u64, record: &SessionRecord) -> bool {
+    fn replace_record(entries: &mut [SessionEntry], id: u64, record: &SessionRecord) -> bool {
         for entry in entries {
             match entry {
                 SessionEntry::Session(existing) if existing.id == id => {
@@ -304,15 +302,17 @@ impl SessionTree {
         false
     }
 
-    pub fn take_entry(entries: &mut Vec<SessionEntry>, path: &[usize]) -> Option<SessionEntry> {
+    fn take_entry(entries: &mut Vec<SessionEntry>, path: &[usize]) -> Option<SessionEntry> {
         let (ix, parent) = path.split_last()?;
         let children = Self::children_mut(entries, parent)?;
         (*ix < children.len()).then(|| children.remove(*ix))
     }
 
     /// 取出 `removed` 后修正路径下标。
-    pub fn shift_path_after_removal(mut path: SessionPath, removed: &[usize]) -> SessionPath {
-        let (removed_ix, parent) = removed.split_last().expect("removed 不会是空路径");
+    fn shift_path_after_removal(mut path: SessionPath, removed: &[usize]) -> SessionPath {
+        let Some((removed_ix, parent)) = removed.split_last() else {
+            return path;
+        };
         if path.len() > parent.len() && path.starts_with(parent) && path[parent.len()] > *removed_ix
         {
             path[parent.len()] -= 1;

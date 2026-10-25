@@ -809,13 +809,13 @@ async fn shared_x11_server_survives_disconnecting_another_session() {
     struct Cleanup;
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            ssh::shutdown_wayx();
+            platform::shutdown_wayx();
         }
     }
     let _cleanup = Cleanup;
-    ssh::start_wayx();
+    platform::start_wayx();
     tokio::time::timeout(Duration::from_secs(20), async {
-        while ssh::wayx_status() != ssh::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(50)).await; }
+        while platform::wayx_status() != platform::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(50)).await; }
     }).await.unwrap();
     let port = local_server::serve_with_compression(vec![russh::compression::ZLIB_LEGACY].into())
         .await
@@ -854,16 +854,16 @@ async fn shared_x11_server_survives_disconnecting_another_session() {
     )
     .await;
     assert!(text.0.contains("X11:OK"), "{text:?}");
-    ssh::stop_wayx();
+    platform::stop_wayx();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while ssh::wayx_status() != ssh::WayxStatus::Stopped { tokio::time::sleep(Duration::from_millis(20)).await; }
+        while platform::wayx_status() != platform::WayxStatus::Stopped { tokio::time::sleep(Duration::from_millis(20)).await; }
     }).await.unwrap();
     second.write(b"still-connected\r");
     let (text, _) = collect_until(&mut other_events, Duration::from_secs(5), None, |text, _| text.contains("REPLY:still-connected")).await;
     assert!(text.contains("REPLY:still-connected"));
-    ssh::start_wayx();
+    platform::start_wayx();
     tokio::time::timeout(Duration::from_secs(20), async {
-        while ssh::wayx_status() != ssh::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(20)).await; }
+        while platform::wayx_status() != platform::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(20)).await; }
     }).await.unwrap();
     second.write(b"x11\r");
     let (text, _) = collect_until(&mut other_events, Duration::from_secs(5), None, |text, _| text.contains("X11:OK") || text.contains("X11:FAILED")).await;
@@ -901,7 +901,7 @@ async fn rejects_x11_silently_and_preserves_interactive_shell() {
     session.write(b"fallback-ok\r");
     let (text, _) = collect_until(&mut events, Duration::from_secs(5), None, |text, _| text.contains("REPLY:fallback-ok")).await;
     assert!(text.contains("REPLY:fallback-ok"));
-    assert_eq!(ssh::wayx_status(), ssh::WayxStatus::Stopped);
+    assert_eq!(platform::wayx_status(), platform::WayxStatus::Stopped);
     session.disconnect();
     let _ = std::fs::remove_file(known_hosts);
 }

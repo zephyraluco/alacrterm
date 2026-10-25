@@ -3,9 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{
-        Arc, LazyLock, Mutex,
-    },
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 use tokio::{
@@ -13,7 +11,7 @@ use tokio::{
     sync::Semaphore,
 };
 
-/// Cookies intentionally have no Debug implementation.
+/// A local display connection bound to one service generation.
 #[derive(Clone)]
 pub struct Endpoint {
     display: u16,
@@ -21,10 +19,10 @@ pub struct Endpoint {
     generation: u64,
 }
 
-pub(crate) struct Wayx {
+struct Wayx {
     child: Option<Child>,
     directory: PathBuf,
-    pub(crate) forwarder: Endpoint,
+    endpoint: Endpoint,
 }
 
 /// State displayed by the application-level WayX control.
@@ -101,7 +99,7 @@ impl WayxService {
             .server
             .as_ref()
             .context("WayX is not running")?
-            .forwarder
+            .endpoint
             .clone())
     }
 
@@ -172,7 +170,7 @@ impl WayxService {
             // Keep process creation and publishing ownership atomic with respect
             // to shutdown; no child can appear after the exit hook has returned.
             let mut server = Wayx::spawn()?;
-            server.forwarder.generation = generation;
+            server.endpoint.generation = generation;
             state.server = Some(server);
         }
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -187,7 +185,7 @@ impl WayxService {
                     if let Some(child) = &mut server.child {
                         ensure!(child.try_wait()?.is_none(), "WayX exited during startup");
                     }
-                    server.forwarder.clone()
+                    server.endpoint.clone()
                 };
                 if probe.ready().await {
                     let mut state = self.lock();
@@ -277,7 +275,7 @@ impl Drop for Wayx {
             let _ = child.kill();
             let _ = child.wait();
             #[cfg(unix)]
-            cleanup_display(self.forwarder.display, child.id());
+            cleanup_display(self.endpoint.display, child.id());
         }
         let _ = std::fs::remove_dir_all(&self.directory);
     }
@@ -305,10 +303,11 @@ fn cleanup_display(display: u16, pid: u32) {
         return;
     }
     // Never remove a different server's display. Keep our reservation until cleanup finishes.
-    if let Ok(socket_metadata) = std::fs::symlink_metadata(&socket) {
-        if socket_metadata.file_type().is_socket() && socket_metadata.uid() == metadata.uid() {
-            let _ = std::fs::remove_file(socket);
-        }
+    if let Ok(socket_metadata) = std::fs::symlink_metadata(&socket)
+        && socket_metadata.file_type().is_socket()
+        && socket_metadata.uid() == metadata.uid()
+    {
+        let _ = std::fs::remove_file(socket);
     }
     let _ = std::fs::remove_file(lock);
 }
@@ -375,7 +374,7 @@ impl Wayx {
         let mut server = Self {
             child: None,
             directory,
-            forwarder: Endpoint {
+            endpoint: Endpoint {
                 display,
                 permits: Arc::new(Semaphore::new(64)),
                 generation: 0,
@@ -466,10 +465,15 @@ impl Endpoint {
     }
 
     /// Obtain a snapshot of the currently running display.
-    pub fn current() -> Result<Self> { SHARED_WAYX.current() }
+    pub fn current() -> Result<Self> {
+        SHARED_WAYX.current()
+    }
     /// Limit concurrent connections to this display generation.
     pub fn acquire(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
-        self.permits.clone().try_acquire_owned().context("WayX connection limit reached")
+        self.permits
+            .clone()
+            .try_acquire_owned()
+            .context("WayX connection limit reached")
     }
     /// Whether this endpoint still belongs to the running server.
     pub fn is_current(&self) -> bool {

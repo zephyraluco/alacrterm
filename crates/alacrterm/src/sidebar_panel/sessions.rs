@@ -49,7 +49,7 @@ impl SessionsState {
     }
 
     fn persist(&self) {
-        SessionTree::persist(&self.tree.entries, &self.expanded);
+        SessionTree::persist(self.tree.entries(), &self.expanded);
     }
 
     fn rows(&mut self) -> Rc<Vec<SessionRow>> {
@@ -58,7 +58,7 @@ impl SessionsState {
         }
         let mut out = Vec::new();
         let mut path = SessionPath::new();
-        Self::flatten(&self.tree.entries, &self.expanded, &mut path, &mut out);
+        Self::flatten(self.tree.entries(), &self.expanded, &mut path, &mut out);
         self.rows.store(out)
     }
 
@@ -74,7 +74,7 @@ impl SessionsState {
             let is_open = is_folder && expanded.contains(&entry.id());
             out.push(SessionRow {
                 path: path.clone(),
-                label: entry.label().into(),
+                label: entry.label().to_owned().into(),
                 depth: path.len() - 1,
                 is_folder,
                 has_children: matches!(entry, SessionEntry::Folder(folder) if !folder.children.is_empty()),
@@ -140,7 +140,7 @@ impl SessionsState {
         record: SessionRecord,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !SessionTree::replace_record(&mut self.tree.entries, id, &record) {
+        if !self.tree.update_record(id, &record) {
             return false;
         }
         self.persist();

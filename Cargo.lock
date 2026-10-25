@@ -6789,6 +6789,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "util",
 ]
 
 [[package]]
@@ -7070,7 +7071,6 @@ dependencies = [
  "anyhow",
  "dirs 7.0.0",
  "futures",
- "libc",
  "log",
  "platform",
  "rand 0.10.3",
@@ -7470,7 +7470,6 @@ dependencies = [
  "gpui-pre",
  "itertools 0.15.0",
  "log",
- "serde",
  "serde_json",
  "settings",
  "terminal",

@@ -1,3 +1,5 @@
+pub mod file_cache;
+pub mod format;
 pub mod paths;
 pub mod rel_path;
 pub mod shell;
@@ -28,12 +30,6 @@ where
             }
         }
     }
-}
-
-pub trait TryFutureExt: Sized {
-    fn detach_and_log_err<C>(self, cx: &mut C)
-    where
-        C: ?Sized;
 }
 
 #[macro_export]

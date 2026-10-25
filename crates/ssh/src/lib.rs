@@ -60,5 +60,3 @@ pub use fs::{
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
 pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize, ShellIntegration};
 pub use session::{SshOutput, SshEvent, SshSession};
-
-pub use platform::{WayxStatus, start_wayx, stop_wayx, wayx_status, shutdown_wayx};

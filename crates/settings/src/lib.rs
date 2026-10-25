@@ -1,14 +1,17 @@
 //! UI-independent application configuration and persistence.
+pub mod keymap;
 mod suggestions;
-pub use suggestions::SuggestionSettings;
-use std::{collections::HashMap, path::{Path, PathBuf}};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+pub use suggestions::SuggestionSettings;
 
 const TERMINAL_CONFIG_RELATIVE_PATH: &str = "config/terminal.json";
 
 const APP_CONFIG_RELATIVE_PATH: &str = "config/app.json";
-
 
 const SESSIONS_CONFIG_RELATIVE_PATH: &str = "config/sessions.json";
 
@@ -31,11 +34,9 @@ pub fn candidates(relative: &str) -> Vec<PathBuf> {
 
 /// 读第一个命中的配置文件。
 pub fn read_config_file(relative: &str) -> Option<(PathBuf, String)> {
-    candidates(relative).into_iter().find_map(|path| {
-        std::fs::read_to_string(&path)
-            .ok()
-            .map(|text| (path, text))
-    })
+    candidates(relative)
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(&path).ok().map(|text| (path, text)))
 }
 
 /// 写回目标：优先已存在的那份。
@@ -64,7 +65,6 @@ pub fn shown_path(path: &Path) -> String {
         .trim_start_matches(r"\\?\")
         .to_string()
 }
-
 
 /// `config/terminal.json` 的结构；字段全可选。
 #[derive(Debug, Default, Deserialize)]
@@ -106,7 +106,10 @@ fn write_json_doc(path: &Path, doc: &serde_json::Value, what: &str) {
     if let Some(parent) = path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
-        eprintln!("[config] {what}保存失败（建目录 {}）：{error}", parent.display());
+        eprintln!(
+            "[config] {what}保存失败（建目录 {}）：{error}",
+            parent.display()
+        );
         return;
     }
 
@@ -165,11 +168,17 @@ pub fn load_terminal_config() -> TerminalFile {
 
 /// Save only UI-owned preferences, preserving colors and unknown keys.
 pub fn save_terminal_preferences(preferences: serde_json::Map<String, serde_json::Value>) {
-    let path = write_target(TERMINAL_CONFIG_RELATIVE_PATH);
-    let mut doc = read_json_value(&path);
+    save_terminal_preferences_at(&write_target(TERMINAL_CONFIG_RELATIVE_PATH), preferences);
+}
+
+fn save_terminal_preferences_at(
+    path: &Path,
+    preferences: serde_json::Map<String, serde_json::Value>,
+) {
+    let mut doc = read_json_value(path);
     if let Some(map) = doc.as_object_mut() {
         map.extend(preferences);
-        write_json_doc(&path, &doc, "终端渲染参数");
+        write_json_doc(path, &doc, "终端渲染参数");
     }
 }
 
@@ -177,15 +186,52 @@ pub fn save_terminal_preferences(preferences: serde_json::Map<String, serde_json
 mod tests {
     use super::*;
     #[test]
+    fn saving_preferences_preserves_palette_and_unknown_fields() {
+        let root = std::env::temp_dir().join(format!("alacrterm-settings-{}", std::process::id()));
+        let cache = util::file_cache::FileCache::new(&root);
+        let lease = cache.allocate("terminal.json");
+        std::fs::write(lease.path(), r##"{"font_size":15,"colors":{"terminal_background":"#010203"},"future":{"keep":true}}"##).unwrap();
+        save_terminal_preferences_at(
+            lease.path(),
+            serde_json::Map::from_iter([("font_size".into(), json!(18))]),
+        );
+        let saved = read_json_value(lease.path());
+        assert_eq!(saved["font_size"], 18);
+        assert_eq!(saved["colors"]["terminal_background"], "#010203");
+        assert_eq!(saved["future"]["keep"], true);
+    }
+    #[test]
+    fn saving_non_object_configuration_does_not_overwrite_it() {
+        let root =
+            std::env::temp_dir().join(format!("alacrterm-settings-invalid-{}", std::process::id()));
+        let cache = util::file_cache::FileCache::new(&root);
+        let lease = cache.allocate("terminal.json");
+        std::fs::write(lease.path(), "[]").unwrap();
+        save_terminal_preferences_at(lease.path(), serde_json::Map::new());
+        assert_eq!(std::fs::read_to_string(lease.path()).unwrap(), "[]");
+    }
+    #[test]
     fn legacy_terminal_fields_remain_optional() {
-        let file: TerminalFile = serde_json::from_str(r##"{"font_size":17,"colors":{"terminal_background":"#000000"},"future":true}"##).unwrap();
+        let file: TerminalFile = serde_json::from_str(
+            r##"{"font_size":17,"colors":{"terminal_background":"#000000"},"future":true}"##,
+        )
+        .unwrap();
         assert_eq!(file.font_size, Some(17.));
         assert!(file.suggestions.is_none());
         assert_eq!(file.colors["terminal_background"], "#000000");
     }
     #[test]
     fn repository_fallback_keeps_existing_configuration_root() {
-        assert_eq!(candidates("config/app.json").last().unwrap().canonicalize().unwrap(),
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/app.json").canonicalize().unwrap());
+        assert_eq!(
+            candidates("config/app.json")
+                .last()
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../config/app.json")
+                .canonicalize()
+                .unwrap()
+        );
     }
 }

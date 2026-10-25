@@ -32,9 +32,6 @@ tokio = { version = "1", features = [
 
 platform.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
 [dev-dependencies]
 anyhow.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }

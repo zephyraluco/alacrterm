@@ -8,7 +8,7 @@ mod assets;
 mod components;
 mod config;
 mod dialog;
-mod format;
+use util::format;
 mod keymap;
 mod pane_layout;
 mod preview_cache;

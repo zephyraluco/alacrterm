@@ -6,13 +6,11 @@ use std::path::{Path, PathBuf};
 use gpui::{App, FontWeight, Hsla, SharedString, px};
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use serde_json::json;
+use settings::{TerminalFile, candidates, load_app_config, save_theme_choice};
+pub(crate) use settings::{read_config_file, shown_path};
 use terminal::{CursorShape, TerminalColors, rgba_color};
 use terminal_view::RenderSettings;
-use settings::{TerminalFile, candidates,
-    load_app_config, save_theme_choice};
-pub(crate) use settings::{read_config_file, shown_path};
 const THEMES_DIR: &str = "themes";
-
 
 pub(crate) struct Settings {
     /// 终端渲染参数。
@@ -43,7 +41,6 @@ pub(crate) fn settings_mut(cx: &mut App) -> &mut Settings {
     cx.global_mut::<Settings>()
 }
 
-
 /// 读取并应用终端渲染配置。
 pub(crate) fn load_render_settings() -> RenderSettings {
     let mut settings = RenderSettings::default();
@@ -57,8 +54,14 @@ pub(crate) fn load_render_settings() -> RenderSettings {
 pub(crate) fn save_render_settings(settings: &RenderSettings) {
     let mut map = serde_json::Map::new();
     map.insert("font_family".into(), json!(settings.font_family));
-    map.insert("font_size".into(), json!(as_number(settings.font_size.as_f32())));
-    map.insert("font_weight".into(), json!(as_number(settings.font_weight.0)));
+    map.insert(
+        "font_size".into(),
+        json!(as_number(settings.font_size.as_f32())),
+    );
+    map.insert(
+        "font_weight".into(),
+        json!(as_number(settings.font_weight.0)),
+    );
     map.insert(
         "line_height_multiplier".into(),
         json!(as_number(settings.line_height_multiplier)),
@@ -94,7 +97,9 @@ pub(crate) fn cursor_shape_name(shape: CursorShape) -> &'static str {
 }
 
 fn apply_render_settings(settings: &mut RenderSettings, file: TerminalFile) {
-    if let Some(suggestions) = file.suggestions { settings.suggestions = suggestions; }
+    if let Some(suggestions) = file.suggestions {
+        settings.suggestions = suggestions;
+    }
     if let Some(family) = file.font_family {
         settings.font_family = family.into();
     }
@@ -126,9 +131,7 @@ fn apply_render_settings(settings: &mut RenderSettings, file: TerminalFile) {
     for (key, value) in &file.colors {
         match parse_color(value) {
             Some(color) => apply_color(colors, key, color),
-            None => eprintln!(
-                "[config] 颜色 {key} 取值非法：{value}（应为 #RRGGBB 或 #RRGGBBAA）"
-            ),
+            None => eprintln!("[config] 颜色 {key} 取值非法：{value}（应为 #RRGGBB 或 #RRGGBBAA）"),
         }
     }
 
@@ -202,7 +205,6 @@ fn parse_color(value: &str) -> Option<Hsla> {
     Some(color)
 }
 
-
 /// 加载主题目录并开启热重载；目录不存在时保持内置主题。
 pub(crate) fn load_themes(cx: &mut App) {
     let Some(dir) = themes_dir() else {
@@ -256,7 +258,9 @@ fn preload_themes(dir: &Path, cx: &mut App) -> usize {
 
 /// 主题目录：exe 同级 → 仓库根，取第一个存在的。
 fn themes_dir() -> Option<PathBuf> {
-    candidates(THEMES_DIR).into_iter().find(|path| path.is_dir())
+    candidates(THEMES_DIR)
+        .into_iter()
+        .find(|path| path.is_dir())
 }
 
 pub(crate) const FOLLOW_GPUI_KIT: &str = "跟随 gpui-kit（默认）";

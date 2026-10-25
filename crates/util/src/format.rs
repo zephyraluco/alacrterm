@@ -1,7 +1,7 @@
 //! 显示用的小格式化:字节数。文件管理器与预览窗口共用。
 
 /// 字节数 → 人看的大小(1024 进制,保留一位小数)。
-pub(crate) fn size(bytes: u64) -> String {
+pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
     let mut unit = 0;

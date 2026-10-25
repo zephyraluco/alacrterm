@@ -15,7 +15,7 @@ pub struct TransferState {
 
 impl TransferState {
     fn update_progress(&mut self, progress: TransferProgress) {
-        self.label = progress.label.into();
+        self.label = progress.label;
         self.files_done = progress.files_done;
         self.files_total = progress.files_total;
         self.bytes_done = progress.bytes_done;

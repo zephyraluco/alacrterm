@@ -53,8 +53,7 @@ use crate::backend::{INITIAL_PTY_SIZE, TerminalBackend};
 /// 视图层与应用层不必自己依赖 `ssh`。
 pub use ssh::{
     CancelToken, HostKeyDecision, HostKeyPrompt, RemoteEntry, RemoteMeta, SessionId, SshAuth,
-    SshError, SshFs, SshParams, Transfer, TransferEvent, TransferProgress, WayxStatus,
-    shutdown_wayx, start_wayx, stop_wayx, wayx_status,
+    SshError, SshFs, SshParams, Transfer, TransferEvent, TransferProgress,
 };
 
 use gpui::{
