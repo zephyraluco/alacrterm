@@ -30,21 +30,35 @@ impl TerminalView {
         }
         let bounds = content.terminal_bounds;
         let width = bounds.bounds.size.width.min(px(480.)).max(px(0.));
-        let row_height = px(48.);
+        let row_height = |candidate: &crate::completion::Candidate| {
+            if candidate.description.is_some() {
+                px(44.)
+            } else {
+                px(28.)
+            }
+        };
         let footer = px(28.);
         let caret_y = bounds.line_height * content.cursor.point.line.max(0) as f32;
         let below = (caret_y + bounds.line_height).min(bounds.bounds.size.height);
         let available_below = (bounds.bounds.size.height - below).max(px(0.));
         let available_above = caret_y.min(bounds.bounds.size.height).max(px(0.));
-        let desired =
-            row_height * self.suggestions.candidates.len().min(8) as f32 + footer + px(2.);
+        let desired = self
+            .suggestions
+            .candidates
+            .iter()
+            .take(8)
+            .fold(footer + px(2.), |height, candidate| {
+                height + row_height(candidate)
+            });
         let place_below = desired <= available_below || available_below >= available_above;
         let height = desired.min(if place_below {
             available_below
         } else {
             available_above
         });
-        if width < px(120.) || height < row_height + footer {
+        if width < px(120.)
+            || height < row_height(&self.suggestions.candidates[0]) + footer + px(2.)
+        {
             return None;
         }
         let top = if place_below {
@@ -55,10 +69,13 @@ impl TerminalView {
         let left = (bounds.cell_width * content.cursor.point.column as f32)
             .min((bounds.bounds.size.width - width).max(px(0.)));
         let foreground = self.settings.colors.terminal_foreground;
-        let item_sizes = std::rc::Rc::new(vec![
-            size(width, row_height);
-            self.suggestions.candidates.len()
-        ]);
+        let item_sizes = std::rc::Rc::new(
+            self.suggestions
+                .candidates
+                .iter()
+                .map(|candidate| size(width, row_height(candidate)))
+                .collect(),
+        );
         let list = v_virtual_list(
             cx.entity(),
             "terminal-candidates",
@@ -67,19 +84,32 @@ impl TerminalView {
                 range
                     .filter_map(|index| {
                         let command = this.suggestions.candidates.get(index)?;
-                        let detail = format!("{}\n{}", command.label, command.source.label());
-                        let mut text = div().flex_1().min_w_0().overflow_hidden().child(
-                            div().truncate().child(
-                                gpui_kit::component::label::Label::new(command.label.clone())
-                                    .highlights(gpui_kit::component::label::HighlightsMatch::Full(
-                                        this.suggestions.query_for(command).into(),
-                                    )),
-                            ),
+                        let detail = format!(
+                            "{}\n{} · {}",
+                            command.label,
+                            command.kind.label(),
+                            command.source.label()
                         );
+                        let mut text = div()
+                            .flex_1()
+                            .min_w_0()
+                            .line_height(px(20.))
+                            .overflow_hidden()
+                            .child(
+                                div().truncate().child(
+                                    gpui_kit::component::label::Label::new(command.label.clone())
+                                        .highlights(
+                                            gpui_kit::component::label::HighlightsMatch::Full(
+                                                this.suggestions.query_for(command).into(),
+                                            ),
+                                        ),
+                                ),
+                            );
                         if let Some(description) = &command.description {
                             text = text.child(
                                 div()
                                     .text_xs()
+                                    .line_height(px(16.))
                                     .text_color(foreground.opacity(0.65))
                                     .truncate()
                                     .child(description.clone()),
@@ -87,7 +117,8 @@ impl TerminalView {
                         }
                         Some(
                             ListItem::new(("terminal-candidate", index))
-                                .h(row_height)
+                                .h(row_height(command))
+                                .py(px(2.))
                                 .w_full()
                                 .px_3()
                                 .text_sm()
@@ -115,14 +146,6 @@ impl TerminalView {
                                             .size_4()
                                             .text_color(foreground.opacity(0.65)),
                                         )
-                                        .child(
-                                            div()
-                                                .w(px(44.))
-                                                .flex_shrink_0()
-                                                .text_xs()
-                                                .text_color(foreground.opacity(0.65))
-                                                .child(command.kind.label()),
-                                        )
                                         .child(text),
                                 )
                                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
@@ -148,6 +171,7 @@ impl TerminalView {
             .items_center()
             .gap_1()
             .h(footer)
+            .flex_shrink_0()
             .px_3()
             .text_xs()
             .overflow_hidden()
@@ -191,8 +215,14 @@ impl TerminalView {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .overflow_hidden()
                     .child(list)
-                    .child(Scrollbar::vertical(&self.suggestion_scroll).viewport_from_layout()),
+                    // Use the virtual list's measured viewport, not the scrollbar's
+                    // absolute static position after the list in this block container.
+                    .child(
+                        Scrollbar::vertical(&self.suggestion_scroll)
+                            .id("terminal-candidate-scrollbar"),
+                    ),
             )
             .child(key_hints);
         // Pane-local geometry above prevents a window-positioned surface spilling into
