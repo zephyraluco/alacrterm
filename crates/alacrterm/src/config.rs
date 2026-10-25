@@ -13,6 +13,7 @@ use terminal_view::RenderSettings;
 const THEMES_DIR: &str = "themes";
 
 pub(crate) struct Settings {
+    pub(crate) color_scheme: Option<SharedString>,
     /// 终端渲染参数。
     pub(crate) render: RenderSettings,
     /// 深色 / 浅色槽位用的主题名；`None` = 跟随内置主题。
@@ -24,10 +25,18 @@ impl gpui::Global for Settings {}
 
 /// 启动时读完配置并装进全局。
 pub(crate) fn install(cx: &mut App) {
-    let render = load_render_settings();
+    let file = settings::load_terminal_config();
+    let color_scheme = file
+        .color_scheme
+        .as_deref()
+        .filter(|id| settings::color_schemes::load(id).is_some())
+        .map(|id| SharedString::from(id.to_owned()));
+    let mut render = RenderSettings::default();
+    apply_render_settings(&mut render, file);
     let app = load_app_config();
     cx.set_global(Settings {
         render,
+        color_scheme,
         dark_theme: app.dark_theme.map(Into::into),
         light_theme: app.light_theme.map(Into::into),
     });
@@ -41,18 +50,19 @@ pub(crate) fn settings_mut(cx: &mut App) -> &mut Settings {
     cx.global_mut::<Settings>()
 }
 
-/// 读取并应用终端渲染配置。
-pub(crate) fn load_render_settings() -> RenderSettings {
-    let mut settings = RenderSettings::default();
-
-    let file = settings::load_terminal_config();
-    apply_render_settings(&mut settings, file);
-    settings
+/// Resolve only the selected palette; callers retain font and input preferences.
+pub(crate) fn palette_settings(id: Option<&str>) -> RenderSettings {
+    let mut file = settings::load_terminal_config();
+    file.color_scheme = id.map(str::to_owned);
+    let mut render = RenderSettings::default();
+    apply_render_settings(&mut render, file);
+    render
 }
 
 /// 把终端渲染参数写回 `config/terminal.json`（只覆盖设置窗口管的键）。
-pub(crate) fn save_render_settings(settings: &RenderSettings) {
+pub(crate) fn save_render_settings(settings: &RenderSettings, color_scheme: Option<&str>) {
     let mut map = serde_json::Map::new();
+    map.insert("color_scheme".into(), json!(color_scheme));
     map.insert("font_family".into(), json!(settings.font_family));
     map.insert(
         "font_size".into(),
@@ -144,6 +154,28 @@ fn apply_render_settings(settings: &mut RenderSettings, file: TerminalFile) {
     if let Some(color) = file.link_color.as_deref().and_then(parse_color) {
         settings.link_color = color;
     }
+    // A named scheme takes precedence over legacy custom colors. The custom
+    // values remain on disk so selecting the default/custom option restores them.
+    if let Some(scheme) = file
+        .color_scheme
+        .as_deref()
+        .and_then(settings::color_schemes::load)
+    {
+        for (key, value) in &scheme.colors {
+            if let Some(color) = parse_color(value) {
+                apply_color(&mut settings.colors, key, color);
+            }
+        }
+        if let Some(color) = parse_color(&scheme.selection_color) {
+            settings.selection_color = color;
+        }
+        if let Some(color) = parse_color(&scheme.search_match_color) {
+            settings.search_match_color = color;
+        }
+        if let Some(color) = parse_color(&scheme.link_color) {
+            settings.link_color = color;
+        }
+    }
 }
 
 /// 把调色板里的一个键写回 [`TerminalColors`]。
@@ -193,15 +225,9 @@ pub(crate) fn parse_cursor_shape(value: &str) -> Option<CursorShape> {
 
 /// `#RRGGBB` / `#RRGGBBAA`（`#` 可省）→ [`Hsla`]。
 fn parse_color(value: &str) -> Option<Hsla> {
-    let hex = value.trim().trim_start_matches('#');
-    let (rgb, alpha) = match hex.len() {
-        6 => (hex, 255),
-        8 => (&hex[..6], u8::from_str_radix(&hex[6..], 16).ok()?),
-        _ => return None,
-    };
-    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&rgb[range], 16).ok();
-    let mut color = rgba_color(channel(0..2)?, channel(2..4)?, channel(4..6)?);
-    color.a = f32::from(alpha) / 255.0;
+    let [red, green, blue, alpha] = settings::color_schemes::parse_hex(value)?;
+    let mut color = rgba_color(red, green, blue);
+    color.a = f32::from(alpha) / 255.;
     Some(color)
 }
 
@@ -339,4 +365,39 @@ fn apply_theme_slot(name: Option<&SharedString>, mode: ThemeMode, cx: &mut App) 
         Theme::global_mut(cx).light_theme = config;
     }
     true
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+    #[test]
+    fn named_palette_overrides_legacy_colors_without_changing_font_preferences() {
+        let file: TerminalFile = serde_json::from_str(r##"{"color_scheme":"nord","font_size":19,"colors":{"terminal_background":"#ff0000"}}"##).unwrap();
+        let mut render = RenderSettings::default();
+        apply_render_settings(&mut render, file);
+        assert_eq!(
+            render.colors.terminal_background,
+            parse_color("#2e3440").unwrap()
+        );
+        assert_eq!(render.font_size, px(19.));
+        assert_eq!(
+            render.colors.terminal_ansi_blue,
+            parse_color("#81a1c1").unwrap()
+        );
+    }
+    #[test]
+    fn missing_or_unknown_scheme_preserves_custom_colors() {
+        for scheme in ["null", "\"unknown\""] {
+            let file: TerminalFile = serde_json::from_str(&format!(
+                r##"{{"color_scheme":{scheme},"colors":{{"terminal_background":"#102030"}}}}"##
+            ))
+            .unwrap();
+            let mut render = RenderSettings::default();
+            apply_render_settings(&mut render, file);
+            assert_eq!(
+                render.colors.terminal_background,
+                parse_color("#102030").unwrap()
+            );
+        }
+    }
 }

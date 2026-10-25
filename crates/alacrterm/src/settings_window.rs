@@ -57,7 +57,7 @@ impl SettingsWindow {
                 SettingGroup::new()
                     .item(
                         SettingItem::new("深色主题", theme_mode_switch())
-                            .description("切换深色 / 浅色界面主题，与终端背景保持一致。"),
+                            .description("切换深色 / 浅色界面主题；终端配色在「终端」页单独选择。"),
                     )
                     .item(
                         SettingItem::new("深色模式配色", theme_dropdown(cx, ThemeMode::Dark))
@@ -77,6 +77,11 @@ impl SettingsWindow {
             .default_open(true)
             .group(
                 SettingGroup::new()
+                    .item(render_item(
+                        "终端配色",
+                        "立即应用到所有终端并保存。默认／自定义使用 terminal.json 中的颜色。",
+                        terminal_color_dropdown(self.app_root.clone()),
+                    ))
                     .item(render_item(
                         "字体",
                         "终端字体族（系统里已安装的等宽字体）。",
@@ -280,6 +285,28 @@ fn theme_dropdown(cx: &App, mode: ThemeMode) -> SettingField<SharedString> {
     )
 }
 
+fn terminal_color_dropdown(root: WeakEntity<AppRoot>) -> SettingField<SharedString> {
+    let mut options = vec![(SharedString::default(), "默认／自定义".into())];
+    options.extend(settings::color_schemes::SCHEMES.iter()
+        .map(|(id, name)| (SharedString::from((*id).to_owned()), SharedString::from((*name).to_owned()))));
+    SettingField::scrollable_dropdown(
+        options,
+        |cx: &App| config::settings(cx).color_scheme.clone().unwrap_or_default(),
+        move |value: SharedString, cx: &mut App| {
+            let id = (!value.is_empty()).then_some(value);
+            let palette = config::palette_settings(id.as_deref());
+            config::settings_mut(cx).color_scheme = id;
+            update_render(&root, cx, |render| {
+                render.colors = palette.colors;
+                render.selection_color = palette.selection_color;
+                render.search_match_color = palette.search_match_color;
+                render.link_color = palette.link_color;
+            });
+            cx.refresh_windows();
+        },
+    )
+}
+
 /// 渲染参数项：包一层 description。
 fn render_item(
     title: &'static str,
@@ -313,7 +340,7 @@ pub(crate) fn update_render(
     let mut settings = config::settings(cx).render.clone();
     change(&mut settings);
     config::settings_mut(cx).render = settings.clone();
-    config::save_render_settings(&settings);
+    config::save_render_settings(&settings, config::settings(cx).color_scheme.as_deref());
     if let Some(root) = root.upgrade() {
         root.update(cx, |root, cx| root.apply_render_settings(settings, cx));
     }
