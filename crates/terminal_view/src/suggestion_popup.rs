@@ -1,4 +1,4 @@
-//! Non-focusing, virtualized terminal completion surface.
+//! Non-focusing, cursor-anchored terminal completion surface.
 use crate::TerminalView;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement as _, MouseButton,
@@ -6,7 +6,9 @@ use gpui::{
 };
 use gpui_kit::{
     base::Positioner,
-    component::{Icon, IconName, kbd::Kbd, list::ListItem, scroll::Scrollbar, v_virtual_list},
+    component::{
+        ActiveTheme as _, Icon, IconName, list::ListItem, scroll::Scrollbar, v_virtual_list,
+    },
 };
 use terminal::Modes;
 impl TerminalView {
@@ -30,52 +32,41 @@ impl TerminalView {
         }
         let bounds = content.terminal_bounds;
         let width = bounds.bounds.size.width.min(px(480.)).max(px(0.));
-        let row_height = |candidate: &crate::completion::Candidate| {
-            if candidate.description.is_some() {
-                px(44.)
-            } else {
-                px(28.)
-            }
-        };
-        let footer = px(28.);
+        let row_height = px(24.);
         let caret_y = bounds.line_height * content.cursor.point.line.max(0) as f32;
         let below = (caret_y + bounds.line_height).min(bounds.bounds.size.height);
         let available_below = (bounds.bounds.size.height - below).max(px(0.));
         let available_above = caret_y.min(bounds.bounds.size.height).max(px(0.));
-        let desired = self
-            .suggestions
-            .candidates
-            .iter()
-            .take(8)
-            .fold(footer + px(2.), |height, candidate| {
-                height + row_height(candidate)
-            });
+        let desired = row_height * self.suggestions.candidates.len().min(10) as f32 + px(2.);
         let place_below = desired <= available_below || available_below >= available_above;
-        let height = desired.min(if place_below {
+        let available = if place_below {
             available_below
         } else {
             available_above
-        });
-        if width < px(120.)
-            || height < row_height(&self.suggestions.candidates[0]) + footer + px(2.)
-        {
+        };
+        let visible_rows = (((available - px(2.)) / row_height).floor().max(0.) as usize)
+            .min(10)
+            .min(self.suggestions.candidates.len());
+        if width < px(120.) || visible_rows == 0 {
             return None;
         }
+        let height = row_height * visible_rows as f32 + px(2.);
         let top = if place_below {
             below
         } else {
             (caret_y - height).max(px(0.))
         };
+        // Keep following the end of the caret, including when the prefix grows.
         let left = (bounds.cell_width * content.cursor.point.column as f32)
             .min((bounds.bounds.size.width - width).max(px(0.)));
-        let foreground = self.settings.colors.terminal_foreground;
-        let item_sizes = std::rc::Rc::new(
-            self.suggestions
-                .candidates
-                .iter()
-                .map(|candidate| size(width, row_height(candidate)))
-                .collect(),
-        );
+        let foreground = cx.theme().popover_foreground;
+        let background = cx.theme().popover;
+        let border = cx.theme().border;
+        let font_size = self.settings.font_size.clamp(px(10.), px(16.));
+        let item_sizes = std::rc::Rc::new(vec![
+            size(width, row_height);
+            self.suggestions.candidates.len()
+        ]);
         let list = v_virtual_list(
             cx.entity(),
             "terminal-candidates",
@@ -84,70 +75,73 @@ impl TerminalView {
                 range
                     .filter_map(|index| {
                         let command = this.suggestions.candidates.get(index)?;
-                        let detail = format!(
+                        let mut detail = format!(
                             "{}\n{} · {}",
                             command.label,
                             command.kind.label(),
                             command.source.label()
                         );
-                        let mut text = div()
-                            .flex_1()
-                            .min_w_0()
-                            .line_height(px(20.))
+                        if let Some(description) = &command.description {
+                            detail.push('\n');
+                            detail.push_str(description);
+                        }
+                        let mut content = div()
+                            .flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
                             .overflow_hidden()
                             .child(
-                                div().truncate().child(
+                                Icon::new(match command.kind {
+                                    crate::completion::Kind::Directory => IconName::Folder,
+                                    crate::completion::Kind::File => IconName::File,
+                                    crate::completion::Kind::Command => IconName::SquareTerminal,
+                                    _ => IconName::FileText,
+                                })
+                                .size_4()
+                                .flex_shrink_0()
+                                .text_color(foreground.opacity(0.65)),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().truncate().child(
                                     gpui_kit::component::label::Label::new(command.label.clone())
                                         .highlights(
                                             gpui_kit::component::label::HighlightsMatch::Full(
                                                 this.suggestions.query_for(command).into(),
                                             ),
-                                        ),
+                                        )
+                                        .line_height(px(20.))
+                                        .truncate(),
                                 ),
                             );
                         if let Some(description) = &command.description {
-                            text = text.child(
+                            content = content.child(
                                 div()
-                                    .text_xs()
-                                    .line_height(px(16.))
-                                    .text_color(foreground.opacity(0.65))
+                                    .min_w_0()
+                                    .max_w(width * 0.45)
+                                    .text_right()
+                                    .text_color(foreground.opacity(0.55))
                                     .truncate()
                                     .child(description.clone()),
                             );
                         }
                         Some(
                             ListItem::new(("terminal-candidate", index))
-                                .h(row_height(command))
-                                .py(px(2.))
+                                .h(row_height)
+                                .py_0()
+                                .pl_2()
+                                .pr(px(10.))
                                 .w_full()
-                                .px_3()
-                                .text_sm()
+                                .font_family(this.settings.font_family.clone())
+                                .text_size(font_size)
+                                .line_height(px(20.))
+                                // Preserve the component's current selected and hover styles.
                                 .selected(index == this.suggestions.selected)
                                 .tooltip(move |window, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new(detail.clone())
                                         .build(window, cx)
                                 })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            Icon::new(match command.kind {
-                                                crate::completion::Kind::Directory => {
-                                                    IconName::Folder
-                                                }
-                                                crate::completion::Kind::File => IconName::File,
-                                                crate::completion::Kind::Command => {
-                                                    IconName::SquareTerminal
-                                                }
-                                                _ => IconName::FileText,
-                                            })
-                                            .size_4()
-                                            .text_color(foreground.opacity(0.65)),
-                                        )
-                                        .child(text),
-                                )
+                                .child(content)
                                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
                                     window.prevent_default();
                                     cx.stop_propagation();
@@ -166,32 +160,17 @@ impl TerminalView {
         )
         .track_scroll(&self.suggestion_scroll)
         .size_full();
-        let mut key_hints = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(footer)
-            .flex_shrink_0()
-            .px_3()
-            .text_xs()
-            .overflow_hidden()
-            .text_color(foreground.opacity(0.65))
-            .child(format!("{} 项", self.suggestions.candidates.len()));
-        for (key, label) in [
-            ("up", ""),
-            ("down", "选择"),
-            ("tab", "插入"),
-            ("escape", "关闭"),
-        ] {
-            if width < px(340.) && matches!(key, "up" | "down") {
-                continue;
-            }
-            if let Ok(stroke) = gpui::Keystroke::parse(key) {
-                key_hints = key_hints
-                    .child(Kbd::new(stroke).appearance(false))
-                    .child(label);
-            }
-        }
+        let scrollbar = Scrollbar::vertical(&self.suggestion_scroll)
+            .id("terminal-candidate-scrollbar")
+            .styles(|styles| {
+                styles
+                    .track(|track| track.width(px(8.)))
+                    .track_hover(|track| track.width(px(8.)))
+                    .track_active(|track| track.width(px(8.)))
+                    .thumb(|thumb| thumb.width(px(4.)).inset(px(2.)))
+                    .thumb_hover(|thumb| thumb.width(px(6.)).inset(px(1.)))
+                    .thumb_active(|thumb| thumb.width(px(6.)).inset(px(1.)))
+            });
         let surface = div()
             .id("terminal-suggestions")
             .w(width)
@@ -199,9 +178,9 @@ impl TerminalView {
             .flex()
             .flex_col()
             .border_1()
-            .border_color(foreground.opacity(0.3))
-            .rounded_md()
-            .bg(self.settings.colors.terminal_background)
+            .border_color(border)
+            .rounded(px(3.))
+            .bg(background)
             .text_color(foreground)
             .overflow_hidden()
             .occlude()
@@ -217,16 +196,10 @@ impl TerminalView {
                     .min_h_0()
                     .overflow_hidden()
                     .child(list)
-                    // Use the virtual list's measured viewport, not the scrollbar's
-                    // absolute static position after the list in this block container.
-                    .child(
-                        Scrollbar::vertical(&self.suggestion_scroll)
-                            .id("terminal-candidate-scrollbar"),
-                    ),
-            )
-            .child(key_hints);
-        // Pane-local geometry above prevents a window-positioned surface spilling into
-        // a neighboring split. Positioner supplies deferred overlay layout and clamping.
+                    .child(scrollbar),
+            );
+        // Pane-local geometry prevents a deferred overlay spilling into another split.
+        // Scrollbar geometry comes from the list handle and excludes the border.
         Some(
             gpui::deferred(
                 Positioner::corner(
