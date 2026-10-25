@@ -1033,3 +1033,50 @@ async fn dropping_a_session_cancels_an_unresponsive_ssh_handshake() {
     let mut bytes = Vec::new();
     tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut bytes)).await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn dropping_a_session_cancels_a_pending_host_key_confirmation() {
+    let port = local_server::serve().await.unwrap();
+    let mut params = SshParams::new("127.0.0.1", port, "tester");
+    params.known_hosts = Some(temp_known_hosts("cancel-host-key"));
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
+    let prompt = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(SshEvent::HostKeyPrompt(prompt)) = events.next().await { break prompt; }
+        }
+    }).await.unwrap();
+    drop(session);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match events.next().await {
+                Some(SshEvent::Closed { .. }) => break,
+                Some(SshEvent::Connected) => panic!("cancelled connection became running"),
+                None => panic!("missing close event"),
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    drop(prompt);
+}
+
+#[tokio::test]
+async fn file_transfer_survives_closing_its_terminal_connection() {
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("transfer-owner");
+    let (session, mut events) = connect(port, known_hosts.clone(), SshSize::cells(80,24)).await;
+    collect_until(&mut events, Duration::from_secs(5), None, |text, _| text.contains(PROMPT)).await;
+    let fs = session.fs();
+    let root = std::env::temp_dir().join(format!("alacrterm-transfer-owner-{}-{port}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.bin");
+    let destination = root.join("destination.bin");
+    let contents = vec![42; 512 * 1024];
+    std::fs::write(&source, &contents).unwrap();
+    let mut upload = fs.upload_one(&source, destination.to_string_lossy().into_owned());
+    drop(session);
+    drive(&mut upload).await.unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), contents);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(known_hosts);
+}

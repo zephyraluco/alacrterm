@@ -1263,7 +1263,7 @@ pub struct Terminal {
     resized_once: bool,
     /// 屏幕上是否正摆着一行 SSH 进度（远端一开口就擦掉，见 [`Terminal::process_ssh_event`]）。
     ssh_status_shown: bool,
-    /// 会话是否可用了：本地恒为 `true`（PTY 建好就算可用），远端等 `SshEvent::Connected`。
+    /// 会话运行状态：本地 PTY 创建后运行，远端等待 Connected；退出后统一结束。
     ///
     /// 远端在它变真之前，同一份连接参数还不能拿去做别的连接（那时主机密钥可能还没确认，
     /// 见 [`Terminal::remote_fs`]）。
@@ -2775,7 +2775,7 @@ impl Terminal {
         true
     }
 
-    /// 这个会话是否可用了（本地会话恒为真；远端会话要等连接建立）。
+    /// 这个会话是否正在运行（本地退出和远端断开后均为 false）。
     pub fn is_connected(&self) -> bool {
         self.lifecycle.state() == ConnectionState::Running
     }

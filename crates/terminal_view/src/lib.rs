@@ -775,7 +775,7 @@ impl TerminalView {
             .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.remote_fs()))
     }
 
-    /// 会话是否已经连上（本地会话恒为真；远端会话要等 SSH 握手 / 认证完成）。
+    /// 会话是否正在运行（本地已退出或远端已断开时为 false）。
     pub fn is_connected(&self, cx: &App) -> bool {
         self.terminal
             .as_ref()

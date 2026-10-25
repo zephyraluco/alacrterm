@@ -62,7 +62,7 @@ use crate::assets::IconName;
 use crate::format;
 use crate::preview_cache::PreviewCache;
 use crate::preview_window::{FileKind, PreviewRequest};
-use crate::transfer_manager::{TransferManager, TransferState};
+use crate::transfer_manager::{TransferDone, TransferManager, TransferState};
 
 /// 路径输入框那一行的高度。
 const PATH_ROW_HEIGHT: Pixels = px(36.);
@@ -220,19 +220,6 @@ impl TransferDetails for TransferState {
             format::size(self.bytes_done)
         }
     }
-}
-
-/// 传输跑完之后要做什么。
-///
-/// ⚠️ 这里**不再带通知文本**了:成功一律静默(进度行消失即反馈),失败由
-/// [`FilesState::report_error`] 统一报。
-pub(crate) enum TransferDone {
-    /// 打开预览窗口(文本 / 图片 / 其他下完缓存后走这条)。
-    Preview(PreviewRequest),
-    /// 交给系统默认程序打开本地那份(音频 / 视频走这条)。
-    OpenExternally(PathBuf),
-    /// 只推一条通知。
-    Nothing,
 }
 
 /// 「文件管理器」顶部工具栏那几枚按钮要的判据（见 `sidebar_panel::activity_bar::files_toolbar`）。
@@ -967,9 +954,8 @@ impl FilesState {
         done: TransferDone,
         cx: &mut Context<Self>,
     ) {
-        let files = cx.weak_entity();
         self.transfers.update(cx, |manager, cx| {
-            manager.start(source, label, refresh, transfer, done, files, cx);
+            manager.start(source, label, refresh, transfer, done, cx);
         });
     }
 
@@ -981,36 +967,18 @@ impl FilesState {
         &mut self,
         session: SessionId,
         label: SharedString,
-        result: Result<(), SshError>,
+        result: &Result<(), SshError>,
         refresh: Option<String>,
-        done: TransferDone,
         cx: &mut Context<Self>,
     ) {
         match result {
-            Ok(()) => match done {
-                // 预览窗口本身就是反馈。
-                TransferDone::Preview(request) => {
-                    let _ = self
-                        .app_root
-                        .update(cx, |root, cx| root.open_preview_window(request, cx));
-                }
-                // 系统程序在应用外面开。
-                TransferDone::OpenExternally(path) => cx.open_with_system(&path),
-                // 下载 / 上传完成:什么都不用做。
-                TransferDone::Nothing => {}
-            },
+            Ok(()) => {}
             Err(SshError::Cancelled) => {}
             Err(error) => self.report_error(cx, format!("{label} 传输失败:{error}")),
         }
         if let Some(dir) = refresh {
             self.reload_from(session, &dir, cx);
         }
-    }
-
-    /// 通道在 `Done` 之前就断了:worker 线程没了。
-    pub(crate) fn report_transfer_lost(&mut self, label: SharedString, cx: &mut Context<Self>) {
-        let message = format!("{label} 传输中断:远端文件系统线程已退出");
-        self.report_error(cx, message);
     }
 
     /// 把某个远端目录重读一次(上传 / 下载完成后刷新它;预览窗口写回远端后也走这里)。
