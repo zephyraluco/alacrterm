@@ -5,6 +5,9 @@ mod backend;
 mod integration;
 mod observed_pty;
 mod prompt;
+mod lifecycle;
+pub use lifecycle::ConnectionState;
+use lifecycle::Lifecycle;
 pub use prompt::PromptEvent;
 mod parser_events;
 mod pty_info;
@@ -1096,7 +1099,7 @@ impl TerminalBuilder {
                 resized_once: false,
                 ssh_status_shown: false,
                 // 本地：PTY 建好就算可用；远端：等 `SshEvent::Connected`（见 `is_connected`）。
-                connected: !is_remote_terminal,
+                lifecycle: Lifecycle::new(is_remote_terminal),
                 snapshot_dirty: true,
                 content_generation: 0,
                 term,
@@ -1264,7 +1267,7 @@ pub struct Terminal {
     ///
     /// 远端在它变真之前，同一份连接参数还不能拿去做别的连接（那时主机密钥可能还没确认，
     /// 见 [`Terminal::remote_fs`]）。
-    connected: bool,
+    lifecycle: Lifecycle,
     snapshot_dirty: bool,
     content_generation: u64,
     term: Arc<AlacrittyTermLock>,
@@ -1327,6 +1330,7 @@ const SSH_PENDING_LIMIT: usize = 256 * 1024;
 
 impl Terminal {
     fn start_ssh_events(&mut self, mut events: UnboundedReceiver<SshEvent>, cx: &Context<Self>) {
+        let epoch = self.lifecycle.epoch();
         self.event_loop_task = cx.spawn(async move |terminal, cx| {
             while let Some(first) = events.next().await {
                 // Bound each UI update by both event count and bytes. Do not delay
@@ -1345,14 +1349,17 @@ impl Terminal {
                     }
                     batch.push(event);
                 }
-                terminal.update(cx, |terminal, cx| {
+                let current = terminal.update(cx, |terminal, cx| {
+                    if !terminal.lifecycle.is_current(epoch) { return false; }
                     for event in batch {
                         terminal.process_ssh_event(event, cx);
                     }
                     terminal.schedule_sync_timeout(cx);
                     cx.emit(Event::Wakeup);
                     cx.notify();
+                    true
                 })?;
+                if !current { break; }
                 yield_now().await;
             }
             anyhow::Ok(())
@@ -1419,7 +1426,7 @@ impl Terminal {
             }
             // 连接可用了：文件管理器据此才敢去连远端文件系统（见 [`Self::remote_fs`]）。
             SshEvent::Connected => {
-                self.connected = true;
+                self.lifecycle.connected();
             }
             // 首次连接某台主机：交给界面弹窗问用户（握手线程在等回答）。
             SshEvent::HostKeyPrompt(prompt) => {
@@ -1430,7 +1437,6 @@ impl Terminal {
                 exit_status,
                 reason,
             } => {
-                self.connected = false;
                 if self.ssh_status_shown {
                     self.ssh_status_shown = false;
                     self.feed_remote_bytes(b"\r\x1b[2K");
@@ -2737,6 +2743,7 @@ impl Terminal {
 
     /// Reconnect a finished SSH session while retaining its terminal grid and history.
     pub fn reconnect(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.lifecycle.state() != ConnectionState::Exited { return false; }
         let TerminalTarget::Ssh(params) = &self.template.target else {
             return false;
         };
@@ -2750,7 +2757,7 @@ impl Terminal {
         };
         self.backend.shutdown();
         self.backend = TerminalBackend::Ssh(session);
-        self.connected = false;
+        self.lifecycle.reconnect();
         self.remote_cwd = None;
         self.osc7_seen = false;
         self.directory_scanner = DirectoryScanner::default();
@@ -2770,7 +2777,11 @@ impl Terminal {
 
     /// 这个会话是否可用了（本地会话恒为真；远端会话要等连接建立）。
     pub fn is_connected(&self) -> bool {
-        self.connected
+        self.lifecycle.state() == ConnectionState::Running
+    }
+
+    pub fn has_exited(&self) -> bool {
+        self.lifecycle.state() == ConnectionState::Exited
     }
 
     /// 远端 shell 说出来的当前目录（OSC 7 或窗口标题，见 [`crate::shell_integration`]）；
@@ -2797,7 +2808,8 @@ impl Terminal {
         } else {
             self.child_exited.is_none_or(|e| e.code() == Some(0))
         };
-        if should_close {
+        let first_exit = self.lifecycle.finish();
+        if should_close && first_exit {
             cx.emit(Event::CloseTerminal);
         }
     }

@@ -1014,3 +1014,22 @@ async fn native_openssh_loads_session_integration_without_changing_startup_files
     assert!(closed.is_some());
     let _ = std::fs::remove_file(known_hosts);
 }
+
+#[tokio::test]
+async fn dropping_a_session_cancels_an_unresponsive_ssh_handshake() {
+    use tokio::io::AsyncReadExt as _;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect(SshParams::new("127.0.0.1", port, "user"), SshSize::cells(80,24), sender).unwrap();
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept()).await.unwrap().unwrap();
+    drop(session);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = events.next().await {
+            if matches!(event, SshEvent::Closed { .. }) { return; }
+        }
+        panic!("session ended without a close event");
+    }).await.unwrap();
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut bytes)).await.unwrap().unwrap();
+}

@@ -133,6 +133,7 @@ pub struct SshSession {
     commands: TokioSender<Command>,
     fs: SshFs,
     output_budget: Arc<tokio::sync::Semaphore>,
+    cancel: tokio::sync::watch::Sender<bool>,
 }
 
 /// 这次连接要远端干什么。
@@ -176,6 +177,7 @@ impl SshSession {
         events: UnboundedSender<SshEvent>,
     ) -> std::io::Result<Self> {
         let (commands, receiver) = unbounded_channel();
+        let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
         let fs = SshFs::new(params.clone());
         let sink = EventSink::new(events);
         let output_budget = sink.1.clone();
@@ -194,13 +196,20 @@ impl SshSession {
                         return;
                     }
                 };
-                runtime.block_on(run(params, launch, sink, receiver));
+                runtime.block_on(async move {
+                    tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => sink.closed(None, None),
+                        _ = run(params, launch, sink.clone(), receiver) => {}
+                    }
+                });
             })?;
 
         Ok(Self {
             commands,
             fs,
             output_budget,
+            cancel,
         })
     }
 
@@ -218,6 +227,7 @@ impl SshSession {
 
     /// 主动断开。幂等,可以在 `Drop` 之后重复调用。
     pub fn disconnect(&self) {
+        self.cancel.send_replace(true);
         self.output_budget.close();
         let _ = self.commands.send(Command::Disconnect);
     }

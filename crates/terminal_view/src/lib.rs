@@ -81,11 +81,6 @@ pub struct TerminalView {
     subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
     error: Option<String>,
-    /// 会话进程是否已结束（本地 shell 退出 / ssh 断开等）。
-    ///
-    /// 由 `CloseTerminal` 事件置位；应用据此在状态栏显示「已断开」，
-    /// 但不会因此退出程序（见 `handle_terminal_event`）。
-    exited: bool,
     remote: bool,
     settings: Arc<TerminalRenderSettings>,
     title: SharedString,
@@ -98,6 +93,8 @@ pub struct TerminalView {
     completion: completion_controller::CompletionController,
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
     _blink_task: gpui::Task<()>,
+    _startup_task: gpui::Task<()>,
+    recovery_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
     scrollbar_target: std::rc::Rc<std::cell::Cell<Option<usize>>>,
     /// 主机密钥确认的回调（仅远端会话有）。
@@ -152,7 +149,7 @@ impl TerminalView {
                             if this.focused
                                 && this.settings.cursor_blinks
                                 && this.terminal_blinking != Some(false)
-                                && !this.exited
+                                && !this.has_exited(cx)
                                 && !this.terminal.as_ref().is_some_and(|term| {
                                     term.read(cx)
                                         .last_content()
@@ -172,7 +169,7 @@ impl TerminalView {
             }
         });
 
-        cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        let startup_task = cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 let builder = match builder.await {
@@ -205,13 +202,12 @@ impl TerminalView {
                         // 只排一条 `InternalEvent` + notify（通知的是 `Terminal`），而那条队列
                         // 要等 `TerminalElement::prepaint` 里的 `sync` 才被消费 —— 视图不重绘
                         // 就等于「拖选不跟手」。原因与实测见 `docs/terminal-architecture.md` §4.4。
-                        cx.observe(&terminal, |_, _, cx| cx.notify()).detach();
+                        this._subscriptions.push(cx.observe(&terminal, |_, _, cx| cx.notify()));
                         cx.notify();
                     });
                 });
             }
-        })
-        .detach();
+        });
 
         Self {
             focus_handle,
@@ -219,7 +215,6 @@ impl TerminalView {
             subscription: None,
             _subscriptions: vec![focus_in, focus_out],
             error: None,
-            exited: false,
             remote,
             settings: settings.clone(),
             title: "终端".into(),
@@ -230,6 +225,8 @@ impl TerminalView {
             completion: completion_controller::CompletionController::new(settings.suggestions),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             _blink_task: blink_task,
+            _startup_task: startup_task,
+            recovery_task: gpui::Task::ready(()),
             grid_cache: Default::default(),
             scrollbar_target: Default::default(),
             host_key_prompt: host_key,
@@ -238,12 +235,12 @@ impl TerminalView {
 
     /// Retry only a disconnected SSH pane; keep the same view and scrollback.
     pub fn reconnect(&mut self, cx: &mut gpui::Context<Self>) {
-        if !self.remote || !self.exited {
+        if !self.remote || !self.has_exited(cx) {
             return;
         }
         if let Some(terminal) = &self.terminal {
             if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
-                self.exited = false;
+                self.recovery_task = gpui::Task::ready(());
                 self.completion.reset_session();
                 self.terminal_blinking = None;
                 self.ime_state = None;
@@ -341,7 +338,6 @@ impl TerminalView {
                 // 这里只标记状态并刷新界面，由应用决定怎么展示（保留标签、状态栏显示
                 // 已断开，用户自行关闭或新建）。终端网格会保留最后的输出，
                 // 这样 ssh 报的断开原因不会被丢掉。
-                self.exited = true;
                 self.completion.invalidate_input();
                 cx.notify();
             }
@@ -564,13 +560,12 @@ impl TerminalView {
         }
     }
     fn wake_after_input_recovery(&mut self, cx: &mut gpui::Context<Self>) {
-        cx.spawn(async move |this, cx| {
+        self.recovery_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(prompt_input::RECOVERY_DELAY)
                 .await;
             let _ = this.update(cx, |_, cx| cx.notify());
-        })
-        .detach();
+        });
     }
     fn recover_input(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         if !self.completion.recovery_due() || self.ime_state.is_some() {
@@ -802,8 +797,8 @@ impl TerminalView {
     }
 
     /// 会话进程是否已结束（本地 shell 退出 / ssh 连接断开等）。
-    pub fn has_exited(&self) -> bool {
-        self.exited
+    pub fn has_exited(&self, cx: &App) -> bool {
+        self.terminal.as_ref().is_some_and(|terminal| terminal.read(cx).has_exited())
     }
 
     /// 计算光标是否可见（闪烁控制）。
@@ -933,7 +928,7 @@ impl Render for TerminalView {
             root = root.child(popup);
         }
 
-        if self.remote && self.exited {
+        if self.remote && self.has_exited(cx) {
             root = root.child(
                 div().absolute().top_0().right_0().p_2().child(
                     div()
