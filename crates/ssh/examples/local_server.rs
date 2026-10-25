@@ -85,6 +85,7 @@ pub struct LocalServer {
     shell: Option<ChannelId>,
     x11_cookie: Option<[u8; 16]>,
     reject_x11: bool,
+    suggest_integration: bool,
 }
 
 impl LocalServer {
@@ -95,6 +96,7 @@ impl LocalServer {
             shell: None,
             x11_cookie: None,
             reject_x11: false,
+            suggest_integration: false,
         }
     }
 
@@ -220,7 +222,10 @@ impl russh::server::Handler for LocalServer {
         _screen: u32,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.reject_x11 { session.channel_failure(channel)?; return Ok(()); }
+        if self.reject_x11 {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         let decoded: Option<Vec<u8>> = if cookie.len() == 32 && cookie.is_ascii() {
             (0..16)
                 .map(|index| u8::from_str_radix(&cookie[index * 2..index * 2 + 2], 16).ok())
@@ -342,10 +347,53 @@ impl russh::server::Handler for LocalServer {
                         session.close(channel)?;
                         return Ok(());
                     }
+                    if line.trim() == "suggestion-integration" {
+                        self.suggest_integration = true;
+                        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+                        session.data(
+                            channel,
+                            format!(
+                                "\x1b]633;AlacrtermShell;posix\x07\x1b]633;AlacrtermCwd;{cwd}\x07"
+                            )
+                            .into_bytes(),
+                        )?;
+                        session.data(channel, b"\x1b]633;CommandReset\x07\x1b]633;Command;remote-command\x07\x1b]633;Command;npm\x07\x1b]633;Command;git\x07\x1b]633;D;0\x07\x1b]633;A\x07$ \x1b]633;B\x07".to_vec())?;
+                        return Ok(());
+                    }
+                    if line.trim() == "scrollbar-probe" {
+                        let output: String = (0..500)
+                            .map(|line| format!("SCROLLROW{line:04}\r\n"))
+                            .collect();
+                        session.data(channel, output.into_bytes())?;
+                        return Ok(());
+                    }
+                    if line.trim() == "alternate-screen" {
+                        session.data(channel, b"\x1b[?1049hALTSCREEN".to_vec())?;
+                        return Ok(());
+                    }
+                    if line.trim() == "normal-screen" {
+                        session.data(channel, b"\x1b[?1049l".to_vec())?;
+                        return Ok(());
+                    }
+                    if line.trim() == "protocol-probe" {
+                        session.data(
+                            channel,
+                            b"\x1b]2;RuntimeProbe\x07\x1b[6n\x1b[c\x1b]11;?\x07".to_vec(),
+                        )?;
+                        return Ok(());
+                    }
+                    if line.trim() == "sync-probe" {
+                        session.data(channel, b"\x1b[?2026hSYNC12345".to_vec())?;
+                        return Ok(());
+                    }
                     if line.trim() == "x11" {
                         self.probe_x11(channel, session);
                     }
-                    session.data(channel, format!("REPLY:{line}\r\n{PROMPT}").into_bytes())?;
+                    if self.suggest_integration {
+                        session.data(channel, format!("\x1b]633;C\x07REPLY:{line}\r\n\x1b]633;D;0\x07\x1b]633;A\x07{PROMPT}\x1b]633;B\x07").into_bytes())?;
+                    } else {
+                        session.data(channel, format!("REPLY:{line}\r\n{PROMPT}").into_bytes())?;
+                    }
                 }
                 // 退格:只回显(玩具 shell 不做真正的行编辑)。
                 '\u{7f}' | '\u{8}' => {}

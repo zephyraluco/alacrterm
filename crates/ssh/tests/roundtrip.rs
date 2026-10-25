@@ -944,3 +944,73 @@ async fn compression_algorithms_round_trip_shell_and_sftp() {
         let _ = std::fs::remove_file(known_hosts);
     }
 }
+
+#[tokio::test]
+async fn completion_metadata_reads_are_bounded_and_do_not_block_browsing() {
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("completion-metadata");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let fs = ssh::SshFs::new(params);
+    let root = known_hosts.with_extension("metadata");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("package.json"), b"{\"scripts\":{\"build\":\"never execute\"}}").unwrap();
+    std::fs::write(root.join("large"), vec![b'x'; 256 * 1024 + 1]).unwrap();
+    let bytes = tokio::time::timeout(Duration::from_secs(10), fs.read_completion_file(root.join("package.json").to_string_lossy())).await.unwrap().unwrap();
+    assert!(bytes.starts_with(b"{\"scripts\":"));
+    assert!(fs.read_completion_file(root.join("large").to_string_lossy()).await.is_err());
+    assert_eq!(fs.list_completion_dir(root.to_string_lossy()).await.unwrap().len(), 2);
+    assert!(fs.home_dir().await.is_ok());
+    std::fs::remove_dir_all(root).unwrap();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+async fn unavailable_shell_probe_silently_falls_back_to_an_interactive_shell() {
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("integration-fallback");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    params.shell_integration = Some(ssh::ShellIntegration { bash: "", zsh: "" });
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
+    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| text.contains(PROMPT)).await;
+    assert!(text.contains(BANNER));
+    assert!(!text.contains("ALACRTERM_SHELL"));
+    session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+#[ignore = "requires a native OpenSSH test server and SSH_INTEGRATION_TEST_PORT/KEY"]
+async fn native_openssh_loads_session_integration_without_changing_startup_files() {
+    let port: u16 = std::env::var("SSH_INTEGRATION_TEST_PORT").unwrap().parse().unwrap();
+    let key = PathBuf::from(std::env::var("SSH_INTEGRATION_TEST_KEY").unwrap());
+    let user = std::env::var("SSH_INTEGRATION_TEST_USER").unwrap_or_else(|_| "agent".into());
+    let known_hosts = temp_known_hosts("native-integration");
+    let mut params = SshParams::new("127.0.0.1", port, user);
+    params.key_files.push(key);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    params.shell_integration = Some(ssh::ShellIntegration {
+        bash: include_str!("../../terminal/shell-integration/bash.sh"),
+        zsh: include_str!("../../terminal/shell-integration/zsh.zsh"),
+    });
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
+    let (text, closed) = collect_until(&mut events, Duration::from_secs(15), None,
+        |text, _| text.contains("633;B") && text.contains("633;AlacrtermShell;posix")).await;
+    assert!(closed.is_none(), "native shell exited early");
+    assert!(text.contains("633;AlacrtermShell;posix"), "integration was not loaded");
+    session.write(b"printf 'NATIVE_INTEGRATION_OK\\n'\n");
+    let (output, _) = collect_until(&mut events, Duration::from_secs(5), None,
+        |text, _| text.contains("NATIVE_INTEGRATION_OK\r\n") && text.contains("633;C")).await;
+    assert!(output.contains("633;C"));
+    assert!(output.contains("NATIVE_INTEGRATION_OK\r\n"));
+    session.write(b"exit\n");
+    let (_, closed) = collect_until(&mut events, Duration::from_secs(5), None, |_, closed| closed.is_some()).await;
+    assert!(closed.is_some());
+    let _ = std::fs::remove_file(known_hosts);
+}

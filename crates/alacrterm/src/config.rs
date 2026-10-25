@@ -115,6 +115,7 @@ struct TerminalFile {
     minimum_contrast: Option<f32>,
     cursor_shape: Option<String>,
     cursor_blinks: Option<bool>,
+    suggestions: Option<terminal_view::SuggestionSettings>,
     /// ANSI 调色板：键名 = `TerminalColors` 的字段名。
     colors: HashMap<String, String>,
     selection_color: Option<String>,
@@ -172,6 +173,7 @@ pub(crate) fn save_render_settings(settings: &RenderSettings) {
         json!(cursor_shape_name(settings.cursor_shape)),
     );
     map.insert("cursor_blinks".into(), json!(settings.cursor_blinks));
+    map.insert("suggestions".into(), json!(settings.suggestions));
 
     write_json_doc(&path, &doc, "终端渲染参数");
 }
@@ -221,6 +223,7 @@ fn write_json_doc(path: &Path, doc: &serde_json::Value, what: &str) {
 }
 
 fn apply_render_settings(settings: &mut RenderSettings, file: TerminalFile) {
+    if let Some(suggestions) = file.suggestions { settings.suggestions = suggestions; }
     if let Some(family) = file.font_family {
         settings.font_family = family.into();
     }

@@ -32,7 +32,7 @@ pub enum SshEvent {
     /// 建连 + 认证可能要几秒,没有它界面就是「卡住」的样子。
     Status(String),
     /// 远端 PTY 的原样字节(可能包含任何控制序列),交给终端模拟器解析。
-    Data(Vec<u8>),
+    Data(SshOutput),
     /// 首次连接某台主机,需要宿主问用户「信任这个指纹吗」。
     ///
     /// 握手线程在等回答(最多 [`HOST_KEY_TIMEOUT`](crate::HOST_KEY_TIMEOUT)):
@@ -51,15 +51,30 @@ pub enum SshEvent {
     },
 }
 
+/// Received SSH bytes. The shared permit is released after the last consumer drops it.
+#[derive(Debug, Clone)]
+pub struct SshOutput {
+    bytes: Arc<[u8]>,
+    _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+impl std::ops::Deref for SshOutput {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+const OUTPUT_BUDGET: usize = 1024 * 1024;
+const OUTPUT_CHUNK: usize = 32 * 1024;
+
 /// 从会话线程发事件的出口(包装一下,省得每个调用点都写 `let _ = ...` )。
 ///
 /// `Clone`:主机密钥确认也走这个口子,而握手回调拿不到线程里的那个实例。
 #[derive(Clone)]
-pub(crate) struct EventSink(UnboundedSender<SshEvent>);
+pub(crate) struct EventSink(UnboundedSender<SshEvent>, Arc<tokio::sync::Semaphore>);
 
 impl EventSink {
     pub(crate) fn new(sender: UnboundedSender<SshEvent>) -> Self {
-        Self(sender)
+        Self(sender, Arc::new(tokio::sync::Semaphore::new(OUTPUT_BUDGET)))
     }
 
     pub(crate) fn status(&self, text: impl Into<String>) {
@@ -76,9 +91,18 @@ impl EventSink {
         let _ = self.0.unbounded_send(SshEvent::Connected);
     }
 
-    fn data(&self, bytes: Vec<u8>) {
-        if !bytes.is_empty() {
-            let _ = self.0.unbounded_send(SshEvent::Data(bytes));
+    async fn data(&self, bytes: &[u8]) {
+        for chunk in bytes.chunks(OUTPUT_CHUNK) {
+            let Ok(permit) = self.1.clone().acquire_many_owned(chunk.len() as u32).await else {
+                return;
+            };
+            let output = SshOutput {
+                bytes: Arc::from(chunk),
+                _permit: Arc::new(permit),
+            };
+            if self.0.unbounded_send(SshEvent::Data(output)).is_err() {
+                return;
+            }
         }
     }
 
@@ -108,6 +132,7 @@ enum Command {
 pub struct SshSession {
     commands: TokioSender<Command>,
     fs: SshFs,
+    output_budget: Arc<tokio::sync::Semaphore>,
 }
 
 /// 这次连接要远端干什么。
@@ -152,6 +177,8 @@ impl SshSession {
     ) -> std::io::Result<Self> {
         let (commands, receiver) = unbounded_channel();
         let fs = SshFs::new(params.clone());
+        let sink = EventSink::new(events);
+        let output_budget = sink.1.clone();
         let endpoint = params.endpoint();
         std::thread::Builder::new()
             .name(format!("ssh {endpoint}"))
@@ -162,16 +189,19 @@ impl SshSession {
                 {
                     Ok(runtime) => runtime,
                     Err(error) => {
-                        let sink = EventSink::new(events);
                         sink.status(format!("无法启动 SSH 运行时:{error}"));
                         sink.closed(None, Some(error.to_string()));
                         return;
                     }
                 };
-                runtime.block_on(run(params, launch, EventSink::new(events), receiver));
+                runtime.block_on(run(params, launch, sink, receiver));
             })?;
 
-        Ok(Self { commands, fs })
+        Ok(Self {
+            commands,
+            fs,
+            output_budget,
+        })
     }
 
     /// 把字节送给远端(键盘输入 / 粘贴)。空输入直接丢掉 —— 有些服务端会因此 hang。
@@ -188,6 +218,7 @@ impl SshSession {
 
     /// 主动断开。幂等,可以在 `Drop` 之后重复调用。
     pub fn disconnect(&self) {
+        self.output_budget.close();
         let _ = self.commands.send(Command::Disconnect);
     }
 
@@ -264,6 +295,15 @@ async fn run_session(
 
     auth::authenticate(&mut handle, params, sink).await?;
 
+    let integration = if matches!(launch, Launch::Shell(_)) {
+        if let Some(scripts) = params.shell_integration {
+            crate::shell_integration::prepare(&handle, scripts).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut channel = handle
         .channel_open_session()
         .await
@@ -307,7 +347,31 @@ async fn run_session(
                     &[],
                 )
                 .await?;
-            channel.request_shell(false).await?;
+            let mut integrated = false;
+            if let Some(command) = integration {
+                if channel.exec(true, command).await.is_ok() {
+                    integrated = tokio::time::timeout(Duration::from_secs(2), async {
+                        loop {
+                            match channel.wait().await {
+                                Some(ChannelMsg::Success) => return true,
+                                Some(ChannelMsg::Data { data }) => {
+                                    sink.data(&data).await;
+                                    return true;
+                                }
+                                Some(ChannelMsg::Failure | ChannelMsg::Close) | None => {
+                                    return false;
+                                }
+                                _ => {}
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap_or(false);
+                }
+            }
+            if !integrated {
+                channel.request_shell(false).await?;
+            }
             true
         }
         Launch::Exec(command) => {
@@ -331,12 +395,14 @@ async fn run_session(
     loop {
         tokio::select! {
             message = reader.wait() => match message {
-                Some(ChannelMsg::Data { data }) => sink.data(data.to_vec()),
+                Some(ChannelMsg::Data { data }) => sink.data(&data).await,
                 // ext = 1 是 stderr。终端里两者是同一个屏幕,一起画。
-                Some(ChannelMsg::ExtendedData { data, .. }) => sink.data(data.to_vec()),
+                Some(ChannelMsg::ExtendedData { data, .. }) => sink.data(&data).await,
                 Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
                 // EOF / Close / 流断掉都算会话结束。
-                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => break,
+                // EOF ends stdout, but OpenSSH can send exit-status afterwards.
+                Some(ChannelMsg::Eof) => {},
+                Some(ChannelMsg::Close) | None => break,
                 Some(_) => {}
             },
             command = commands.recv() => match command {
@@ -371,4 +437,57 @@ async fn run_session(
     // 礼貌地告别:服务端据此清理 shell 与 PTY,不等 TCP 超时。
     let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
     Ok(exit_status)
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use futures::{FutureExt as _, StreamExt as _};
+
+    #[tokio::test]
+    async fn output_chunking_preserves_all_binary_bytes() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let sink = EventSink::new(tx);
+        let expected: Vec<u8> = (0..OUTPUT_CHUNK * 2 + 7).map(|index| index as u8).collect();
+        sink.data(&expected).await;
+        let mut actual = Vec::new();
+        while actual.len() < expected.len() {
+            let SshEvent::Data(chunk) = rx.next().await.unwrap() else {
+                panic!("expected data");
+            };
+            assert!(chunk.len() <= OUTPUT_CHUNK);
+            actual.extend_from_slice(&chunk);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(sink.1.available_permits(), OUTPUT_BUDGET);
+    }
+
+    #[tokio::test]
+    async fn output_budget_waits_for_last_clone_and_close_cancels_waiters() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let sink = EventSink(tx, Arc::new(tokio::sync::Semaphore::new(4)));
+        sink.data(b"abcd").await;
+        let SshEvent::Data(first) = rx.next().await.unwrap() else {
+            panic!("expected data");
+        };
+        let copy = first.clone();
+        drop(first);
+        let next = sink.data(b"efgh");
+        futures::pin_mut!(next);
+        assert!(next.as_mut().now_or_never().is_none());
+        drop(copy);
+        next.await;
+        let SshEvent::Data(second) = rx.next().await.unwrap() else {
+            panic!("expected data");
+        };
+        assert_eq!(&*second, b"efgh");
+        let blocked = sink.data(b"ijkl");
+        futures::pin_mut!(blocked);
+        assert!(blocked.as_mut().now_or_never().is_none());
+        sink.1.close();
+        tokio::time::timeout(Duration::from_secs(1), blocked)
+            .await
+            .unwrap();
+        assert!(rx.next().now_or_never().is_none());
+    }
 }

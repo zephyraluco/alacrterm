@@ -9,6 +9,18 @@ use std::path::PathBuf;
 /// 光标控制」的常见值。窗口尺寸由 [`SshSize`] 单独给,这里只管类型。
 pub const DEFAULT_TERM: &str = "xterm-256color";
 
+/// Embedded scripts supplied by the terminal host; disabled for generic SSH clients.
+#[derive(Clone, Copy)]
+pub struct ShellIntegration {
+    pub bash: &'static str,
+    pub zsh: &'static str,
+}
+impl fmt::Debug for ShellIntegration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ShellIntegration(<embedded>)")
+    }
+}
+
 /// 连接一台 SSH 主机所需的全部参数。
 #[derive(Clone, Debug)]
 pub struct SshParams {
@@ -30,6 +42,7 @@ pub struct SshParams {
     pub key_files: Vec<PathBuf>,
     /// 用哪个 `known_hosts` 文件;`None` = `~/.ssh/known_hosts`(与 `ssh` 共用同一份)。
     pub known_hosts: Option<PathBuf>,
+    pub shell_integration: Option<ShellIntegration>,
 }
 
 impl SshParams {
@@ -44,6 +57,7 @@ impl SshParams {
             term: DEFAULT_TERM.to_string(),
             key_files: Vec::new(),
             known_hosts: None,
+            shell_integration: None,
         }
     }
 
