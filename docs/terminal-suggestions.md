@@ -109,3 +109,11 @@ SSH 补全查询与首次连接各有 5 秒超时，取消的排队请求直接�
 配置保存在 `config/terminal.json` 的 `suggestions` 对象中，缺失字段使用默认值。
 默认开启建议及自动触发，默认不补空格。关闭自动触发后，Ctrl+Space 仍可手动查询；关闭总开关后手动查询也不显示。
 关闭历史来源会清除当前分屏已保存的建议历史。右箭头和 Enter 的原生行为保持不变。
+
+## 项目元数据提供者
+
+`npm run` / `npm run-script` 从当前目录的 package.json 提供脚本名称；
+`git switch` / `checkout` / `merge` / `rebase` 从 Git loose refs 和 packed-refs 提供分支，包含 worktree 的 commondir。
+不执行项目脚本、Git 命令、钩子或补全生成器；名称只接受可直接插入的普通字符。
+本地后台读取；SSH 使用独立、懒加载的 SFTP 补全 worker，不占用文件浏览或传输 worker。
+元数据文件最多 256 KiB，远端提供者查询总时限 5 秒，缓存 3 秒，Ctrl+Space 跳过缓存。

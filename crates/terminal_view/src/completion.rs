@@ -8,6 +8,7 @@ pub(super) enum Kind {
     Directory,
     Subcommand,
     Option,
+    Argument,
 }
 impl Kind {
     pub fn label(self) -> &'static str {
@@ -18,6 +19,7 @@ impl Kind {
             Self::Directory => "目录",
             Self::Subcommand => "子命令",
             Self::Option => "选项",
+            Self::Argument => "参数",
         }
     }
 }
@@ -27,6 +29,7 @@ pub(super) enum Source {
     Shell,
     Specification,
     Filesystem,
+    Project,
 }
 impl Source {
     pub fn label(self) -> &'static str {
@@ -35,6 +38,7 @@ impl Source {
             Self::Shell => "当前 shell",
             Self::Specification => "内置命令规格",
             Self::Filesystem => "当前会话文件系统",
+            Self::Project => "当前项目元数据",
         }
     }
 }

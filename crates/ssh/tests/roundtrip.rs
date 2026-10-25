@@ -944,3 +944,24 @@ async fn compression_algorithms_round_trip_shell_and_sftp() {
         let _ = std::fs::remove_file(known_hosts);
     }
 }
+
+#[tokio::test]
+async fn completion_metadata_reads_are_bounded_and_do_not_block_browsing() {
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("completion-metadata");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let fs = ssh::SshFs::new(params);
+    let root = known_hosts.with_extension("metadata");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("package.json"), b"{\"scripts\":{\"build\":\"never execute\"}}").unwrap();
+    std::fs::write(root.join("large"), vec![b'x'; 256 * 1024 + 1]).unwrap();
+    let bytes = tokio::time::timeout(Duration::from_secs(10), fs.read_completion_file(root.join("package.json").to_string_lossy())).await.unwrap().unwrap();
+    assert!(bytes.starts_with(b"{\"scripts\":"));
+    assert!(fs.read_completion_file(root.join("large").to_string_lossy()).await.is_err());
+    assert_eq!(fs.list_completion_dir(root.to_string_lossy()).await.unwrap().len(), 2);
+    assert!(fs.home_dir().await.is_ok());
+    std::fs::remove_dir_all(root).unwrap();
+    let _ = std::fs::remove_file(known_hosts);
+}

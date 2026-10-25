@@ -204,6 +204,7 @@ struct Inner {
     worker: Mutex<Option<TokioSender<Request>>>,
     /// **传输** worker 的入口(另一条连接,见模块文档);同样是懒的。
     transfer: Mutex<Option<TokioSender<TransferRequest>>>,
+    completion: Mutex<Option<TokioSender<Request>>>,
 }
 
 impl PartialEq for SshFs {
@@ -223,6 +224,7 @@ impl SshFs {
             params,
             worker: Mutex::new(None),
             transfer: Mutex::new(None),
+            completion: Mutex::new(None),
         }))
     }
 
@@ -268,6 +270,13 @@ impl SshFs {
     pub fn list_completion_dir(&self, path: impl Into<String>) -> BoxFuture<'static, Result<Vec<RemoteEntry>, SshError>> {
         expect(self.send(RequestKind::CompletionList(path.into())), |reply| match reply {
             Reply::Entries(entries) => Ok(entries), _ => Err(unexpected()),
+        })
+    }
+
+    /// Read bounded project metadata without downloading files or running commands.
+    pub fn read_completion_file(&self, path: impl Into<String>) -> BoxFuture<'static, Result<Vec<u8>, SshError>> {
+        expect(self.send(RequestKind::CompletionRead(path.into())), |reply| match reply {
+            Reply::Bytes(bytes) => Ok(bytes), _ => Err(unexpected()),
         })
     }
 
@@ -383,7 +392,8 @@ impl SshFs {
         let (reply, receiver) = oneshot::channel();
         let mut request = Request { kind, reply };
 
-        let mut slot = self.0.worker.lock().expect("远端文件系统句柄互斥量中毒");
+        let worker = if matches!(request.kind, RequestKind::CompletionList(_) | RequestKind::CompletionRead(_)) { &self.0.completion } else { &self.0.worker };
+        let mut slot = worker.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for _ in 0..2 {
             let sender = match slot.as_ref() {
                 Some(sender) if !sender.is_closed() => sender.clone(),
@@ -490,6 +500,7 @@ enum RequestKind {
     /// 列一层目录(POSIX 路径)。
     List(String),
     CompletionList(String),
+    CompletionRead(String),
     /// 这个路径是不是目录。
     IsDir(String),
     /// 这个路径的元数据。
@@ -503,6 +514,7 @@ enum RequestKind {
 }
 
 enum Reply {
+    Bytes(Vec<u8>),
     Home(String),
     Entries(Vec<RemoteEntry>),
     IsDir(bool),
@@ -567,7 +579,7 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
     while let Some(request) = requests.recv().await {
         if request.reply.is_canceled() { continue; }
         if sftp.is_none() {
-            let connection = if matches!(request.kind, RequestKind::CompletionList(_)) {
+            let connection = if matches!(request.kind, RequestKind::CompletionList(_) | RequestKind::CompletionRead(_)) {
                 tokio::time::timeout(std::time::Duration::from_secs(5), connect(&params)).await
                     .unwrap_or_else(|_| Err(SshError::Sftp("补全连接超时".into())))
             } else { connect(&params).await };
@@ -588,6 +600,15 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
                 match tokio::time::timeout(std::time::Duration::from_secs(5), completion_dir(session, path)).await {
                     Ok(result) => result.map(Reply::Entries), Err(_) => Err(SftpError::Timeout),
                 }
+            },
+            RequestKind::CompletionRead(path) => {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    let file = session.open(path).await?;
+                    let mut data = Vec::new();
+                    file.take(256 * 1024 + 1).read_to_end(&mut data).await?;
+                    if data.len() > 256 * 1024 { return Err(SftpError::Limited("project metadata exceeds 256 KiB".into())); }
+                    Ok(Reply::Bytes(data))
+                }).await { Ok(result) => result, Err(_) => Err(SftpError::Timeout) }
             },
             RequestKind::IsDir(path) => session
                 .metadata(path)

@@ -37,7 +37,7 @@ impl Suggestions {
         }
     }
     pub fn path_query(&self) -> Option<crate::path_suggestions::PathQuery> {
-        if !self.active || self.dismissed || !self.settings.enabled || !self.settings.paths {
+        if !self.active || self.dismissed || !self.settings.enabled || !(self.settings.paths || self.settings.dynamic) {
             return None;
         }
         crate::path_suggestions::PathQuery::parse(&self.text, self.cursor, self.powershell?)
@@ -57,6 +57,7 @@ impl Suggestions {
                 .unwrap_or(0);
         }
     }
+    pub fn has_command(&self, name: &str) -> bool { self.commands.binary_search_by(|command| command.as_str().cmp(name)).is_ok() }
     pub fn add_command(&mut self, name: &str) {
         if name.is_empty() {
             self.commands.clear();

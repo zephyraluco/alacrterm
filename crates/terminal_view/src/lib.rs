@@ -14,6 +14,7 @@ mod completion;
 mod contrast;
 mod path_suggestions;
 mod prompt_input;
+mod project_completions;
 mod scrollbar;
 mod suggestion_popup;
 mod suggestions;
@@ -96,6 +97,7 @@ pub struct TerminalView {
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
     prompt_anchor: Option<prompt_input::PromptAnchor>,
     input_recovery: Option<(u64, std::time::Instant)>,
+    project_cache: Option<(project_completions::Provider, String, std::time::Instant, Vec<String>)>,
     path_cache: Option<(String, std::time::Instant, Vec<path_suggestions::Entry>)>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
@@ -227,6 +229,7 @@ impl TerminalView {
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             prompt_anchor: None,
             input_recovery: None,
+            project_cache: None,
             path_cache: None,
             _blink_task: blink_task,
             grid_cache: Default::default(),
@@ -248,6 +251,7 @@ impl TerminalView {
                 self.suggestions.cwd = None;
                 self.suggestions.powershell = None;
                 self.path_cache = None;
+                self.project_cache = None;
                 self.prompt_anchor = None;
                 self.input_recovery = None;
                 self.terminal_blinking = None;
@@ -545,6 +549,9 @@ impl TerminalView {
                 cx.notify();
                 let query = this.suggestions.path_query()?;
                 let revision = this.suggestions.revision;
+                let project = this.suggestions.settings.dynamic.then(|| project_completions::Query::parse(&query)).flatten().filter(|query| this.suggestions.has_command(query.command()));
+                let project_cache = this.project_cache.clone();
+                let paths = this.suggestions.settings.paths;
                 let cwd = this.suggestions.cwd.clone().unwrap_or_default();
                 Some((
                     query,
@@ -552,14 +559,42 @@ impl TerminalView {
                     this.remote,
                     this.remote_fs(cx),
                     this.path_cache.clone(),
-                    revision,
+                    revision, project, project_cache, paths,
                 ))
             }) else {
                 return;
             };
-            let Some((query, cwd, remote, fs, cache, revision)) = request else {
+            let Some((query, cwd, remote, fs, cache, revision, project, project_cache, paths)) = request else {
                 return;
             };
+            if let Some(project) = project {
+                if cwd.is_empty() { return; }
+                let values = if let Some((_, _, _, values)) = project_cache.filter(|(provider, key, time, _)| !manual && *provider == project.provider && *key == cwd && time.elapsed() < Duration::from_secs(3)) {
+                    values
+                } else if remote {
+                    let Some(fs) = &fs else { return; };
+                    let request = Box::pin(project_completions::remote(project.provider, &cwd, fs));
+                    let deadline = Box::pin(cx.background_executor().timer(Duration::from_secs(5)));
+                    match futures::future::select(request, deadline).await {
+                        futures::future::Either::Left((values, _)) => values,
+                        futures::future::Either::Right(_) => return,
+                    }
+                } else {
+                    let provider = project.provider;
+                    let directory = std::path::PathBuf::from(&cwd);
+                    cx.background_executor().spawn(async move { project_completions::local(provider, &directory) }).await
+                };
+                let candidates = project.candidates(values.clone());
+                let _ = this.update(cx, |this, cx| {
+                    if this.focused && this.ime_state.is_none() && this.suggestions.revision == revision && this.suggestions.path_query().as_ref() == Some(&query) && this.suggestions.cwd.as_deref().unwrap_or("") == cwd {
+                        this.project_cache = Some((project.provider, cwd, std::time::Instant::now(), values));
+                        this.suggestions.add_paths(candidates);
+                        cx.notify();
+                    }
+                });
+                return;
+            }
+            if !paths { return; }
             let directory = if remote {
                 let Some(fs) = &fs else {
                     return;
