@@ -12,6 +12,8 @@
 mod command_specs;
 mod completion;
 mod completion_controller;
+mod completion_provider;
+mod completion_resources;
 mod contrast;
 mod path_suggestions;
 mod project_completions;
@@ -541,9 +543,9 @@ impl TerminalView {
                     .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
                 let backend = if this.remote {
-                    completion_controller::Backend::Remote(this.remote_fs(cx)?)
+                    completion_resources::Backend::Remote(this.remote_fs(cx)?)
                 } else {
-                    completion_controller::Backend::local()
+                    completion_resources::Backend::local()
                 };
                 this.completion.request(manual, backend)
             }) else {

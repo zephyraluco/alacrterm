@@ -1,5 +1,5 @@
 //! Per-pane, memory-only history suggestions gated by shell lifecycle markers.
-use crate::completion::{Candidate, Kind, Source, match_score, rank};
+use crate::completion::{Candidate, Kind, Source, rank};
 use terminal::PromptEvent;
 #[derive(Default)]
 pub(super) struct Suggestions {
@@ -37,12 +37,16 @@ impl Suggestions {
         }
     }
     pub fn path_query(&self) -> Option<crate::path_suggestions::PathQuery> {
-        if !self.active || self.dismissed || !self.settings.enabled || !(self.settings.paths || self.settings.dynamic) {
+        if !self.active
+            || self.dismissed
+            || !self.settings.enabled
+            || !(self.settings.paths || self.settings.dynamic)
+        {
             return None;
         }
         crate::path_suggestions::PathQuery::parse(&self.text, self.cursor, self.powershell?)
     }
-    pub fn add_paths(&mut self, candidates: Vec<Candidate>) {
+    pub fn merge_candidates(&mut self, candidates: Vec<Candidate>) {
         let selected = self
             .candidates
             .get(self.selected)
@@ -57,7 +61,6 @@ impl Suggestions {
                 .unwrap_or(0);
         }
     }
-    pub fn has_command(&self, name: &str) -> bool { self.commands.binary_search_by(|command| command.as_str().cmp(name)).is_ok() }
     pub fn add_command(&mut self, name: &str) {
         if name.is_empty() {
             self.commands.clear();
@@ -179,76 +182,26 @@ impl Suggestions {
         {
             return;
         }
-        if self.cursor == self.text.len() {
-            self.candidates.extend(
-                self.history
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, command)| {
-                        self.settings.history
-                            && command.starts_with(&self.text)
-                            && **command != self.text
-                    })
-                    .map(|(index, command)| {
-                        Candidate::new(
-                            command.clone(),
-                            self.text.len(),
-                            Kind::History,
-                            Source::History,
-                            1100 - (index as i64).min(100),
-                        )
-                    }),
-            );
-            let command = self.text.split_whitespace().next().unwrap_or("");
-            if self.settings.specifications
-                && self
-                    .commands
-                    .binary_search_by(|name| name.as_str().cmp(command))
-                    .is_ok()
-            {
-                for (text, description) in crate::command_specs::candidates(&self.text) {
-                    let kind = if text
-                        .split_whitespace()
-                        .last()
-                        .is_some_and(|word| word.starts_with('-'))
-                    {
-                        Kind::Option
-                    } else {
-                        Kind::Subcommand
-                    };
-                    let mut item =
-                        Candidate::new(text, self.text.len(), kind, Source::Specification, 1250);
-                    item.description = Some(description.into());
-                    self.candidates.push(item);
-                }
+        let context = self.provider_context();
+        let mut candidates = Vec::new();
+        for provider in crate::completion_provider::IMMEDIATE {
+            if let Some(crate::completion_provider::Work::Ready(items)) = provider.query(&context) {
+                candidates.extend(items);
             }
         }
-        let word_end = self
-            .text
-            .find(char::is_whitespace)
-            .unwrap_or(self.text.len());
-        if self.settings.commands
-            && self.cursor <= word_end
-            && self.text[..word_end]
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || "_.:+-".contains(ch))
-        {
-            let prefix = &self.text[..self.cursor];
-            for command in &self.commands {
-                if let Some(score) = match_score(
-                    prefix,
-                    command,
-                    self.powershell == Some(true),
-                    self.settings.fuzzy,
-                ) {
-                    let mut item =
-                        Candidate::new(command.clone(), 0, Kind::Command, Source::Shell, score);
-                    item.replacement = 0..word_end;
-                    self.candidates.push(item);
-                }
-            }
-        }
+        self.candidates = candidates;
         rank(&mut self.candidates);
+    }
+    pub fn provider_context(&self) -> crate::completion_provider::Context<'_> {
+        crate::completion_provider::Context {
+            text: &self.text,
+            cursor: self.cursor,
+            powershell: self.powershell == Some(true),
+            history: &self.history,
+            commands: &self.commands,
+            settings: &self.settings,
+            path: self.path_query(),
+        }
     }
     pub fn query_for(&self, candidate: &Candidate) -> String {
         if candidate.source == Source::Filesystem {
@@ -349,7 +302,7 @@ mod tests {
         assert_eq!(state.candidates.len(), 21);
         state.step(3);
         let selected = state.candidates[state.selected].insert_text.clone();
-        state.add_paths(vec![
+        state.merge_candidates(vec![
             Candidate::new(
                 "git station/".into(),
                 state.text.len(),
@@ -393,7 +346,7 @@ mod tests {
         }
         state.refresh(false);
         let query = state.path_query().unwrap();
-        state.add_paths(query.candidates(vec![crate::path_suggestions::Entry {
+        state.merge_candidates(query.candidates(vec![crate::path_suggestions::Entry {
             name: "sample file".into(),
             directory: false,
         }]));
