@@ -40,3 +40,5 @@ settings.workspace = true
 platform.workspace = true
 
 session.workspace = true
+
+transfer.workspace = true

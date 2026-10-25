@@ -9,6 +9,7 @@ members = [
     "crates/settings",
     "crates/platform",
     "crates/session",
+    "crates/transfer",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ ssh = { path = "crates/ssh" }
 settings = { path = "crates/settings" }
 platform = { path = "crates/platform" }
 session = { path = "crates/session" }
+transfer = { path = "crates/transfer" }
 
 # alacrterm 使用 zed git 上的 gpui；这里换成 gpui-kit 同款的 gpui-pre（lib 名即 gpui，代码零改动）
 gpui = { version = "0.3", package = "gpui-pre" }

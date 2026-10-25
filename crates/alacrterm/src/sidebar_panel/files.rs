@@ -202,7 +202,10 @@ enum RowKind {
     Loading,
 }
 
-impl TransferState {
+trait TransferDetails {
+    fn detail(&self) -> String;
+}
+impl TransferDetails for TransferState {
     /// 行右侧那行说明文字。
     fn detail(&self) -> String {
         if self.bytes_total > 0 {
@@ -1269,7 +1272,7 @@ fn transfer_element(
     let label: SharedString = if foreign {
         format!("{}: {}", transfer.source.host(), transfer.label).into()
     } else {
-        transfer.label.clone()
+        transfer.label.clone().into()
     };
     let radius = cx.theme().radius;
     v_flex()
