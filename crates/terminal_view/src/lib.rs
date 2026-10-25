@@ -17,6 +17,8 @@ mod prompt_input;
 mod scrollbar;
 mod suggestion_popup;
 mod suggestions;
+mod suggestion_settings;
+pub use suggestion_settings::SuggestionSettings;
 pub mod terminal_element;
 
 use std::{ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
@@ -214,13 +216,13 @@ impl TerminalView {
             error: None,
             exited: false,
             remote,
-            settings,
+            settings: settings.clone(),
             title: "终端".into(),
             ime_state: None,
             cursor_phase: true,
             focused: false,
             terminal_blinking: None,
-            suggestions: Default::default(),
+            suggestions: suggestions::Suggestions::new(settings.suggestions),
             suggestion_task: gpui::Task::ready(()),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             prompt_anchor: None,
@@ -266,6 +268,10 @@ impl TerminalView {
         cx: &mut gpui::Context<Self>,
     ) {
         self.settings = settings;
+        self.suggestions.settings = self.settings.suggestions;
+        self.suggestions.dismiss();
+        self.suggestion_task = gpui::Task::ready(());
+        if !self.settings.suggestions.history { self.suggestions.clear_history(); }
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.set_cursor_shape(self.settings.cursor_shape);

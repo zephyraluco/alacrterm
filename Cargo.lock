@@ -7431,10 +7431,13 @@ dependencies = [
 name = "terminal_view"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gpui-kit",
  "gpui-pre",
  "itertools 0.15.0",
  "log",
+ "serde",
+ "serde_json",
  "terminal",
 ]
 

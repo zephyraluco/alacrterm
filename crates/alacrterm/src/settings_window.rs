@@ -209,8 +209,34 @@ impl SettingsWindow {
                             )
                         },
                     )),
-            )
+            ).group(suggestion_group(self.app_root.clone()))
     }
+}
+
+fn suggestion_group(root: WeakEntity<AppRoot>) -> SettingGroup {
+    type Read = fn(&terminal_view::SuggestionSettings) -> bool;
+    type Write = fn(&mut terminal_view::SuggestionSettings, bool);
+    let fields: &[(&str, &str, Read, Write)] = &[
+        ("命令建议", "显示终端补全候选列表。", |s| s.enabled, |s,v| s.enabled=v),
+        ("自动显示建议", "关闭后使用 Ctrl+Space 手动查询。", |s| s.automatic, |s,v| s.automatic=v),
+        ("历史候选", "仅保存当前分屏内存中的历史；关闭时清除。", |s| s.history, |s,v| s.history=v),
+        ("Shell 命令候选", "使用当前 shell 的命令、别名和函数。", |s| s.commands, |s,v| s.commands=v),
+        ("路径候选", "补全当前会话的文件和目录。", |s| s.paths, |s,v| s.paths=v),
+        ("子命令和选项", "显示内置命令规格与说明。", |s| s.specifications, |s,v| s.specifications=v),
+        ("项目参数", "从当前项目提供脚本和分支等候选。", |s| s.dynamic, |s,v| s.dynamic=v),
+        ("模糊匹配", "命令名允许子序列匹配，前缀匹配优先。", |s| s.fuzzy, |s,v| s.fuzzy=v),
+        ("接受后补空格", "文件和命令接受后追加空格；目录和历史除外。", |s| s.insert_trailing_space, |s,v| s.insert_trailing_space=v),
+        ("SSH 自动集成", "为新连接的受支持远端 shell 加载会话级集成。", |s| s.remote_integration, |s,v| s.remote_integration=v),
+    ];
+    let mut group = SettingGroup::new();
+    for &(title, description, read, write) in fields {
+        let root = root.clone();
+        group = group.item(render_item(title, description, SettingField::switch(
+            move |cx: &App| read(&config::settings(cx).render.suggestions),
+            move |value, cx: &mut App| update_render(&root, cx, |render| write(&mut render.suggestions, value)),
+        )));
+    }
+    group
 }
 
 /// 「深色主题」开关。

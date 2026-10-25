@@ -3,6 +3,7 @@ use crate::completion::{Candidate, Kind, Source, match_score, rank};
 use terminal::PromptEvent;
 #[derive(Default)]
 pub(super) struct Suggestions {
+    pub settings: crate::SuggestionSettings,
     pub active: bool,
     pub text: String,
     pub cursor: usize,
@@ -19,6 +20,15 @@ pub(super) struct Suggestions {
     prompt_ready: bool,
 }
 impl Suggestions {
+    pub fn new(settings: crate::SuggestionSettings) -> Self {
+        Self {
+            settings,
+            ..Default::default()
+        }
+    }
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
     pub fn context(&mut self, key: &str, value: &str) {
         match key {
             "cwd" => self.cwd = (!value.is_empty()).then(|| value.into()),
@@ -27,7 +37,7 @@ impl Suggestions {
         }
     }
     pub fn path_query(&self) -> Option<crate::path_suggestions::PathQuery> {
-        if !self.active || self.dismissed {
+        if !self.active || self.dismissed || !self.settings.enabled || !self.settings.paths {
             return None;
         }
         crate::path_suggestions::PathQuery::parse(&self.text, self.cursor, self.powershell?)
@@ -64,7 +74,7 @@ impl Suggestions {
         if event == PromptEvent::Input && self.active && self.text.is_empty() {
             return;
         }
-        if event == PromptEvent::Execute {
+        if event == PromptEvent::Execute && self.settings.history {
             if let Some(command) = self.pending.take() {
                 self.history.retain(|old| old != &command);
                 self.history.insert(0, command);
@@ -161,7 +171,11 @@ impl Suggestions {
         self.candidates.clear();
         self.candidate_revision = self.revision;
         self.selected = 0;
-        if !self.active || self.dismissed || (!manual && self.text.is_empty()) {
+        if !self.active
+            || self.dismissed
+            || !self.settings.enabled
+            || (!manual && (!self.settings.automatic || self.text.is_empty()))
+        {
             return;
         }
         if self.cursor == self.text.len() {
@@ -170,7 +184,9 @@ impl Suggestions {
                     .iter()
                     .enumerate()
                     .filter(|(_, command)| {
-                        command.starts_with(&self.text) && **command != self.text
+                        self.settings.history
+                            && command.starts_with(&self.text)
+                            && **command != self.text
                     })
                     .map(|(index, command)| {
                         Candidate::new(
@@ -183,10 +199,11 @@ impl Suggestions {
                     }),
             );
             let command = self.text.split_whitespace().next().unwrap_or("");
-            if self
-                .commands
-                .binary_search_by(|name| name.as_str().cmp(command))
-                .is_ok()
+            if self.settings.specifications
+                && self
+                    .commands
+                    .binary_search_by(|name| name.as_str().cmp(command))
+                    .is_ok()
             {
                 for (text, description) in crate::command_specs::candidates(&self.text) {
                     let kind = if text
@@ -209,16 +226,20 @@ impl Suggestions {
             .text
             .find(char::is_whitespace)
             .unwrap_or(self.text.len());
-        if self.cursor <= word_end
+        if self.settings.commands
+            && self.cursor <= word_end
             && self.text[..word_end]
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || "_.:+-".contains(ch))
         {
             let prefix = &self.text[..self.cursor];
             for command in &self.commands {
-                if let Some(score) =
-                    match_score(prefix, command, self.powershell == Some(true), true)
-                {
+                if let Some(score) = match_score(
+                    prefix,
+                    command,
+                    self.powershell == Some(true),
+                    self.settings.fuzzy,
+                ) {
                     let mut item =
                         Candidate::new(command.clone(), 0, Kind::Command, Source::Shell, score);
                     item.replacement = 0..word_end;
@@ -255,7 +276,14 @@ impl Suggestions {
         if !self.active || self.candidate_revision != self.revision {
             return None;
         }
-        let item = self.candidates.get(self.selected)?;
+        let mut item = self.candidates.get(self.selected)?.clone();
+        if self.settings.insert_trailing_space
+            && !item.retrigger
+            && item.replacement.end == self.text.len()
+            && item.kind != Kind::History
+        {
+            item.insert_text.push(' ');
+        }
         let range = item.replacement.clone();
         if self.cursor < range.start || self.cursor > range.end {
             return None;
@@ -391,6 +419,34 @@ mod tests {
         state.add_command("Get-Item");
         state.refresh(false);
         assert_eq!(state.candidates[0].insert_text, "Get-Item");
+    }
+    #[test]
+    fn policy_controls_manual_trigger_sources_fuzzy_matching_and_trailing_space() {
+        let mut state = Suggestions::default();
+        state.add_command("git");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("gt");
+        state.settings.automatic = false;
+        state.refresh(false);
+        assert!(state.candidates.is_empty());
+        state.refresh(true);
+        assert_eq!(state.candidates[0].insert_text, "git");
+        state.settings.fuzzy = false;
+        state.refresh(true);
+        assert!(state.candidates.is_empty());
+        state.settings.fuzzy = true;
+        state.settings.commands = false;
+        state.refresh(true);
+        assert!(state.candidates.is_empty());
+        state.settings.commands = true;
+        state.settings.insert_trailing_space = true;
+        state.refresh(true);
+        state.accept().unwrap();
+        assert_eq!(state.text, "git ");
+        state.settings.enabled = false;
+        state.refresh(true);
+        assert!(state.candidates.is_empty());
     }
     #[test]
     fn all_candidates_remain_navigable_beyond_the_visible_rows() {

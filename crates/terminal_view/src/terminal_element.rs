@@ -45,6 +45,7 @@ use crate::{TerminalView, contrast::ensure_minimum_contrast};
 /// 终端渲染设置（本地定义，替代 Zed 的 `TerminalSettings` + `ThemeSettings`）。
 #[derive(Clone)]
 pub struct TerminalRenderSettings {
+    pub suggestions: crate::SuggestionSettings,
     pub font_family: SharedString,
     pub font_size: Pixels,
     pub font_weight: FontWeight,
@@ -67,6 +68,7 @@ pub struct TerminalRenderSettings {
 impl Default for TerminalRenderSettings {
     fn default() -> Self {
         Self {
+            suggestions: Default::default(),
             font_family: "JetBrainsMono Nerd Font".into(),
             font_size: px(15.0),
             font_weight: FontWeight::default(),
