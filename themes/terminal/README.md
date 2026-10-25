@@ -13,9 +13,9 @@ Palette references:
 - https://github.com/morhetz/gruvbox
 - https://ethanschoonover.com/solarized/
 
-Files are embedded in the application. An executable-adjacent `terminal-colors/`
+Files are embedded in the application. An executable-adjacent `themes/terminal/`
 directory can override them with the same filenames. The app watches the first
-existing `terminal-colors/` directory beside the executable or in the repository.
+existing `themes/terminal/` directory beside the executable or in the repository.
 Missing overrides use embedded data. Invalid edits retain the last valid version;
 invalid files on first load use the embedded palette where available.
 

@@ -65,7 +65,7 @@ impl SettingsWindow {
                     )
                     .item(
                         SettingItem::new("浅色模式配色", theme_dropdown(cx, ThemeMode::Light))
-                            .description("同上，作用于浅色模式。主题文件在 themes/ 下，改完即刻热重载。"),
+                            .description("同上，作用于浅色模式。主题文件在 themes/global/ 下，改完即刻热重载。"),
                     ),
             )
     }

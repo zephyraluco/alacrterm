@@ -1,4 +1,4 @@
-//! 应用配置：终端渲染参数（`config/terminal.json`）与界面主题（`themes/*.json` + `config/app.json`）。
+//! 应用配置：终端渲染参数（`config/terminal.json`）与界面主题（`themes/global/*.json` + `config/app.json`）。
 //! 运行期状态在 [`Settings`] 全局，查找顺序「exe 同级」→「仓库根」，缺失项回退默认值。
 
 use settings::color_schemes::ColorScheme;
@@ -15,7 +15,8 @@ use settings::{TerminalFile, candidates, load_app_config, save_theme_choice};
 pub(crate) use settings::{read_config_file, shown_path};
 use terminal::{CursorShape, TerminalColors, rgba_color};
 use terminal_view::RenderSettings;
-const THEMES_DIR: &str = "themes";
+const THEMES_DIR: &str = "themes/global";
+const TERMINAL_PALETTES_DIR: &str = "themes/terminal";
 
 pub(crate) struct Settings {
     pub(crate) color_scheme: Option<SharedString>,
@@ -55,7 +56,7 @@ pub(crate) fn install(cx: &mut App) {
         dark_theme: app.dark_theme.map(Into::into),
         light_theme: app.light_theme.map(Into::into),
     });
-    let directories = candidates("terminal-colors");
+    let directories = candidates(TERMINAL_PALETTES_DIR);
     if let Some(directory) = directories
         .iter()
         .find(|path| path.is_dir())
