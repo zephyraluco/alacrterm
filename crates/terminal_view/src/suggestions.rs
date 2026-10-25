@@ -1,10 +1,28 @@
 //! Per-pane, memory-only history suggestions gated by shell lifecycle markers.
 use crate::completion::{Candidate, Kind, Source, rank};
 use terminal::PromptEvent;
+/// A submitted command cannot simultaneously be an editable input line.
+#[derive(Default)]
+enum InputState {
+    #[default]
+    Inactive,
+    Prompt,
+    Editing {
+        menu: MenuState,
+    },
+    Submitted {
+        command: Option<String>,
+    },
+}
+#[derive(Clone, Copy)]
+enum MenuState {
+    Ready,
+    Dismissed,
+}
 #[derive(Default)]
 pub(super) struct Suggestions {
     pub settings: crate::SuggestionSettings,
-    pub active: bool,
+    state: InputState,
     pub text: String,
     pub cursor: usize,
     pub revision: u64,
@@ -13,17 +31,30 @@ pub(super) struct Suggestions {
     commands: Vec<String>,
     pub cwd: Option<String>,
     pub powershell: Option<bool>,
-    pending: Option<String>,
     pub candidates: Vec<Candidate>,
     pub selected: usize,
-    dismissed: bool,
-    prompt_ready: bool,
 }
 impl Suggestions {
     pub fn new(settings: crate::SuggestionSettings) -> Self {
         Self {
             settings,
             ..Default::default()
+        }
+    }
+    pub fn is_editing(&self) -> bool {
+        matches!(self.state, InputState::Editing { .. })
+    }
+    fn menu_dismissed(&self) -> bool {
+        matches!(
+            self.state,
+            InputState::Editing {
+                menu: MenuState::Dismissed
+            }
+        )
+    }
+    fn resume_menu(&mut self) {
+        if let InputState::Editing { menu } = &mut self.state {
+            *menu = MenuState::Ready;
         }
     }
     pub fn clear_history(&mut self) {
@@ -37,8 +68,8 @@ impl Suggestions {
         }
     }
     pub fn path_query(&self) -> Option<crate::path_suggestions::PathQuery> {
-        if !self.active
-            || self.dismissed
+        if !self.is_editing()
+            || self.menu_dismissed()
             || !self.settings.enabled
             || !(self.settings.paths || self.settings.dynamic)
         {
@@ -75,29 +106,35 @@ impl Suggestions {
     }
     pub fn phase(&mut self, event: PromptEvent) {
         self.revision = self.revision.wrapping_add(1);
-        if event == PromptEvent::Input && self.active && self.text.is_empty() {
+        if event == PromptEvent::Input && self.is_editing() && self.text.is_empty() {
             return;
         }
-        if event == PromptEvent::Execute && self.settings.history {
-            if let Some(command) = self.pending.take() {
+        let previous = std::mem::take(&mut self.state);
+        self.state = match (event, previous) {
+            (PromptEvent::Prompt, _) => InputState::Prompt,
+            (PromptEvent::Input, InputState::Prompt) => InputState::Editing {
+                menu: MenuState::Ready,
+            },
+            (
+                PromptEvent::Execute,
+                InputState::Submitted {
+                    command: Some(command),
+                },
+            ) if self.settings.history => {
                 self.history.retain(|old| old != &command);
                 self.history.insert(0, command);
                 self.history.truncate(256);
+                InputState::Inactive
             }
-        } else {
-            self.pending = None;
-        }
-        self.active = event == PromptEvent::Input && self.prompt_ready;
-        self.prompt_ready = event == PromptEvent::Prompt;
+            _ => InputState::Inactive,
+        };
         self.text.clear();
         self.cursor = 0;
-        self.dismiss();
-        self.dismissed = false;
+        self.candidates.clear();
     }
     pub fn invalidate(&mut self) {
-        self.active = false;
-        self.pending = None;
-        self.dismiss();
+        self.state = InputState::Inactive;
+        self.candidates.clear();
     }
     pub fn synchronize(&mut self, text: String, cursor: usize) {
         if text.len() > 4096 || text.chars().any(char::is_control) || !text.is_char_boundary(cursor)
@@ -107,13 +144,13 @@ impl Suggestions {
         self.revision = self.revision.wrapping_add(1);
         self.text = text;
         self.cursor = cursor;
-        self.active = true;
-        self.pending = None;
-        self.dismissed = false;
+        self.state = InputState::Editing {
+            menu: MenuState::Ready,
+        };
         self.candidates.clear();
     }
     pub fn input(&mut self, text: &str) {
-        if !self.active {
+        if !self.is_editing() {
             return;
         }
         if text.chars().any(char::is_control) || self.text.len() + text.len() > 4096 {
@@ -123,22 +160,22 @@ impl Suggestions {
         self.revision = self.revision.wrapping_add(1);
         self.text.insert_str(self.cursor, text);
         self.cursor += text.len();
-        self.dismissed = false;
+        self.resume_menu();
     }
     pub fn submit(&mut self) {
-        self.pending = (self.active
+        let command = (self.is_editing()
             && !self.text.trim().is_empty()
             && !self.text.starts_with(char::is_whitespace))
         .then(|| self.text.clone());
-        self.active = false;
-        self.dismiss();
+        self.state = InputState::Submitted { command };
+        self.candidates.clear();
     }
     pub fn edit_key(&mut self, key: &str, control: bool) {
         self.revision = self.revision.wrapping_add(1);
-        if !self.active {
+        if !self.is_editing() {
             return;
         }
-        self.dismissed = false;
+        self.resume_menu();
         match (key, control) {
             ("left", false) => {
                 self.cursor = self.text[..self.cursor]
@@ -175,8 +212,8 @@ impl Suggestions {
         self.candidates.clear();
         self.candidate_revision = self.revision;
         self.selected = 0;
-        if !self.active
-            || self.dismissed
+        if !self.is_editing()
+            || self.menu_dismissed()
             || !self.settings.enabled
             || (!manual && (!self.settings.automatic || self.text.is_empty()))
         {
@@ -213,12 +250,14 @@ impl Suggestions {
             .to_string()
     }
     pub fn trigger(&mut self) {
-        self.dismissed = false;
+        self.resume_menu();
         self.refresh(true);
     }
     pub fn dismiss(&mut self) {
         self.candidates.clear();
-        self.dismissed = true;
+        if let InputState::Editing { menu } = &mut self.state {
+            *menu = MenuState::Dismissed;
+        }
     }
     pub fn step(&mut self, delta: isize) {
         if !self.candidates.is_empty() {
@@ -227,7 +266,7 @@ impl Suggestions {
         }
     }
     pub fn accept(&mut self) -> Option<String> {
-        if !self.active || self.candidate_revision != self.revision {
+        if !self.is_editing() || self.candidate_revision != self.revision {
             return None;
         }
         let mut item = self.candidates.get(self.selected)?.clone();
@@ -286,6 +325,41 @@ mod tests {
         state.input(command);
         state.submit();
         state.phase(PromptEvent::Execute);
+    }
+    #[test]
+    fn interrupted_submission_and_out_of_order_markers_never_enter_history() {
+        let mut state = Suggestions::default();
+        state.phase(PromptEvent::Input);
+        assert!(!state.is_editing());
+        state.input("untracked");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("echo unconfirmed");
+        state.submit();
+        state.phase(PromptEvent::Finished);
+        state.phase(PromptEvent::Execute);
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.trigger();
+        assert!(state.candidates.is_empty());
+    }
+    #[test]
+    fn dismiss_keeps_input_editable_but_submit_stops_capturing_password_text() {
+        let mut state = Suggestions::default();
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("echo hi");
+        state.dismiss();
+        assert!(state.is_editing());
+        state.input("x");
+        state.submit();
+        state.input("password-value");
+        assert_eq!(state.text, "echo hix");
+        state.phase(PromptEvent::Execute);
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.trigger();
+        assert_eq!(texts(&state), ["echo hix"]);
     }
     #[test]
     fn providers_merge_without_starvation_and_keep_selection_on_late_results() {
@@ -435,7 +509,7 @@ mod tests {
             Some("查看工作区状态")
         );
         assert_eq!(state.accept().as_deref(), Some("tus"));
-        assert!(state.active);
+        assert!(state.is_editing());
     }
     #[test]
     fn only_confirmed_commands_become_history_and_accept_never_submits() {
@@ -452,9 +526,8 @@ mod tests {
         assert_eq!(texts(&state), ["git log", "git status"]);
         state.step(1);
         assert_eq!(state.accept().as_deref(), Some("status"));
-        assert!(state.active);
+        assert!(state.is_editing());
         assert_eq!(state.text, "git status");
-        assert!(state.pending.is_none());
         state.phase(PromptEvent::Prompt);
         state.phase(PromptEvent::Input);
         state.trigger();
@@ -482,7 +555,7 @@ mod tests {
         state.phase(PromptEvent::Prompt);
         state.phase(PromptEvent::Input);
         state.input("echo\npassword");
-        assert!(!state.active);
+        assert!(!state.is_editing());
     }
     #[test]
     fn redraw_and_private_history_entries_do_not_create_candidates() {
@@ -490,10 +563,10 @@ mod tests {
         state.phase(PromptEvent::Prompt);
         state.phase(PromptEvent::Input);
         state.phase(PromptEvent::Input);
-        assert!(state.active);
+        assert!(state.is_editing());
         state.input("echo partial");
         state.phase(PromptEvent::Input);
-        assert!(!state.active);
+        assert!(!state.is_editing());
         execute(&mut state, " secret-token");
         state.phase(PromptEvent::Prompt);
         state.phase(PromptEvent::Input);

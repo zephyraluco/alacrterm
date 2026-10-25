@@ -144,3 +144,22 @@ PowerShell/Fish 等远端 shell 目前回退普通 shell，PowerShell 可手动�
 - 工作区编译检查及相关单元/SSH 回归通过；Clippy 性能 lint 通过（仍有既有及样式建议警告）。
 
 Windows/macOS GUI 和 PowerShell 脚本尚未原生验证，未宣称与 VS Code 完全等同。
+
+## 实现结构
+
+| 模块 | 职责 |
+| --- | --- |
+| `completion_controller.rs` | 每个分屏独立的查询调度、取消、请求代号、结果校验、输入恢复和接受决策 |
+| `completion_provider.rs` | 历史、shell 命令、规格、路径和项目参数的统一查询接口 |
+| `completion_resources.rs` | 本地/SSH 资源读取、原有超时策略、3 秒缓存与手动刷新 |
+| `suggestions.rs` | 输入状态、内存历史、候选合并排序与文本替换 |
+| `prompt_input.rs` | 提示符锚点及等待终端回显恢复的状态 |
+| `suggestion_popup.rs` | 现有单行列表、滚动、鼠标与光标末端定位 |
+
+输入通过明确的 Inactive / Prompt / Editing / Submitted 状态流转，已提交命令只能在 Execute 标记确认后进入历史。
+菜单关闭状态只属于 Editing；等待原生编辑恢复时必须持有当前提示符锚点，提交、结束或重连会丢弃该锚点。
+异步结果统一校验请求代号、输入版本、工作目录和路径查询；相同文字的新请求也不会接受旧结果。
+缓存仍最多保存一份目录数据和一份项目数据，保留现有来源优先级、TTL、超时、候选评分和按键行为。
+
+本轮回归覆盖 25 项终端视图测试、49 项应用测试、工作区编译和 Clippy 性能检查，
+并通过 Linux GUI 验证原生历史恢复、行中替换参数完整性、密码隔离、本地路径、本地及 SSH 项目候选。

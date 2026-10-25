@@ -97,8 +97,6 @@ pub struct TerminalView {
     terminal_blinking: Option<bool>,
     completion: completion_controller::CompletionController,
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
-    prompt_anchor: Option<prompt_input::PromptAnchor>,
-    input_recovery: Option<(u64, std::time::Instant)>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
     scrollbar_target: std::rc::Rc<std::cell::Cell<Option<usize>>>,
@@ -231,8 +229,6 @@ impl TerminalView {
             terminal_blinking: None,
             completion: completion_controller::CompletionController::new(settings.suggestions),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
-            prompt_anchor: None,
-            input_recovery: None,
             _blink_task: blink_task,
             grid_cache: Default::default(),
             scrollbar_target: Default::default(),
@@ -249,8 +245,6 @@ impl TerminalView {
             if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
                 self.exited = false;
                 self.completion.reset_session();
-                self.prompt_anchor = None;
-                self.input_recovery = None;
                 self.terminal_blinking = None;
                 self.ime_state = None;
                 cx.notify();
@@ -299,7 +293,7 @@ impl TerminalView {
     /// 焦点离开：通知终端应用（未聚焦时光标由渲染层显示为空心）。
     fn focus_out(&mut self, cx: &mut gpui::Context<Self>) {
         self.focused = false;
-        self.completion.model.dismiss();
+        self.completion.dismiss();
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| terminal.focus_out());
         }
@@ -311,17 +305,12 @@ impl TerminalView {
             TerminalEvent::ShellCommand(command) => self.completion.model.add_command(command),
             TerminalEvent::ShellContext(key, value) => self.completion.model.context(key, value),
             TerminalEvent::Prompt(event) => {
-                if *event != terminal::PromptEvent::Input {
-                    self.prompt_anchor = None;
-                    self.input_recovery = None;
-                }
-                if *event == terminal::PromptEvent::Input
-                    && self.prompt_anchor.is_some()
-                    && !self.completion.model.text.is_empty()
-                {
-                    self.request_input_recovery(cx);
-                } else {
-                    self.completion.model.phase(*event);
+                let generation = self
+                    .terminal
+                    .as_ref()
+                    .map_or(0, |terminal| terminal.read(cx).content_generation());
+                if self.completion.on_prompt(*event, generation) {
+                    self.wake_after_input_recovery(cx);
                 }
                 cx.notify();
             }
@@ -353,7 +342,7 @@ impl TerminalView {
                 // 已断开，用户自行关闭或新建）。终端网格会保留最后的输出，
                 // 这样 ssh 报的断开原因不会被丢掉。
                 self.exited = true;
-                self.completion.model.invalidate();
+                self.completion.invalidate_input();
                 cx.notify();
             }
             TerminalEvent::HostKeyPrompt(prompt) => {
@@ -381,7 +370,7 @@ impl TerminalView {
         if text.is_empty() {
             return self.clear_marked_text(cx);
         }
-        self.completion.model.dismiss();
+        self.completion.dismiss();
         self.ime_state = Some(ImeState { marked_text: text });
         cx.notify();
     }
@@ -413,7 +402,7 @@ impl TerminalView {
                         .mode
                         .intersects(Modes::ALT_SCREEN | Modes::MOUSE_MODE)
             }) {
-                self.completion.model.invalidate();
+                self.completion.invalidate_input();
             }
             self.completion.model.input(text);
             self.schedule_suggestions(false, cx);
@@ -454,7 +443,7 @@ impl TerminalView {
 
     /// 粘贴剪贴板内容（`Ctrl+Shift+V`）。
     pub fn paste_text(&mut self, cx: &mut gpui::Context<Self>) {
-        self.completion.model.invalidate();
+        self.completion.invalidate_input();
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
@@ -566,28 +555,25 @@ impl TerminalView {
     }
 
     fn request_input_recovery(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.prompt_anchor.is_none() {
-            return;
-        }
         let generation = self
             .terminal
             .as_ref()
             .map_or(0, |terminal| terminal.read(cx).content_generation());
-        self.input_recovery = Some((generation, std::time::Instant::now()));
-        self.completion.model.invalidate();
+        if self.completion.request_recovery(generation) {
+            self.wake_after_input_recovery(cx);
+        }
+    }
+    fn wake_after_input_recovery(&mut self, cx: &mut gpui::Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(80))
+                .timer(prompt_input::RECOVERY_DELAY)
                 .await;
             let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
     }
     fn recover_input(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        let Some((generation, since)) = self.input_recovery else {
-            return;
-        };
-        if since.elapsed() < Duration::from_millis(80) || self.ime_state.is_some() {
+        if !self.completion.recovery_due() || self.ime_state.is_some() {
             return;
         }
         let Some(terminal) = &self.terminal else {
@@ -595,8 +581,7 @@ impl TerminalView {
         };
         terminal.update(cx, |terminal, cx| terminal.sync(window, cx));
         let terminal = terminal.read(cx);
-        if terminal.content_generation() == generation
-            || terminal.vi_mode_enabled()
+        if terminal.vi_mode_enabled()
             || terminal
                 .last_content()
                 .mode
@@ -604,44 +589,29 @@ impl TerminalView {
         {
             return;
         }
-        let recovered = self
-            .prompt_anchor
-            .as_ref()
-            .and_then(|anchor| anchor.recover(terminal.last_content()));
-        if let Some((text, cursor)) = recovered {
-            self.input_recovery = None;
-            self.completion.model.synchronize(text, cursor);
+        if self
+            .completion
+            .recover_input(terminal.last_content(), terminal.content_generation())
+        {
             self.schedule_suggestions(false, cx);
         }
     }
-
     fn accept_suggestion(&mut self, cx: &mut gpui::Context<Self>) {
-        if let Some((text, cursor)) = self.terminal.as_ref().and_then(|terminal| {
-            self.prompt_anchor
-                .as_ref()
-                .and_then(|anchor| anchor.recover(terminal.read(cx).last_content()))
-        }) {
-            if text != self.completion.model.text || cursor != self.completion.model.cursor {
-                self.completion.model.synchronize(text, cursor);
-                self.schedule_suggestions(false, cx);
-                return;
+        let content = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.read(cx).last_content());
+        match self.completion.accept(content) {
+            completion_controller::Acceptance::Refresh => self.schedule_suggestions(false, cx),
+            completion_controller::Acceptance::Insert { bytes, retrigger } => {
+                if let Some(terminal) = &self.terminal {
+                    terminal.update(cx, |terminal, _| terminal.input(bytes.into_bytes()));
+                }
+                if retrigger {
+                    self.schedule_suggestions(true, cx);
+                }
             }
-        }
-
-        let retrigger = self
-            .completion
-            .model
-            .candidates
-            .get(self.completion.model.selected)
-            .is_some_and(|item| item.retrigger);
-        if let Some(suffix) = self.completion.model.accept() {
-            if let Some(terminal) = &self.terminal {
-                terminal.update(cx, |terminal, _| terminal.input(suffix.into_bytes()));
-            }
-            if retrigger {
-                self.completion.model.trigger();
-                self.schedule_suggestions(true, cx);
-            }
+            completion_controller::Acceptance::None => {}
         }
         cx.notify();
     }
@@ -664,7 +634,7 @@ impl TerminalView {
                         .intersects(Modes::ALT_SCREEN | Modes::MOUSE_MODE)
             });
         if !allowed {
-            self.completion.model.invalidate();
+            self.completion.invalidate_input();
         }
         if allowed
             && key == "space"
@@ -698,7 +668,7 @@ impl TerminalView {
                     return;
                 }
                 "escape" => {
-                    self.completion.model.dismiss();
+                    self.completion.dismiss();
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -709,13 +679,11 @@ impl TerminalView {
         let printable =
             plain && (e.keystroke.key_char.is_some() || key.chars().count() == 1 || key == "space");
         if key == "enter" && plain {
-            self.completion.model.submit();
-            self.prompt_anchor = None;
-            self.input_recovery = None;
+            self.completion.submit();
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
             self.completion.model.edit_key(key, control);
-            if !self.completion.model.active
-                && self.prompt_anchor.is_some()
+            if !self.completion.model.is_editing()
+                && self.completion.has_input_anchor()
                 && allowed
                 && !(control && matches!(key, "c" | "d"))
             {
@@ -874,13 +842,9 @@ impl Render for TerminalView {
                 terminal.sync(window, cx);
             });
         }
-        if self.prompt_anchor.is_none()
-            && self.completion.model.active
-            && self.completion.model.text.is_empty()
-        {
-            self.prompt_anchor = self.terminal.as_ref().and_then(|terminal| {
-                prompt_input::PromptAnchor::capture(terminal.read(cx).last_content())
-            });
+        if let Some(terminal) = &self.terminal {
+            self.completion
+                .capture_input(terminal.read(cx).last_content());
         }
         self.recover_input(window, cx);
         let focused = self.focus_handle.is_focused(window);

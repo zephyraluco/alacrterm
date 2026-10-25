@@ -22,9 +22,15 @@ pub(super) struct Response {
     identity: Identity,
     data: completion_resources::Response,
 }
+pub(super) enum Acceptance {
+    None,
+    Refresh,
+    Insert { bytes: String, retrigger: bool },
+}
 pub(super) struct CompletionController {
     pub model: Suggestions,
     pub task: Task<()>,
+    tracking: crate::prompt_input::InputTracking,
     generation: u64,
     cache: Vec<CacheEntry>,
 }
@@ -33,6 +39,7 @@ impl CompletionController {
         Self {
             model: Suggestions::new(settings),
             task: Task::ready(()),
+            tracking: Default::default(),
             generation: 0,
             cache: Vec::new(),
         }
@@ -46,7 +53,7 @@ impl CompletionController {
         if !manual {
             self.model.candidates.clear();
         }
-        self.model.active
+        self.model.is_editing()
     }
     pub fn configure(&mut self, settings: SuggestionSettings) {
         self.cancel();
@@ -63,6 +70,85 @@ impl CompletionController {
         self.model.cwd = None;
         self.model.powershell = None;
         self.cache.clear();
+        self.tracking.reset();
+    }
+    pub fn has_input_anchor(&self) -> bool {
+        self.tracking.has_anchor()
+    }
+    pub fn capture_input(&mut self, content: &terminal::Content) {
+        if self.model.is_editing() && self.model.text.is_empty() {
+            self.tracking.capture(content);
+        }
+    }
+    pub fn on_prompt(&mut self, event: terminal::PromptEvent, generation: u64) -> bool {
+        if event != terminal::PromptEvent::Input {
+            self.cancel();
+            self.tracking.reset();
+        }
+        if event == terminal::PromptEvent::Input
+            && self.tracking.has_anchor()
+            && !self.model.text.is_empty()
+        {
+            self.request_recovery(generation)
+        } else {
+            self.model.phase(event);
+            false
+        }
+    }
+    pub fn request_recovery(&mut self, generation: u64) -> bool {
+        if !self.tracking.request(generation, std::time::Instant::now()) {
+            return false;
+        }
+        self.cancel();
+        self.model.invalidate();
+        true
+    }
+    pub fn recovery_due(&self) -> bool {
+        self.tracking.due(std::time::Instant::now())
+    }
+    pub fn recover_input(&mut self, content: &terminal::Content, generation: u64) -> bool {
+        let Some((text, cursor)) =
+            self.tracking
+                .recover(content, generation, std::time::Instant::now())
+        else {
+            return false;
+        };
+        self.model.synchronize(text, cursor);
+        true
+    }
+    pub fn submit(&mut self) {
+        self.cancel();
+        self.model.submit();
+        self.tracking.reset();
+    }
+    pub fn invalidate_input(&mut self) {
+        self.cancel();
+        self.model.invalidate();
+        self.tracking.reset();
+    }
+    pub fn dismiss(&mut self) {
+        self.cancel();
+        self.model.dismiss();
+    }
+    pub fn accept(&mut self, content: Option<&terminal::Content>) -> Acceptance {
+        if let Some((text, cursor)) = content.and_then(|content| self.tracking.current(content)) {
+            if text != self.model.text || cursor != self.model.cursor {
+                self.model.synchronize(text, cursor);
+                return Acceptance::Refresh;
+            }
+        }
+        let retrigger = self
+            .model
+            .candidates
+            .get(self.model.selected)
+            .is_some_and(|item| item.retrigger);
+        let Some(bytes) = self.model.accept() else {
+            return Acceptance::None;
+        };
+        if retrigger {
+            self.model.trigger();
+        }
+        Acceptance::Insert { bytes, retrigger }
     }
     pub fn request(&self, manual: bool, backend: Backend) -> Option<Request> {
         let context = self.model.provider_context();
@@ -150,6 +236,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn submitting_or_finishing_a_prompt_discards_pending_native_recovery() {
+        let mut controller = CompletionController::new(Default::default());
+        controller.on_prompt(PromptEvent::Prompt, 1);
+        controller.on_prompt(PromptEvent::Input, 1);
+        controller.capture_input(&terminal::Content::default());
+        assert!(controller.has_input_anchor());
+        controller.model.input("echo hi");
+        assert!(controller.request_recovery(2));
+        controller.submit();
+        assert!(!controller.has_input_anchor());
+        assert!(!controller.request_recovery(3));
+        controller.on_prompt(PromptEvent::Execute, 3);
+        controller.model.input("password-value");
+        assert!(controller.model.text.is_empty());
+        controller.on_prompt(PromptEvent::Prompt, 4);
+        controller.on_prompt(PromptEvent::Input, 4);
+        controller.model.trigger();
+        assert!(controller.model.candidates.is_empty());
+        controller.capture_input(&terminal::Content::default());
+        assert!(controller.request_recovery(5));
+        controller.on_prompt(PromptEvent::Finished, 6);
+        assert!(!controller.has_input_anchor() && !controller.recovery_due());
+    }
     #[test]
     fn a_new_request_rejects_old_results_even_when_input_is_identical() {
         let mut controller = controller();

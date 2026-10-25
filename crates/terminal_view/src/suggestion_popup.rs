@@ -15,7 +15,7 @@ impl TerminalView {
     pub(crate) fn render_suggestions(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.focused
             || self.ime_state.is_some()
-            || !self.completion.model.active
+            || !self.completion.model.is_editing()
             || self.completion.model.candidates.is_empty()
         {
             return None;
