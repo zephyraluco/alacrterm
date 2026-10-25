@@ -681,8 +681,8 @@ impl TerminalView {
         if key == "enter" && plain {
             self.completion.submit();
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
-            self.completion.model.edit_key(key, control);
-            if !self.completion.model.is_editing()
+            let refresh_native = self.completion.edit_key(key, control);
+            if refresh_native
                 && self.completion.has_input_anchor()
                 && allowed
                 && !(control && matches!(key, "c" | "d"))

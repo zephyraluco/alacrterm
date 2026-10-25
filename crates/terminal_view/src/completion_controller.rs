@@ -95,6 +95,12 @@ impl CompletionController {
             false
         }
     }
+    /// Right arrow can accept a shell-native autosuggestion, including at EOL.
+    /// Re-read the echoed line rather than assuming it only moves the cursor.
+    pub fn edit_key(&mut self, key: &str, control: bool) -> bool {
+        self.model.edit_key(key, control);
+        key == "right" || !self.model.is_editing()
+    }
     pub fn request_recovery(&mut self, generation: u64) -> bool {
         if !self.tracking.request(generation, std::time::Instant::now()) {
             return false;
@@ -236,6 +242,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn right_arrow_at_end_of_input_requests_native_refresh_and_drops_old_candidates() {
+        let mut controller = controller();
+        controller.tracking.capture(&terminal::Content::default());
+        controller.model.synchronize("ca".into(), 2);
+        controller.model.add_command("camera-settings.exe");
+        controller.model.refresh(false);
+        assert!(
+            controller
+                .model
+                .candidates
+                .iter()
+                .any(|item| item.label == "camera-settings.exe")
+        );
+        assert!(controller.edit_key("right", false));
+        assert!(controller.request_recovery(10));
+        assert!(controller.model.candidates.is_empty());
+        // The shell accepts its own suggestion, not an Alacrterm candidate.
+        controller.model.synchronize("cargo run".into(), 9);
+        controller.model.refresh(false);
+        assert!(
+            !controller
+                .model
+                .candidates
+                .iter()
+                .any(|item| item.label == "camera-settings.exe")
+        );
+    }
+    #[test]
+    fn right_arrow_inside_input_also_refreshes_without_accepting_a_candidate() {
+        let mut controller = controller();
+        controller.model.synchronize("cargo run".into(), 5);
+        assert!(controller.edit_key("right", false));
+        assert_eq!(controller.model.text, "cargo run");
+        assert_eq!(controller.model.cursor, 6);
+        assert!(!controller.edit_key("left", false));
+    }
     #[test]
     fn submitting_or_finishing_a_prompt_discards_pending_native_recovery() {
         let mut controller = CompletionController::new(Default::default());
