@@ -70,12 +70,12 @@ fn parse(text: &str) -> Option<ColorScheme> {
 
 fn embedded(id: &str) -> Option<&'static str> {
     Some(match id {
-        "catppuccin-mocha" => include_str!("../../../terminal-colors/catppuccin-mocha.json"),
-        "tokyo-night" => include_str!("../../../terminal-colors/tokyo-night.json"),
-        "one-dark" => include_str!("../../../terminal-colors/one-dark.json"),
-        "nord" => include_str!("../../../terminal-colors/nord.json"),
-        "gruvbox-dark" => include_str!("../../../terminal-colors/gruvbox-dark.json"),
-        "solarized-dark" => include_str!("../../../terminal-colors/solarized-dark.json"),
+        "catppuccin-mocha" => include_str!("../../../themes/terminal/catppuccin-mocha.json"),
+        "tokyo-night" => include_str!("../../../themes/terminal/tokyo-night.json"),
+        "one-dark" => include_str!("../../../themes/terminal/one-dark.json"),
+        "nord" => include_str!("../../../themes/terminal/nord.json"),
+        "gruvbox-dark" => include_str!("../../../themes/terminal/gruvbox-dark.json"),
+        "solarized-dark" => include_str!("../../../themes/terminal/solarized-dark.json"),
         _ => return None,
     })
 }
