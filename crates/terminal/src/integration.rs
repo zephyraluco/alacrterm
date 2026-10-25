@@ -127,13 +127,13 @@ mod tests {
             .stdin
             .take()
             .unwrap()
-            .write_all(b"echo worked\nexit\n")
+            .write_all(b"echo worked\nalias changedalias=echo\nchangedfunction() { :; }\nexit\n")
             .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         let mut bytes = output.stdout;
         bytes.extend(output.stderr);
-        for command in ["demoalias", "demofunc", "printf"] {
+        for command in ["demoalias", "demofunc", "printf", "changedalias", "changedfunction"] {
             let expected = format!("\x1b]633;Command;{command}\x07");
             assert!(
                 bytes
@@ -191,13 +191,13 @@ mod tests {
             .stdin
             .take()
             .unwrap()
-            .write_all(b"echo worked\nexit\n")
+            .write_all(b"echo worked\nalias changedalias=echo\nchangedfunction() { :; }\nexit\n")
             .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         let mut bytes = output.stdout;
         bytes.extend(output.stderr);
-        for command in ["demoalias", "demofunc", "printf"] {
+        for command in ["demoalias", "demofunc", "printf", "changedalias", "changedfunction"] {
             let expected = format!("\x1b]633;Command;{command}\x07");
             assert!(
                 bytes

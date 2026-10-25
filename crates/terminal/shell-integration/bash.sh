@@ -5,6 +5,10 @@
 __alacrterm_integrated=1
 __alacrterm_prompt() {
     local alacrterm_status=$?
+    local alacrterm_signature="$PATH|$(alias -p)|$(declare -F)"
+    if [[ $alacrterm_signature != "${__alacrterm_inventory_signature-}" ]] || (( SECONDS - ${__alacrterm_last_refresh:-0} >= 30 )); then
+        alacrterm_refresh_completions
+    fi
     case "$PWD" in
         *$'\e'*|*$'\a'*|*$'\n'*|*$'\r'*) printf '\033]633;AlacrtermCwd;\007' ;;
         *) printf '\033]633;AlacrtermCwd;%s\007' "$PWD" ;;
@@ -28,6 +32,8 @@ alacrterm_refresh_completions() {
         case "$alacrterm_name" in ''|*[!a-zA-Z0-9_.:+-]*) continue ;; esac
         printf '\033]633;Command;%s\007' "$alacrterm_name"
     done < <(compgen -c)
+    __alacrterm_inventory_signature="$PATH|$(alias -p)|$(declare -F)"
+    __alacrterm_last_refresh=$SECONDS
 }
 alacrterm_refresh_completions
 printf '\033]633;AlacrtermShell;posix\007'

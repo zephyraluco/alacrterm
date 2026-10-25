@@ -62,7 +62,8 @@ Windows/macOS GUI 和 PowerShell 启动脚本尚需原生验证。
 命令名称按字母排序，与最近历史去重合并；仅在输入命令的第一个词时提供名称候选。
 列表最多保留 4096 个名称，接受普通字母、数字及 `_.:+-`，特殊名称继续使用 shell 原生补全。
 
-新增别名、函数或改变 PATH 后，执行 `alacrterm_refresh_completions` 更新列表。
+新增别名、函数或改变 PATH 后，在下一个提示符自动刷新列表；每隔 30 秒的提示符还会重新检查 PATH 命令。
+也可执行 `alacrterm_refresh_completions` 立即更新。
 重连清除旧命令列表，等待新 shell 上报。历史仍按分屏保留在内存中。
 
 ## 路径提供者

@@ -5,6 +5,10 @@ __alacrterm_integrated=1
 autoload -Uz add-zsh-hook
 __alacrterm_precmd() {
     local alacrterm_status=$?
+    local alacrterm_signature="$PATH|${(ok)aliases}|${(ok)functions}"
+    if [[ $alacrterm_signature != "${__alacrterm_inventory_signature-}" ]] || (( SECONDS - ${__alacrterm_last_refresh:-0} >= 30 )); then
+        alacrterm_refresh_completions
+    fi
     case "$PWD" in
         *$'\e'*|*$'\a'*|*$'\n'*|*$'\r'*) printf '\033]633;AlacrtermCwd;\007' ;;
         *) printf '\033]633;AlacrtermCwd;%s\007' "$PWD" ;;
@@ -25,6 +29,8 @@ alacrterm_refresh_completions() {
         case "$alacrterm_name" in ''|*[!a-zA-Z0-9_.:+-]*) continue ;; esac
         printf '\033]633;Command;%s\007' "$alacrterm_name"
     done
+    __alacrterm_inventory_signature="$PATH|${(ok)aliases}|${(ok)functions}"
+    __alacrterm_last_refresh=$SECONDS
 }
 alacrterm_refresh_completions
 printf '\033]633;AlacrtermShell;posix\007'
