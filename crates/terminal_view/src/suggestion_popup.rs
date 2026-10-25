@@ -6,7 +6,7 @@ use gpui::{
 };
 use gpui_kit::{
     base::Positioner,
-    component::{list::ListItem, scroll::Scrollbar, v_virtual_list},
+    component::{Icon, IconName, kbd::Kbd, list::ListItem, scroll::Scrollbar, v_virtual_list},
 };
 use terminal::Modes;
 impl TerminalView {
@@ -102,6 +102,20 @@ impl TerminalView {
                                         .items_center()
                                         .gap_2()
                                         .child(
+                                            Icon::new(match command.kind {
+                                                crate::completion::Kind::Directory => {
+                                                    IconName::Folder
+                                                }
+                                                crate::completion::Kind::File => IconName::File,
+                                                crate::completion::Kind::Command => {
+                                                    IconName::SquareTerminal
+                                                }
+                                                _ => IconName::FileText,
+                                            })
+                                            .size_4()
+                                            .text_color(foreground.opacity(0.65)),
+                                        )
+                                        .child(
                                             div()
                                                 .w(px(44.))
                                                 .flex_shrink_0()
@@ -129,6 +143,31 @@ impl TerminalView {
         )
         .track_scroll(&self.suggestion_scroll)
         .size_full();
+        let mut key_hints = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(footer)
+            .px_3()
+            .text_xs()
+            .overflow_hidden()
+            .text_color(foreground.opacity(0.65))
+            .child(format!("{} 项", self.suggestions.candidates.len()));
+        for (key, label) in [
+            ("up", ""),
+            ("down", "选择"),
+            ("tab", "插入"),
+            ("escape", "关闭"),
+        ] {
+            if width < px(340.) && matches!(key, "up" | "down") {
+                continue;
+            }
+            if let Ok(stroke) = gpui::Keystroke::parse(key) {
+                key_hints = key_hints
+                    .child(Kbd::new(stroke).appearance(false))
+                    .child(label);
+            }
+        }
         let surface = div()
             .id("terminal-suggestions")
             .w(width)
@@ -155,17 +194,7 @@ impl TerminalView {
                     .child(list)
                     .child(Scrollbar::vertical(&self.suggestion_scroll).viewport_from_layout()),
             )
-            .child(
-                div()
-                    .h(footer)
-                    .px_3()
-                    .text_xs()
-                    .text_color(foreground.opacity(0.65))
-                    .child(format!(
-                        "{} 项 · ↑↓ 选择 · Tab 插入 · Esc 关闭",
-                        self.suggestions.candidates.len()
-                    )),
-            );
+            .child(key_hints);
         // Pane-local geometry above prevents a window-positioned surface spilling into
         // a neighboring split. Positioner supplies deferred overlay layout and clamping.
         Some(
