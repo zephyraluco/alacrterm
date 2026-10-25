@@ -11,7 +11,7 @@ pub const SCHEMES: &[(&str, &str)] = &[
     ("solarized-dark", "Solarized Dark"),
 ];
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 pub struct ColorScheme {
     pub name: String,
     pub colors: HashMap<String, String>,
@@ -80,15 +80,31 @@ fn embedded(id: &str) -> Option<&'static str> {
     })
 }
 
-/// Unknown IDs are ignored; missing or invalid overrides use the embedded palette.
-pub fn load(id: &str) -> Option<ColorScheme> {
-    let fallback = embedded(id)?;
-    if let Some((_, text)) = crate::read_config_file(&format!("terminal-colors/{id}.json"))
-        && let Some(scheme) = parse(&text)
-    {
-        return Some(scheme);
-    }
-    parse(fallback)
+/// Parse and validate one palette; its filename is the stable resource ID.
+pub fn load_file(
+    path: &std::path::Path,
+    text: &str,
+) -> anyhow::Result<util::resource_registry::Resource<ColorScheme>> {
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("invalid palette filename"))?;
+    let scheme =
+        parse(text).ok_or_else(|| anyhow::anyhow!("invalid or incomplete color scheme"))?;
+    Ok(util::resource_registry::Resource::new(id, scheme))
+}
+
+/// Built-in resources remain available when external palette files disappear.
+pub fn defaults() -> anyhow::Result<Vec<util::resource_registry::Resource<ColorScheme>>> {
+    SCHEMES
+        .iter()
+        .map(|(id, _)| {
+            let text =
+                embedded(id).ok_or_else(|| anyhow::anyhow!("missing embedded palette: {id}"))?;
+            load_file(std::path::Path::new(&format!("{id}.json")), text)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -101,7 +117,7 @@ mod tests {
             assert_eq!(&scheme.name, name);
             assert_eq!(scheme.colors.len(), 27);
         }
-        assert!(load("../../config/app").is_none());
+        assert!(embedded("../../config/app").is_none());
     }
     #[test]
     fn invalid_or_incomplete_palettes_are_rejected() {

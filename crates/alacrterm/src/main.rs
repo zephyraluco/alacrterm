@@ -13,6 +13,7 @@ mod keymap;
 mod pane_layout;
 mod preview_cache;
 mod preview_window;
+mod resource_registry;
 mod settings_window;
 mod sidebar_panel;
 mod status_bar;
@@ -197,6 +198,7 @@ struct AppRoot {
     context_sync_scheduled: bool,
     wayx_status: platform::WayxStatus,
     _wayx_watch: gpui::Task<()>,
+    _palette_watch: Subscription,
 }
 
 /// 当前活动会话的「快照」。
@@ -336,6 +338,12 @@ impl AppRoot {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock = Self::build_dock(window, cx);
+        let palette_watch = cx.observe_global::<config::ColorSchemeRegistry>(|root, cx| {
+            if let Some(render) = config::refresh_color_scheme(cx) {
+                root.apply_render_settings(render, cx);
+            }
+            cx.refresh_windows();
+        });
         let sessions = cx.new(|_| SessionsState::new());
         let app_root = cx.weak_entity();
         let transfers = cx.new(|_| TransferManager::default());
@@ -376,6 +384,7 @@ impl AppRoot {
             context_sync_scheduled: false,
             wayx_status: platform::wayx_status(),
             _wayx_watch: wayx_watch,
+            _palette_watch: palette_watch,
         };
         this.dock_layout_sub = Some(cx.subscribe_in(
             &this.dock,

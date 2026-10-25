@@ -71,7 +71,7 @@ impl SettingsWindow {
     }
 
     /// 「终端」页。
-    fn terminal_page(&self) -> SettingPage {
+    fn terminal_page(&self, cx: &App) -> SettingPage {
         SettingPage::new("终端")
             .icon(Icon::new(IconName::SquareTerminal))
             .default_open(true)
@@ -80,7 +80,7 @@ impl SettingsWindow {
                     .item(render_item(
                         "终端配色",
                         "立即应用到所有终端并保存。默认／自定义使用 terminal.json 中的颜色。",
-                        terminal_color_dropdown(self.app_root.clone()),
+                        terminal_color_dropdown(self.app_root.clone(), cx),
                     ))
                     .item(render_item(
                         "字体",
@@ -285,17 +285,20 @@ fn theme_dropdown(cx: &App, mode: ThemeMode) -> SettingField<SharedString> {
     )
 }
 
-fn terminal_color_dropdown(root: WeakEntity<AppRoot>) -> SettingField<SharedString> {
+fn terminal_color_dropdown(root: WeakEntity<AppRoot>, cx: &App) -> SettingField<SharedString> {
     let mut options = vec![(SharedString::default(), "默认／自定义".into())];
-    options.extend(settings::color_schemes::SCHEMES.iter()
-        .map(|(id, name)| (SharedString::from((*id).to_owned()), SharedString::from((*name).to_owned()))));
+    let mut entries: Vec<_> = config::ColorSchemeRegistry::global(cx).entries().iter()
+        .map(|(id, scheme)| (SharedString::from(id.clone()), SharedString::from(scheme.name.clone())))
+        .collect();
+    entries.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then(a.0.cmp(&b.0)));
+    options.extend(entries);
     SettingField::scrollable_dropdown(
         options,
         |cx: &App| config::settings(cx).color_scheme.clone().unwrap_or_default(),
         move |value: SharedString, cx: &mut App| {
             let id = (!value.is_empty()).then_some(value);
-            let palette = config::palette_settings(id.as_deref());
-            config::settings_mut(cx).color_scheme = id;
+            let palette = config::palette_settings(id.as_deref(), cx);
+            config::select_color_scheme(id, cx);
             update_render(&root, cx, |render| {
                 render.colors = palette.colors;
                 render.selection_color = palette.selection_color;
@@ -376,7 +379,7 @@ impl Render for SettingsWindow {
                     .child(
                         Settings::new("app-settings")
                             .page(self.theme_page(cx))
-                            .page(self.terminal_page()),
+                            .page(self.terminal_page(cx)),
                     ),
             )
             // 覆盖层由 gpui-kit `Root` 渲染。

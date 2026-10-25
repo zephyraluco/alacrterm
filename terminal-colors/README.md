@@ -14,8 +14,10 @@ Palette references:
 - https://ethanschoonover.com/solarized/
 
 Files are embedded in the application. An executable-adjacent `terminal-colors/`
-directory can override them with the same filenames; development also searches the
-repository directory. Missing/invalid overrides fall back to embedded data.
+directory can override them with the same filenames. The app watches the first
+existing `terminal-colors/` directory beside the executable or in the repository.
+Missing overrides use embedded data. Invalid edits retain the last valid version;
+invalid files on first load use the embedded palette where available.
 
 Choose a palette in **设置 → 终端 → 终端配色**. Changes apply immediately to
 existing tabs and split panes, and new sessions use the same palette. The chosen
@@ -24,5 +26,10 @@ A named palette takes precedence over that file's custom color keys. Choosing
 **默认／自定义** restores those custom colors (or renderer defaults if absent).
 Font, completion and unknown configuration fields are preserved.
 
-Edit the JSON files to customize a palette, then reselect it or restart the app.
+Edit and save a JSON file to update the selected palette automatically, after a
+short debounce. New JSON files appear in the dropdown; their filenames are stable
+IDs and their `name` fields are display labels. Deleting an override restores its
+embedded palette. Deleting a custom-only palette temporarily uses default/custom
+colors, retaining the selected ID so recreating the file restores it automatically.
+Hot reload never writes `config/terminal.json` and never changes font/input options.
 UI themes remain independent of terminal palettes.

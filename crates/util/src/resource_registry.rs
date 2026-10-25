@@ -275,6 +275,27 @@ mod tests {
         registry.apply(files);
         assert!(registry.get("b").is_none());
     }
+    #[test]
+    fn equal_values_do_not_refresh_and_external_values_survive_default_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.json");
+        let mut registry = ResourceRegistry::default();
+        registry.register_defaults([Resource::new("sample", 1)]);
+        let mut files = DirectoryResources::default();
+        std::fs::write(&path, "1").unwrap();
+        files.reload(dir.path(), &load).unwrap();
+        assert!(!registry.apply(files.clone()));
+        registry.register_defaults([Resource::new("sample", 9)]);
+        assert_eq!(*registry.get("sample").unwrap(), 1);
+        let previous = files.clone();
+        std::fs::write(&path, "01").unwrap();
+        files.reload(dir.path(), &load).unwrap();
+        assert_eq!(files, previous);
+        std::fs::remove_file(path).unwrap();
+        files.reload(dir.path(), &load).unwrap();
+        assert!(registry.apply(files));
+        assert_eq!(*registry.get("sample").unwrap(), 9);
+    }
     fn receive<T>(receiver: &async_channel::Receiver<T>) -> T {
         let start = std::time::Instant::now();
         loop {

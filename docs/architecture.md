@@ -33,7 +33,8 @@ stage receives targeted tests and workspace compilation before its own commit.
 ## Implemented ownership
 
 - `settings` owns app/terminal file models, completion policy, configuration path
-  selection, preference persistence and tolerant keymap parsing. It depends only
+  selection, preference persistence and tolerant keymap parsing. Palette loaders
+  validate resources for the generic registry; they do not perform GUI operations. It depends only
   on serde/serde_json and general utilities. The existing `config/*.json` formats
   and executable-directory → repository fallback are unchanged. Saving terminal
   preferences preserves palette and unknown fields.
@@ -69,3 +70,27 @@ such as colors, pixels and font weights remain in terminal_view/GPUI adapters.
   project completion, middle-word insertion and password-input isolation.
 
 Windows/macOS native execution still requires validation on their respective hosts.
+
+## Generic resource hot reload
+
+`util::resource_registry` provides a framework-independent resource store and
+`DirectoryWatch`. Resources are keyed by ID and shared with `Arc`; external JSON
+files override embedded defaults. A failed file load retains its last valid
+resource, deletion restores defaults, and duplicate file IDs reject the scan.
+`PartialEq` suppresses updates for semantically identical contents.
+
+DirectoryWatch establishes the native notify watch before scanning, merges events
+with a 150ms debounce, and reads/parses on a worker thread. Its private bounded
+channel bridges results to the UI; it is not a public subscription system.
+Dropping the watch closes delivery, wakes the worker and releases its native watch.
+
+`alacrterm::resource_registry` is a thin GPUI Global adapter with `global`,
+`global_mut`, `register_defaults`, `get`, `entries` and `watch_dir`. Replacing a
+watch cancels the old task and closes the old watcher; generation checks discard
+obsolete deliveries. No new crate or GPUI dependency in util/settings is needed.
+
+The color registry uses the first existing external directory in application path
+order, plus the six embedded defaults. Settings candidates come from the registry,
+including new files. AppRoot observes the global and reapplies only the selected
+resource's changed colors across tabs and splits. Font/completion state and the
+saved choice are preserved; watcher events never save preferences.

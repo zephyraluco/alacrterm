@@ -1,7 +1,12 @@
 //! 应用配置：终端渲染参数（`config/terminal.json`）与界面主题（`themes/*.json` + `config/app.json`）。
 //! 运行期状态在 [`Settings`] 全局，查找顺序「exe 同级」→「仓库根」，缺失项回退默认值。
 
-use std::path::{Path, PathBuf};
+use settings::color_schemes::ColorScheme;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+pub(crate) type ColorSchemeRegistry = crate::resource_registry::ResourceRegistry<ColorScheme>;
 
 use gpui::{App, FontWeight, Hsla, SharedString, px};
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
@@ -14,6 +19,7 @@ const THEMES_DIR: &str = "themes";
 
 pub(crate) struct Settings {
     pub(crate) color_scheme: Option<SharedString>,
+    applied_color_scheme: Option<Arc<ColorScheme>>,
     /// 终端渲染参数。
     pub(crate) render: RenderSettings,
     /// 深色 / 浅色槽位用的主题名；`None` = 跟随内置主题。
@@ -25,21 +31,43 @@ impl gpui::Global for Settings {}
 
 /// 启动时读完配置并装进全局。
 pub(crate) fn install(cx: &mut App) {
+    ColorSchemeRegistry::init(cx);
+    match settings::color_schemes::defaults() {
+        Ok(defaults) => ColorSchemeRegistry::global_mut(cx).register_defaults(defaults),
+        Err(error) => log::error!("Embedded palettes: {error:#}"),
+    }
     let file = settings::load_terminal_config();
-    let color_scheme = file
-        .color_scheme
+    // Keep unknown IDs: a custom palette may arrive with the initial async scan.
+    let color_scheme = file.color_scheme.clone().map(SharedString::from);
+    let applied_color_scheme = color_scheme
         .as_deref()
-        .filter(|id| settings::color_schemes::load(id).is_some())
-        .map(|id| SharedString::from(id.to_owned()));
+        .and_then(|id| ColorSchemeRegistry::global(cx).get(id));
     let mut render = RenderSettings::default();
     apply_render_settings(&mut render, file);
+    if let Some(scheme) = &applied_color_scheme {
+        apply_palette(&mut render, scheme);
+    }
     let app = load_app_config();
     cx.set_global(Settings {
         render,
         color_scheme,
+        applied_color_scheme,
         dark_theme: app.dark_theme.map(Into::into),
         light_theme: app.light_theme.map(Into::into),
     });
+    let directories = candidates("terminal-colors");
+    if let Some(directory) = directories
+        .iter()
+        .find(|path| path.is_dir())
+        .or(directories.first())
+        && let Err(error) = ColorSchemeRegistry::watch_dir(
+            directory.clone(),
+            settings::color_schemes::load_file,
+            cx,
+        )
+    {
+        log::warn!("Palette hot reload: {error:#}");
+    }
 }
 
 pub(crate) fn settings(cx: &App) -> &Settings {
@@ -51,11 +79,14 @@ pub(crate) fn settings_mut(cx: &mut App) -> &mut Settings {
 }
 
 /// Resolve only the selected palette; callers retain font and input preferences.
-pub(crate) fn palette_settings(id: Option<&str>) -> RenderSettings {
+pub(crate) fn palette_settings(id: Option<&str>, cx: &App) -> RenderSettings {
     let mut file = settings::load_terminal_config();
-    file.color_scheme = id.map(str::to_owned);
+    file.color_scheme = None;
     let mut render = RenderSettings::default();
     apply_render_settings(&mut render, file);
+    if let Some(scheme) = id.and_then(|id| ColorSchemeRegistry::global(cx).get(id)) {
+        apply_palette(&mut render, &scheme);
+    }
     render
 }
 
@@ -154,28 +185,52 @@ fn apply_render_settings(settings: &mut RenderSettings, file: TerminalFile) {
     if let Some(color) = file.link_color.as_deref().and_then(parse_color) {
         settings.link_color = color;
     }
-    // A named scheme takes precedence over legacy custom colors. The custom
-    // values remain on disk so selecting the default/custom option restores them.
-    if let Some(scheme) = file
-        .color_scheme
-        .as_deref()
-        .and_then(settings::color_schemes::load)
-    {
-        for (key, value) in &scheme.colors {
-            if let Some(color) = parse_color(value) {
-                apply_color(&mut settings.colors, key, color);
-            }
-        }
-        if let Some(color) = parse_color(&scheme.selection_color) {
-            settings.selection_color = color;
-        }
-        if let Some(color) = parse_color(&scheme.search_match_color) {
-            settings.search_match_color = color;
-        }
-        if let Some(color) = parse_color(&scheme.link_color) {
-            settings.link_color = color;
+}
+
+/// Convert a validated palette to rendering types without changing other settings.
+fn apply_palette(settings: &mut RenderSettings, scheme: &ColorScheme) {
+    for (key, value) in &scheme.colors {
+        if let Some(color) = parse_color(value) {
+            apply_color(&mut settings.colors, key, color);
         }
     }
+    if let Some(color) = parse_color(&scheme.selection_color) {
+        settings.selection_color = color;
+    }
+    if let Some(color) = parse_color(&scheme.search_match_color) {
+        settings.search_match_color = color;
+    }
+    if let Some(color) = parse_color(&scheme.link_color) {
+        settings.link_color = color;
+    }
+}
+
+/// A watcher update applies colors only; it must not persist terminal preferences.
+pub(crate) fn refresh_color_scheme(cx: &mut App) -> Option<RenderSettings> {
+    let selected = settings(cx).color_scheme.clone();
+    let next = selected
+        .as_deref()
+        .and_then(|id| ColorSchemeRegistry::global(cx).get(id));
+    if next == settings(cx).applied_color_scheme {
+        return None;
+    }
+    let palette = palette_settings(selected.as_deref(), cx);
+    let state = settings_mut(cx);
+    state.applied_color_scheme = next;
+    state.render.colors = palette.colors;
+    state.render.selection_color = palette.selection_color;
+    state.render.search_match_color = palette.search_match_color;
+    state.render.link_color = palette.link_color;
+    Some(state.render.clone())
+}
+
+pub(crate) fn select_color_scheme(id: Option<SharedString>, cx: &mut App) {
+    let applied = id
+        .as_deref()
+        .and_then(|id| ColorSchemeRegistry::global(cx).get(id));
+    let state = settings_mut(cx);
+    state.color_scheme = id;
+    state.applied_color_scheme = applied;
 }
 
 /// 把调色板里的一个键写回 [`TerminalColors`]。
@@ -375,6 +430,12 @@ mod palette_tests {
         let file: TerminalFile = serde_json::from_str(r##"{"color_scheme":"nord","font_size":19,"colors":{"terminal_background":"#ff0000"}}"##).unwrap();
         let mut render = RenderSettings::default();
         apply_render_settings(&mut render, file);
+        let scheme = settings::color_schemes::defaults()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == "nord")
+            .unwrap();
+        apply_palette(&mut render, &scheme.value);
         assert_eq!(
             render.colors.terminal_background,
             parse_color("#2e3440").unwrap()
