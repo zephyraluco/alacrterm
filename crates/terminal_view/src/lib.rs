@@ -13,12 +13,12 @@ mod command_specs;
 mod completion;
 mod contrast;
 mod path_suggestions;
-mod prompt_input;
 mod project_completions;
+mod prompt_input;
 mod scrollbar;
 mod suggestion_popup;
-mod suggestions;
 mod suggestion_settings;
+mod suggestions;
 pub use suggestion_settings::SuggestionSettings;
 pub mod terminal_element;
 
@@ -97,7 +97,12 @@ pub struct TerminalView {
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
     prompt_anchor: Option<prompt_input::PromptAnchor>,
     input_recovery: Option<(u64, std::time::Instant)>,
-    project_cache: Option<(project_completions::Provider, String, std::time::Instant, Vec<String>)>,
+    project_cache: Option<(
+        project_completions::Provider,
+        String,
+        std::time::Instant,
+        Vec<String>,
+    )>,
     path_cache: Option<(String, std::time::Instant, Vec<path_suggestions::Entry>)>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
@@ -115,12 +120,17 @@ impl TerminalView {
     /// 本地会话传 `None` 即可。
     pub fn new(
         working_directory: Option<PathBuf>,
-        target: TerminalTarget,
+        mut target: TerminalTarget,
         host_key: Option<HostKeyPromptHandler>,
         settings: Arc<TerminalRenderSettings>,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
+        target.configure_shell_integration(
+            settings.suggestions.remote_integration
+                && std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
+                    != Some(std::ffi::OsStr::new("0")),
+        );
         let remote = target.is_ssh();
         let env = std::env::vars().collect();
         let builder = TerminalBuilder::new(working_directory, target, env, cx);
@@ -275,10 +285,17 @@ impl TerminalView {
         self.suggestions.settings = self.settings.suggestions;
         self.suggestions.dismiss();
         self.suggestion_task = gpui::Task::ready(());
-        if !self.settings.suggestions.history { self.suggestions.clear_history(); }
+        if !self.settings.suggestions.history {
+            self.suggestions.clear_history();
+        }
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.set_cursor_shape(self.settings.cursor_shape);
+                terminal.configure_remote_integration(
+                    self.settings.suggestions.remote_integration
+                        && std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
+                            != Some(std::ffi::OsStr::new("0")),
+                );
             });
         }
         cx.notify();
@@ -549,7 +566,13 @@ impl TerminalView {
                 cx.notify();
                 let query = this.suggestions.path_query()?;
                 let revision = this.suggestions.revision;
-                let project = this.suggestions.settings.dynamic.then(|| project_completions::Query::parse(&query)).flatten().filter(|query| this.suggestions.has_command(query.command()));
+                let project = this
+                    .suggestions
+                    .settings
+                    .dynamic
+                    .then(|| project_completions::Query::parse(&query))
+                    .flatten()
+                    .filter(|query| this.suggestions.has_command(query.command()));
                 let project_cache = this.project_cache.clone();
                 let paths = this.suggestions.settings.paths;
                 let cwd = this.suggestions.cwd.clone().unwrap_or_default();
@@ -559,20 +582,35 @@ impl TerminalView {
                     this.remote,
                     this.remote_fs(cx),
                     this.path_cache.clone(),
-                    revision, project, project_cache, paths,
+                    revision,
+                    project,
+                    project_cache,
+                    paths,
                 ))
             }) else {
                 return;
             };
-            let Some((query, cwd, remote, fs, cache, revision, project, project_cache, paths)) = request else {
+            let Some((query, cwd, remote, fs, cache, revision, project, project_cache, paths)) =
+                request
+            else {
                 return;
             };
             if let Some(project) = project {
-                if cwd.is_empty() { return; }
-                let values = if let Some((_, _, _, values)) = project_cache.filter(|(provider, key, time, _)| !manual && *provider == project.provider && *key == cwd && time.elapsed() < Duration::from_secs(3)) {
+                if cwd.is_empty() {
+                    return;
+                }
+                let values = if let Some((_, _, _, values)) =
+                    project_cache.filter(|(provider, key, time, _)| {
+                        !manual
+                            && *provider == project.provider
+                            && *key == cwd
+                            && time.elapsed() < Duration::from_secs(3)
+                    }) {
                     values
                 } else if remote {
-                    let Some(fs) = &fs else { return; };
+                    let Some(fs) = &fs else {
+                        return;
+                    };
                     let request = Box::pin(project_completions::remote(project.provider, &cwd, fs));
                     let deadline = Box::pin(cx.background_executor().timer(Duration::from_secs(5)));
                     match futures::future::select(request, deadline).await {
@@ -582,19 +620,29 @@ impl TerminalView {
                 } else {
                     let provider = project.provider;
                     let directory = std::path::PathBuf::from(&cwd);
-                    cx.background_executor().spawn(async move { project_completions::local(provider, &directory) }).await
+                    cx.background_executor()
+                        .spawn(async move { project_completions::local(provider, &directory) })
+                        .await
                 };
                 let candidates = project.candidates(values.clone());
                 let _ = this.update(cx, |this, cx| {
-                    if this.focused && this.ime_state.is_none() && this.suggestions.revision == revision && this.suggestions.path_query().as_ref() == Some(&query) && this.suggestions.cwd.as_deref().unwrap_or("") == cwd {
-                        this.project_cache = Some((project.provider, cwd, std::time::Instant::now(), values));
+                    if this.focused
+                        && this.ime_state.is_none()
+                        && this.suggestions.revision == revision
+                        && this.suggestions.path_query().as_ref() == Some(&query)
+                        && this.suggestions.cwd.as_deref().unwrap_or("") == cwd
+                    {
+                        this.project_cache =
+                            Some((project.provider, cwd, std::time::Instant::now(), values));
                         this.suggestions.add_paths(candidates);
                         cx.notify();
                     }
                 });
                 return;
             }
-            if !paths { return; }
+            if !paths {
+                return;
+            }
             let directory = if remote {
                 let Some(fs) = &fs else {
                     return;

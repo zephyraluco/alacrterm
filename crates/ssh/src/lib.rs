@@ -49,6 +49,7 @@ mod fs;
 mod handler;
 mod params;
 mod session;
+mod shell_integration;
 mod wayx;
 
 pub use error::SshError;
@@ -57,7 +58,7 @@ pub use fs::{
     TransferProgress,
 };
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
-pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize};
+pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize, ShellIntegration};
 pub use session::{SshOutput, SshEvent, SshSession};
 
 pub use wayx::{WayxStatus, start_wayx, stop_wayx, wayx_status, shutdown_wayx};

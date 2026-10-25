@@ -59,7 +59,9 @@ pub struct SshOutput {
 }
 impl std::ops::Deref for SshOutput {
     type Target = [u8];
-    fn deref(&self) -> &[u8] { &self.bytes }
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 const OUTPUT_BUDGET: usize = 1024 * 1024;
 const OUTPUT_CHUNK: usize = 32 * 1024;
@@ -293,6 +295,15 @@ async fn run_session(
 
     auth::authenticate(&mut handle, params, sink).await?;
 
+    let integration = if matches!(launch, Launch::Shell(_)) {
+        if let Some(scripts) = params.shell_integration {
+            crate::shell_integration::prepare(&handle, scripts).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut channel = handle
         .channel_open_session()
         .await
@@ -336,7 +347,31 @@ async fn run_session(
                     &[],
                 )
                 .await?;
-            channel.request_shell(false).await?;
+            let mut integrated = false;
+            if let Some(command) = integration {
+                if channel.exec(true, command).await.is_ok() {
+                    integrated = tokio::time::timeout(Duration::from_secs(2), async {
+                        loop {
+                            match channel.wait().await {
+                                Some(ChannelMsg::Success) => return true,
+                                Some(ChannelMsg::Data { data }) => {
+                                    sink.data(&data).await;
+                                    return true;
+                                }
+                                Some(ChannelMsg::Failure | ChannelMsg::Close) | None => {
+                                    return false;
+                                }
+                                _ => {}
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap_or(false);
+                }
+            }
+            if !integrated {
+                channel.request_shell(false).await?;
+            }
             true
         }
         Launch::Exec(command) => {
@@ -365,7 +400,9 @@ async fn run_session(
                 Some(ChannelMsg::ExtendedData { data, .. }) => sink.data(&data).await,
                 Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
                 // EOF / Close / 流断掉都算会话结束。
-                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => break,
+                // EOF ends stdout, but OpenSSH can send exit-status afterwards.
+                Some(ChannelMsg::Eof) => {},
+                Some(ChannelMsg::Close) | None => break,
                 Some(_) => {}
             },
             command = commands.recv() => match command {

@@ -27,7 +27,9 @@
 随 PTY 生命周期清理。显式配置了自定义 shell 参数时保持原启动方式，不自动注入。
 设置 `ALACRTERM_SHELL_INTEGRATION=0` 可禁止本地自动加载。
 
-SSH 不会自动上传脚本或修改远端配置。将对应脚本复制到远端后，在交互会话中加载：
+SSH 默认会探测远端 shell，对 Bash/Zsh 使用会话临时目录加载集成；不修改远端启动文件。
+探测、临时目录创建或 exec 不支持时静默保留普通 shell。可在设置中关闭新连接的自动集成。
+也可手动把对应脚本复制到远端后，在交互会话中加载：
 
 ```sh
 # Bash
@@ -118,3 +120,11 @@ SSH 补全查询与首次连接各有 5 秒超时，取消的排队请求直接�
 不执行项目脚本、Git 命令、钩子或补全生成器；名称只接受可直接插入的普通字符。
 本地后台读取；SSH 使用独立、懒加载的 SFTP 补全 worker，不占用文件浏览或传输 worker。
 元数据文件最多 256 KiB，远端提供者查询总时限 5 秒，缓存 3 秒，Ctrl+Space 跳过缓存。
+
+## SSH 会话级集成
+
+远端 Bash 读取 `/etc/profile` 和首个个人登录配置后加载集成；Zsh 按 env/profile/rc/login 顺序加载原配置。
+临时文件只存在于随机私有目录，正常退出或收到终止信号后清理；不追加或替换用户的 rc/profile。
+Bash 使用交互式 rc 包装器读取登录配置，`login_shell` 标志与原生登录 shell 不完全相同；有依赖该标志的配置时可关闭自动集成并手动加载。
+PowerShell/Fish 等远端 shell 目前回退普通 shell，PowerShell 可手动加载脚本。
+`ALACRTERM_SHELL_INTEGRATION=0` 同时禁止本地自动加载和新 SSH 会话的自动集成。

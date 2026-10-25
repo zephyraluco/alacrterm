@@ -2731,6 +2731,11 @@ impl Terminal {
         self.backend.remote_fs()
     }
 
+    /// Updates only future reconnects; the current remote shell is untouched.
+    pub fn configure_remote_integration(&mut self, enabled: bool) {
+        self.template.target.configure_shell_integration(enabled);
+    }
+
     /// Reconnect a finished SSH session while retaining its terminal grid and history.
     pub fn reconnect(&mut self, cx: &mut Context<Self>) -> bool {
         let TerminalTarget::Ssh(params) = &self.template.target else {
