@@ -1,5 +1,6 @@
 //! UI-independent application configuration and persistence.
 pub mod keymap;
+pub mod color_schemes;
 mod suggestions;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -70,6 +71,7 @@ pub fn shown_path(path: &Path) -> String {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TerminalFile {
+    pub color_scheme: Option<String>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub font_weight: Option<f32>,
