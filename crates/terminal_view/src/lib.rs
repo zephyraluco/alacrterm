@@ -9,12 +9,13 @@
 //! - IME 组合文本状态
 //! - 高性能网格渲染（批量文本 / 背景矩形 / 块字符 / 光标 / 高亮）
 
-mod contrast;
+mod command_specs;
 mod completion;
+mod contrast;
 mod path_suggestions;
+mod prompt_input;
 mod scrollbar;
 mod suggestion_popup;
-mod command_specs;
 mod suggestions;
 pub mod terminal_element;
 
@@ -91,6 +92,8 @@ pub struct TerminalView {
     suggestions: suggestions::Suggestions,
     suggestion_task: gpui::Task<()>,
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
+    prompt_anchor: Option<prompt_input::PromptAnchor>,
+    input_recovery: Option<(u64, std::time::Instant)>,
     path_cache: Option<(String, std::time::Instant, Vec<path_suggestions::Entry>)>,
     _blink_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
@@ -220,6 +223,8 @@ impl TerminalView {
             suggestions: Default::default(),
             suggestion_task: gpui::Task::ready(()),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
+            prompt_anchor: None,
+            input_recovery: None,
             path_cache: None,
             _blink_task: blink_task,
             grid_cache: Default::default(),
@@ -241,6 +246,8 @@ impl TerminalView {
                 self.suggestions.cwd = None;
                 self.suggestions.powershell = None;
                 self.path_cache = None;
+                self.prompt_anchor = None;
+                self.input_recovery = None;
                 self.terminal_blinking = None;
                 self.ime_state = None;
                 cx.notify();
@@ -295,7 +302,18 @@ impl TerminalView {
             TerminalEvent::ShellCommand(command) => self.suggestions.add_command(command),
             TerminalEvent::ShellContext(key, value) => self.suggestions.context(key, value),
             TerminalEvent::Prompt(event) => {
-                self.suggestions.phase(*event);
+                if *event != terminal::PromptEvent::Input {
+                    self.prompt_anchor = None;
+                    self.input_recovery = None;
+                }
+                if *event == terminal::PromptEvent::Input
+                    && self.prompt_anchor.is_some()
+                    && !self.suggestions.text.is_empty()
+                {
+                    self.request_input_recovery(cx);
+                } else {
+                    self.suggestions.phase(*event);
+                }
                 cx.notify();
             }
             TerminalEvent::Wakeup | TerminalEvent::SelectionsChanged => cx.notify(),
@@ -516,7 +534,8 @@ impl TerminalView {
                     return None;
                 }
                 this.suggestions.refresh(manual);
-                this.suggestion_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                this.suggestion_scroll
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
                 let query = this.suggestions.path_query()?;
                 let revision = this.suggestions.revision;
@@ -544,9 +563,7 @@ impl TerminalView {
                 } else {
                     None
                 };
-                let Some(directory) =
-                    query.remote_directory(&cwd, home.as_deref())
-                else {
+                let Some(directory) = query.remote_directory(&cwd, home.as_deref()) else {
                     return;
                 };
                 directory
@@ -626,23 +643,87 @@ impl TerminalView {
         });
     }
 
+    fn request_input_recovery(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.prompt_anchor.is_none() {
+            return;
+        }
+        let generation = self
+            .terminal
+            .as_ref()
+            .map_or(0, |terminal| terminal.read(cx).content_generation());
+        self.input_recovery = Some((generation, std::time::Instant::now()));
+        self.suggestions.invalidate();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(80))
+                .await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+    fn recover_input(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        let Some((generation, since)) = self.input_recovery else {
+            return;
+        };
+        if since.elapsed() < Duration::from_millis(80) || self.ime_state.is_some() {
+            return;
+        }
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+        terminal.update(cx, |terminal, cx| terminal.sync(window, cx));
+        let terminal = terminal.read(cx);
+        if terminal.content_generation() == generation
+            || terminal.vi_mode_enabled()
+            || terminal
+                .last_content()
+                .mode
+                .intersects(Modes::ALT_SCREEN | Modes::MOUSE_MODE)
+        {
+            return;
+        }
+        let recovered = self
+            .prompt_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.recover(terminal.last_content()));
+        if let Some((text, cursor)) = recovered {
+            self.input_recovery = None;
+            self.suggestions.synchronize(text, cursor);
+            self.schedule_suggestions(false, cx);
+        }
+    }
+
     fn accept_suggestion(&mut self, cx: &mut gpui::Context<Self>) {
-        let retrigger = self.suggestions.candidates.get(self.suggestions.selected).is_some_and(|item| item.retrigger);
+        if let Some((text, cursor)) = self.terminal.as_ref().and_then(|terminal| {
+            self.prompt_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.recover(terminal.read(cx).last_content()))
+        }) {
+            if text != self.suggestions.text || cursor != self.suggestions.cursor {
+                self.suggestions.synchronize(text, cursor);
+                self.schedule_suggestions(false, cx);
+                return;
+            }
+        }
+
+        let retrigger = self
+            .suggestions
+            .candidates
+            .get(self.suggestions.selected)
+            .is_some_and(|item| item.retrigger);
         if let Some(suffix) = self.suggestions.accept() {
             if let Some(terminal) = &self.terminal {
                 terminal.update(cx, |terminal, _| terminal.input(suffix.into_bytes()));
             }
-            if retrigger { self.suggestions.trigger(); self.schedule_suggestions(true, cx); }
+            if retrigger {
+                self.suggestions.trigger();
+                self.schedule_suggestions(true, cx);
+            }
         }
         cx.notify();
     }
 
-    fn on_key_down(
-        &mut self,
-        e: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    fn on_key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut gpui::Context<Self>) {
         if self.ime_state.is_some() {
             return;
         }
@@ -669,6 +750,7 @@ impl TerminalView {
             && !e.keystroke.modifiers.platform
         {
             self.suggestion_task = gpui::Task::ready(());
+            self.recover_input(window, cx);
             self.suggestions.trigger();
             self.schedule_suggestions(true, cx);
             cx.notify();
@@ -679,7 +761,8 @@ impl TerminalView {
             match key {
                 "up" | "down" => {
                     self.suggestions.step(if key == "up" { -1 } else { 1 });
-                    self.suggestion_scroll.scroll_to_item(self.suggestions.selected, gpui::ScrollStrategy::Nearest);
+                    self.suggestion_scroll
+                        .scroll_to_item(self.suggestions.selected, gpui::ScrollStrategy::Nearest);
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -702,8 +785,17 @@ impl TerminalView {
             plain && (e.keystroke.key_char.is_some() || key.chars().count() == 1 || key == "space");
         if key == "enter" && plain {
             self.suggestions.submit();
+            self.prompt_anchor = None;
+            self.input_recovery = None;
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
             self.suggestions.edit_key(key, control);
+            if !self.suggestions.active
+                && self.prompt_anchor.is_some()
+                && allowed
+                && !(control && matches!(key, "c" | "d"))
+            {
+                self.request_input_recovery(cx);
+            }
             self.schedule_suggestions(false, cx);
         }
         if let Some(terminal) = &self.terminal {
@@ -857,6 +949,15 @@ impl Render for TerminalView {
                 terminal.sync(window, cx);
             });
         }
+        if self.prompt_anchor.is_none()
+            && self.suggestions.active
+            && self.suggestions.text.is_empty()
+        {
+            self.prompt_anchor = self.terminal.as_ref().and_then(|terminal| {
+                prompt_input::PromptAnchor::capture(terminal.read(cx).last_content())
+            });
+        }
+        self.recover_input(window, cx);
         let focused = self.focus_handle.is_focused(window);
         self.focused = focused;
         let cursor_visible = self.should_show_cursor(focused, cx);

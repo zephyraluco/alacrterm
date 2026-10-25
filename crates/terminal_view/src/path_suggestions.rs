@@ -195,7 +195,7 @@ impl PathQuery {
                     0,
                     kind,
                     Source::Filesystem,
-                    if entry.directory { 1950 } else { 1900 },
+                    if entry.directory { 1150 } else { 1100 },
                 );
                 item.label = format!("{}{}", entry.name, if entry.directory { "/" } else { "" });
                 item.replacement = self.replacement.clone();

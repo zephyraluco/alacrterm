@@ -1,5 +1,5 @@
 //! Per-pane, memory-only history suggestions gated by shell lifecycle markers.
-use crate::completion::{Candidate, Kind, Source, rank};
+use crate::completion::{Candidate, Kind, Source, match_score, rank};
 use terminal::PromptEvent;
 #[derive(Default)]
 pub(super) struct Suggestions {
@@ -85,6 +85,19 @@ impl Suggestions {
         self.pending = None;
         self.dismiss();
     }
+    pub fn synchronize(&mut self, text: String, cursor: usize) {
+        if text.len() > 4096 || text.chars().any(char::is_control) || !text.is_char_boundary(cursor)
+        {
+            return;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        self.text = text;
+        self.cursor = cursor;
+        self.active = true;
+        self.pending = None;
+        self.dismissed = false;
+        self.candidates.clear();
+    }
     pub fn input(&mut self, text: &str) {
         if !self.active {
             return;
@@ -165,26 +178,10 @@ impl Suggestions {
                             self.text.len(),
                             Kind::History,
                             Source::History,
-                            1800 - index as i64,
+                            1100 - (index as i64).min(100),
                         )
                     }),
             );
-            if !self.text.chars().any(char::is_whitespace) {
-                self.candidates.extend(
-                    self.commands
-                        .iter()
-                        .filter(|command| command.starts_with(&self.text) && **command != self.text)
-                        .map(|command| {
-                            Candidate::new(
-                                command.clone(),
-                                self.text.len(),
-                                Kind::Command,
-                                Source::Shell,
-                                1700,
-                            )
-                        }),
-                );
-            }
             let command = self.text.split_whitespace().next().unwrap_or("");
             if self
                 .commands
@@ -202,13 +199,43 @@ impl Suggestions {
                         Kind::Subcommand
                     };
                     let mut item =
-                        Candidate::new(text, self.text.len(), kind, Source::Specification, 2000);
+                        Candidate::new(text, self.text.len(), kind, Source::Specification, 1250);
                     item.description = Some(description.into());
                     self.candidates.push(item);
                 }
             }
         }
+        let word_end = self
+            .text
+            .find(char::is_whitespace)
+            .unwrap_or(self.text.len());
+        if self.cursor <= word_end
+            && self.text[..word_end]
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || "_.:+-".contains(ch))
+        {
+            let prefix = &self.text[..self.cursor];
+            for command in &self.commands {
+                if let Some(score) =
+                    match_score(prefix, command, self.powershell == Some(true), true)
+                {
+                    let mut item =
+                        Candidate::new(command.clone(), 0, Kind::Command, Source::Shell, score);
+                    item.replacement = 0..word_end;
+                    self.candidates.push(item);
+                }
+            }
+        }
         rank(&mut self.candidates);
+    }
+    pub fn query_for(&self, candidate: &Candidate) -> String {
+        if candidate.source == Source::Filesystem {
+            return self.path_query().map_or(String::new(), |query| query.leaf);
+        }
+        self.text
+            .get(candidate.replacement.start..self.cursor)
+            .unwrap_or("")
+            .to_string()
     }
     pub fn trigger(&mut self) {
         self.dismissed = false;
@@ -347,6 +374,23 @@ mod tests {
         state.refresh(false);
         state.input("x");
         assert!(state.accept().is_none());
+    }
+    #[test]
+    fn fuzzy_and_middle_command_completion_replace_only_the_command_word() {
+        let mut state = Suggestions::default();
+        state.add_command("git");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.synchronize("gt status".into(), 2);
+        state.refresh(false);
+        assert_eq!(state.candidates[0].replacement, 0..2);
+        assert!(state.accept().unwrap().contains("git"));
+        assert_eq!(state.text, "git status");
+        state.synchronize("get-i".into(), 5);
+        state.context("shell", "powershell");
+        state.add_command("Get-Item");
+        state.refresh(false);
+        assert_eq!(state.candidates[0].insert_text, "Get-Item");
     }
     #[test]
     fn all_candidates_remain_navigable_beyond_the_visible_rows() {

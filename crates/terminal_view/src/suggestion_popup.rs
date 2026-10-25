@@ -71,11 +71,9 @@ impl TerminalView {
                         let mut text = div().flex_1().min_w_0().overflow_hidden().child(
                             div().truncate().child(
                                 gpui_kit::component::label::Label::new(command.label.clone())
-                                    .highlights(
-                                        gpui_kit::component::label::HighlightsMatch::Prefix(
-                                            this.suggestions.text.clone().into(),
-                                        ),
-                                    ),
+                                    .highlights(gpui_kit::component::label::HighlightsMatch::Full(
+                                        this.suggestions.query_for(command).into(),
+                                    )),
                             ),
                         );
                         if let Some(description) = &command.description {
@@ -98,9 +96,21 @@ impl TerminalView {
                                     gpui_kit::component::tooltip::Tooltip::new(detail.clone())
                                         .build(window, cx)
                                 })
-                                .child(div().flex().items_center().gap_2()
-                                    .child(div().w(px(44.)).flex_shrink_0().text_xs().text_color(foreground.opacity(0.65)).child(command.kind.label()))
-                                    .child(text))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .w(px(44.))
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .text_color(foreground.opacity(0.65))
+                                                .child(command.kind.label()),
+                                        )
+                                        .child(text),
+                                )
                                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
                                     window.prevent_default();
                                     cx.stop_propagation();
