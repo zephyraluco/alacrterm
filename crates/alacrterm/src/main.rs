@@ -15,6 +15,7 @@ mod preview_cache;
 mod preview_window;
 mod resource_registry;
 mod settings_window;
+mod shell_integration;
 mod sidebar_panel;
 mod status_bar;
 mod tab_bar;

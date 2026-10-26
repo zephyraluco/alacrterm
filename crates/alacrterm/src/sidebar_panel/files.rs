@@ -87,7 +87,7 @@ fn parent_dir(path: &str) -> Option<String> {
 
 /// 把终端报来的目录展开成远端**绝对路径**；认不出（家目录还不知道）就给 `None`。
 ///
-/// 终端有两条来源（见 `terminal::shell_integration`）：精确的 OSC 7 一定是绝对路径，
+/// 终端有两条来源（见 `terminal::directory`）：精确的 OSC 7 一定是绝对路径，
 /// 而**窗口标题**那条会把家目录缩成 `~`（那是 bash `\w` 的行为，Debian / Ubuntu 默认
 /// `PS1` 就是这个）。`~` 本身要家目录才展开得了，而家目录只有这里（SFTP）问得到。
 fn expand_home(directory: &str, home: Option<&str>) -> Option<String> {
@@ -344,7 +344,7 @@ impl FilesState {
 
     /// 跟着终端走：远端 shell 报了个新目录就跳过去。
     ///
-    /// 数据源是终端自己说出来的当前目录（见 `terminal::shell_integration`：精确的 OSC 7，
+    /// 数据源是终端自己说出来的当前目录（见 `terminal::directory`：精确的 OSC 7，
     /// 或 Ubuntu 默认 `PS1` 放在**窗口标题**里的 `\w`）。每帧都会调一次（见
     /// [`crate::AppRoot::render`]），所以这里得是幂等的：
     ///

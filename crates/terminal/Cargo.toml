@@ -24,7 +24,6 @@ ssh.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
 polling = "3"
-tempfile = "3"
 url.workspace = true
 util.workspace = true
 

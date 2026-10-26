@@ -1,11 +1,6 @@
-//! Install optional startup integration before requesting the native login shell.
-use crate::{
-    auth,
-    handler::ClientHandler,
-    params::{HostKeyPolicy, ShellIntegration, SshParams},
-    session::EventSink,
-};
-use russh::{ChannelMsg, client};
+//! Application-owned remote installation policy.
+use super::Scripts as ShellIntegration;
+use ssh::{SessionContext, SessionSetup, SshCommandConnection};
 use std::time::Duration;
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -16,88 +11,74 @@ fn framed<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
         .split_once('\x1f')
         .map(|pair| pair.0)
 }
-async fn exec(handle: &client::Handle<ClientHandler>, command: String) -> Option<String> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let mut channel = handle.channel_open_session().await.ok()?;
-        channel.exec(true, command).await.ok()?;
-        let mut output = Vec::new();
-        let mut success = false;
-        while let Some(message) = channel.wait().await {
-            match message {
-                ChannelMsg::Data { data } if output.len() + data.len() <= 8192 => {
-                    output.extend_from_slice(&data)
-                }
-                ChannelMsg::ExitStatus { exit_status } => success = exit_status == 0,
-                ChannelMsg::Close => break,
-                ChannelMsg::Data { .. } | ChannelMsg::Failure => return None,
-                _ => {}
-            }
-        }
-        success.then(|| String::from_utf8(output).ok()).flatten()
-    })
-    .await
-    .ok()
-    .flatten()
+async fn exec(handle: &SshCommandConnection, command: String) -> Option<String> {
+    let output = handle
+        .exec(&command, Duration::from_secs(5), 8192)
+        .await
+        .ok()?;
+    (output.exit_status == Some(0))
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
 }
 fn installation(kind: &str, scripts: ShellIntegration, zdotdir: &str) -> String {
     let lf = |text: &str| text.replace("\r\n", "\n");
     format!(
         "sh -c {} -- {} {} {} {} {}",
-        quote(&lf(include_str!("../../../scripts/shell_integration/install.sh"))),
+        quote(&lf(include_str!(
+            "../../../../scripts/shell_integration/install.sh"
+        ))),
         quote(kind),
         quote(&lf(scripts.bash)),
         quote(&lf(scripts.zsh)),
-        quote(&lf(include_str!("../../../scripts/shell_integration/loader.sh"))),
+        quote(&lf(include_str!(
+            "../../../../scripts/shell_integration/loader.sh"
+        ))),
         quote(zdotdir)
     )
 }
 
-/// Use a separate transport: OpenSSH consumes connection-scoped PAM login
-/// messages on the first exec, even when that command's output is discarded.
-/// The terminal transport must execute request_shell first.
-pub(crate) async fn install(
-    params: &SshParams,
-    scripts: ShellIntegration,
-    events: &EventSink,
-) -> bool {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        // The interactive connection has already verified and recorded this key.
-        // Never ask again or accept a different unknown key on the helper.
-        let handler = ClientHandler::new(
-            params.user.clone(),
-            params.host.clone(),
-            params.port,
-            HostKeyPolicy::Strict,
-            params.known_hosts.clone(),
-            None,
-        );
-        let config = std::sync::Arc::new(client::Config {
-            preferred: crate::compression::preferred(),
-            nodelay: true,
-            ..Default::default()
-        });
-        let Ok(mut helper) =
-            client::connect(config, (params.host.as_str(), params.port), handler).await
-        else {
-            return false;
-        };
-        let installed = auth::authenticate(&mut helper, params, events)
+pub(super) struct RemoteIntegration;
+impl SessionSetup for RemoteIntegration {
+    fn prepare<'a>(
+        &'a self,
+        mut session: SessionContext<'a>,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let mut activated = false;
+            for variable in ["ALACRTERM_REMOTE_INTEGRATION", "LC_ALACRTERM_INTEGRATION"] {
+                match session.set_env(variable, "1", Duration::from_secs(2)).await {
+                    Ok(true) => {
+                        activated = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        log::debug!("Integration activation unavailable: {error:#}");
+                        return;
+                    }
+                }
+            }
+            if !activated {
+                return;
+            }
+            let installed = tokio::time::timeout(Duration::from_secs(20), async {
+                let Ok(helper) = session.connect_auxiliary().await else {
+                    return false;
+                };
+                let installed = install_on_handle(&helper, super::scripts()).await;
+                let _ = helper.disconnect().await;
+                installed
+            })
             .await
-            .is_ok()
-            && install_on_handle(&helper, scripts).await;
-        let _ = helper
-            .disconnect(russh::Disconnect::ByApplication, "", "")
-            .await;
-        installed
-    })
-    .await
-    .unwrap_or(false)
+            .unwrap_or(false);
+            if !installed {
+                log::debug!("Persistent shell integration unavailable; continuing native login");
+            }
+        })
+    }
 }
 
-async fn install_on_handle(
-    handle: &client::Handle<ClientHandler>,
-    scripts: ShellIntegration,
-) -> bool {
+async fn install_on_handle(handle: &SshCommandConnection, scripts: ShellIntegration) -> bool {
     let Some(probe) = exec(handle, "printf '\\036ALACRTERM_SHELL:%s\\037\\036ALACRTERM_ZDOTDIR:%s\\037' \"$SHELL\" \"${ZDOTDIR:-$HOME}\"".into()).await else { return false; };
     let Some(shell) = framed(&probe, "ALACRTERM_SHELL") else {
         return false;

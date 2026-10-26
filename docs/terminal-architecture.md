@@ -916,7 +916,7 @@ graph LR
 
 **1. OSC 7**(`ESC ] 7 ; file://host/path BEL`,精确)
 
-- ⚠️ **必须自己扫**(`crates/terminal/src/shell_integration.rs` 的 `Osc7Scanner`):`alacritty_terminal` / `vte` 只认 OSC 0/1/2/4/8/10/11/12/52 这一批,OSC 7 在 `Handler` / `EventListener` 上**没有任何回调**(`vte 0.15` 的 `Handler` 里根本没有 working directory)⇒ 模拟器拿不到的信息,只能在我们把字节喂给模拟器**之前**先扫一遍(`Terminal::feed_remote_bytes` 的入口处)。
+- ⚠️ **必须自己扫**(`crates/terminal/src/directory.rs` 的 `Osc7Scanner`):`alacritty_terminal` / `vte` 只认 OSC 0/1/2/4/8/10/11/12/52 这一批,OSC 7 在 `Handler` / `EventListener` 上**没有任何回调**(`vte 0.15` 的 `Handler` 里根本没有 working directory)⇒ 模拟器拿不到的信息,只能在我们把字节喂给模拟器**之前**先扫一遍(`Terminal::feed_remote_bytes` 的入口处)。
 - 扫描器是**跨块**的状态机(远端字节以任意边界到达,一条 OSC 7 完全可能被切成两块);只认 `file://` 且**必须是绝对路径**,别的 OSC 原样跳过,载荷超 64 KiB 就丢弃(OSC 8/52 的载荷可以是任意大)。路径按 URL 规则解码(`%20` → 空格)。
 - ⚠️ 攒着不写的那一段(`ssh_pending`,见 §5.2)也要扫 —— 远端第一条上报往往就在里面。
 - 事实标准(iTerm2 / kitty / VSCode / oh-my-zsh / Starship 都发),但 **stock bash 默认不发**:想让远端发**精确**的 OSC 7,把下面这段加进远端 `~/.bashrc` 即可(也是我们**不**替用户塞进去的原因,见下):

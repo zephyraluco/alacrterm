@@ -29,15 +29,15 @@ pub(crate) fn prepare(
     let (script, contents) = match name.as_str() {
         "bash" => (
             "integration.sh",
-            include_str!("../../../scripts/shell_integration/bash.sh"),
+            include_str!("../../../../scripts/shell_integration/bash.sh"),
         ),
         "zsh" => (
             "integration.zsh",
-            include_str!("../../../scripts/shell_integration/zsh.zsh"),
+            include_str!("../../../../scripts/shell_integration/zsh.zsh"),
         ),
         _ => (
             "integration.ps1",
-            include_str!("../../../scripts/shell_integration/powershell.ps1"),
+            include_str!("../../../../scripts/shell_integration/powershell.ps1"),
         ),
     };
     let script = dir.path().join(script);
@@ -134,7 +134,13 @@ mod tests {
         assert!(output.status.success());
         let mut bytes = output.stdout;
         bytes.extend(output.stderr);
-        for command in ["demoalias", "demofunc", "printf", "changedalias", "changedfunction"] {
+        for command in [
+            "demoalias",
+            "demofunc",
+            "printf",
+            "changedalias",
+            "changedfunction",
+        ] {
             let expected = format!("\x1b]633;Command;{command}\x07");
             assert!(
                 bytes
@@ -198,7 +204,13 @@ mod tests {
         assert!(output.status.success());
         let mut bytes = output.stdout;
         bytes.extend(output.stderr);
-        for command in ["demoalias", "demofunc", "printf", "changedalias", "changedfunction"] {
+        for command in [
+            "demoalias",
+            "demofunc",
+            "printf",
+            "changedalias",
+            "changedfunction",
+        ] {
             let expected = format!("\x1b]633;Command;{command}\x07");
             assert!(
                 bytes

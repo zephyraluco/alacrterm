@@ -973,9 +973,8 @@ async fn native_login_preserves_banner_and_early_input_when_activation_is_refuse
     let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
     params.host_key = HostKeyPolicy::AcceptNew;
     params.known_hosts = Some(known_hosts.clone());
-    params.shell_integration = Some(ssh::ShellIntegration { bash: "never injected", zsh: "never injected" });
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect(params, SshSize::cells(80,24), sender).unwrap();
+    let session = SshSession::connect_with_setup(params, SshSize::cells(80,24), sender, Some(std::sync::Arc::new(ProbeEnvironment))).unwrap();
     session.write(b"first\nsecond\n");
     let (text, _) = collect_until(&mut events, Duration::from_secs(9), None,
         |text, _| text.contains("REPLY:second")).await;
@@ -994,49 +993,12 @@ async fn refused_activation_preserves_plain_interactive_shell() {
     let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
     params.host_key = HostKeyPolicy::AcceptNew;
     params.known_hosts = Some(known_hosts.clone());
-    params.shell_integration = Some(ssh::ShellIntegration { bash: "", zsh: "" });
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
+    let session = SshSession::connect_with_setup(params, SshSize::cells(80, 24), sender, Some(std::sync::Arc::new(ProbeEnvironment))).unwrap();
     let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| text.contains(PROMPT)).await;
     assert!(text.contains(BANNER));
     assert!(!text.contains("ALACRTERM_SHELL"));
     session.disconnect();
-    let _ = std::fs::remove_file(known_hosts);
-}
-
-#[tokio::test]
-#[ignore = "modifies startup files: requires an isolated OpenSSH account accepting integration env variables and SSH_INTEGRATION_TEST_PORT/KEY"]
-async fn native_openssh_loads_persistent_integration_in_an_isolated_account() {
-    let port: u16 = std::env::var("SSH_INTEGRATION_TEST_PORT").unwrap().parse().unwrap();
-    let key = PathBuf::from(std::env::var("SSH_INTEGRATION_TEST_KEY").unwrap());
-    let user = std::env::var("SSH_INTEGRATION_TEST_USER").unwrap_or_else(|_| "agent".into());
-    let known_hosts = temp_known_hosts("native-integration");
-    let mut params = SshParams::new("127.0.0.1", port, user);
-    params.key_files.push(key);
-    params.host_key = HostKeyPolicy::AcceptNew;
-    params.known_hosts = Some(known_hosts.clone());
-    params.shell_integration = Some(ssh::ShellIntegration {
-        bash: include_str!("../../../scripts/shell_integration/bash.sh"),
-        zsh: include_str!("../../../scripts/shell_integration/zsh.zsh"),
-    });
-    let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
-    let (text, closed) = collect_until(&mut events, Duration::from_secs(15), None,
-        |text, _| text.contains("633;B") && text.contains("633;AlacrtermShell;posix")).await;
-    assert!(closed.is_none(), "native shell exited early");
-    assert!(text.contains("633;AlacrtermShell;posix"), "integration was not loaded");
-    session.write(b"printf 'NATIVE_INTEGRATION_OK\\n'\n");
-    let (output, _) = collect_until(&mut events, Duration::from_secs(5), None,
-        |text, _| text.contains("NATIVE_INTEGRATION_OK\r\n") && text.contains("633;C")).await;
-    assert!(output.contains("633;C"));
-    assert!(output.contains("NATIVE_INTEGRATION_OK\r\n"));
-    session.write(b"shopt -q login_shell && printf 'NATIVE_LOGIN_OK\\n'\n");
-    let (login, _) = collect_until(&mut events, Duration::from_secs(5), None,
-        |text, _| text.contains("NATIVE_LOGIN_OK\r\n")).await;
-    assert!(login.contains("NATIVE_LOGIN_OK\r\n"), "integration replaced the login shell");
-    session.write(b"exit\n");
-    let (_, closed) = collect_until(&mut events, Duration::from_secs(5), None, |_, closed| closed.is_some()).await;
-    assert!(closed.is_some());
     let _ = std::fs::remove_file(known_hosts);
 }
 
@@ -1106,58 +1068,74 @@ async fn file_transfer_survives_closing_its_terminal_connection() {
     let _ = std::fs::remove_file(known_hosts);
 }
 
+
+struct ProbeEnvironment;
+impl ssh::SessionSetup for ProbeEnvironment {
+    fn prepare<'a>(&'a self, mut session: ssh::SessionContext<'a>) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            assert!(!session.set_env("TEST_SESSION_SETUP", "1", Duration::from_secs(2)).await.unwrap());
+        })
+    }
+}
+
 #[tokio::test]
-#[cfg(unix)]
-async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join(".bashrc"), "# USER_STARTUP\n").unwrap();
-    let port = local_server::serve_with_integration_home(home.path().to_owned())
-        .await
-        .unwrap();
-    let known_hosts = temp_known_hosts("persistent-startup");
+async fn host_setup_executes_auxiliary_commands_without_replacing_native_shell() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    struct Setup(Arc<AtomicBool>);
+    impl ssh::SessionSetup for Setup {
+        fn prepare<'a>(&'a self, session: ssh::SessionContext<'a>) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                let helper = session.connect_auxiliary().await.unwrap();
+                let output = helper.exec("exit 7", Duration::from_secs(2), 1024).await.unwrap();
+                assert_eq!(output.exit_status, Some(7));
+                assert!(output.stdout.starts_with(b"EXEC:exit 7"));
+                assert!(helper.exec("exit 0", Duration::from_secs(2), 4).await.is_err());
+                helper.disconnect().await.unwrap();
+                self.0.store(true, Ordering::SeqCst);
+            })
+        }
+    }
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("generic-setup");
     let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
     params.host_key = HostKeyPolicy::AcceptNew;
     params.known_hosts = Some(known_hosts.clone());
-    params.shell_integration = Some(ssh::ShellIntegration {
-        bash: include_str!("../../../scripts/shell_integration/bash.sh"),
-        zsh: include_str!("../../../scripts/shell_integration/zsh.zsh"),
-    });
-    let mut first_rc = Vec::new();
-    for attempt in 0..2 {
-        let (sender, mut events) = futures::channel::mpsc::unbounded();
-        let session = SshSession::connect(params.clone(), SshSize::cells(80, 24), sender).unwrap();
-        let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
-            text.contains("633;AlacrtermShell;posix") && text.ends_with(PROMPT)
-        })
-        .await;
-        assert!(text.contains(BANNER));
-        assert!(text.contains("633;AlacrtermShell;posix"));
-        assert!(text.contains("PAM_MOTD: Welcome to Ubuntu\r\nVENDOR_WELCOME\r\n"));
-        assert_eq!(text.matches("SSH_AUTH_NOTICE\r\n").count(), 1);
-        assert!(text.find("SSH_AUTH_NOTICE").unwrap() < text.find("PAM_MOTD").unwrap());
-        assert!(text.find("VENDOR_WELCOME").unwrap() < text.find(BANNER).unwrap());
-        assert!(
-            !text.contains("source ")
-                && !text.contains("loader.sh")
-                && !text.contains("command rm")
-        );
-        let rc = std::fs::read(home.path().join(".bashrc")).unwrap();
-        if attempt == 0 {
-            first_rc = rc;
-        } else {
-            assert_eq!(rc, first_rc);
-        }
-        session.disconnect();
-    }
-    params.shell_integration = None;
+    let ready = Arc::new(AtomicBool::new(false));
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
-    let (text, _) = collect_until(&mut events, Duration::from_secs(5), None, |text, _| {
-        text.ends_with(PROMPT)
-    })
-    .await;
+    let session = SshSession::connect_with_setup(params, SshSize::cells(80, 24), sender, Some(Arc::new(Setup(ready.clone())))).unwrap();
+    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| text.ends_with(PROMPT)).await;
     assert!(text.contains(BANNER));
-    assert!(!text.contains("633;AlacrtermShell"));
+    assert!(ready.load(Ordering::SeqCst));
     session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+async fn closing_a_session_cancels_pending_host_preparation() {
+    struct Setup(std::sync::Arc<tokio::sync::Notify>);
+    impl ssh::SessionSetup for Setup {
+        fn prepare<'a>(&'a self, _session: ssh::SessionContext<'a>) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.0.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("cancel-setup");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let started = std::sync::Arc::new(tokio::sync::Notify::new());
+    let session = SshSession::connect_with_setup(params, SshSize::cells(80, 24), sender, Some(std::sync::Arc::new(Setup(started.clone())))).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    session.disconnect();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = events.next().await {
+            if let SshEvent::Closed { reason, .. } = event { assert!(reason.is_none()); return; }
+        }
+        panic!("missing close event");
+    }).await.unwrap();
     let _ = std::fs::remove_file(known_hosts);
 }

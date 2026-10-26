@@ -33,6 +33,5 @@ tokio = { version = "1", features = [
 platform.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
 anyhow.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }

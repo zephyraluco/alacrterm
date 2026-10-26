@@ -44,7 +44,16 @@ PowerShell：
 . C:\path\to\powershell.ps1
 ```
 
-脚本位于 `scripts/shell_integration/`，本地使用的同份脚本嵌入应用。
+脚本统一位于根目录 `scripts/shell_integration/`，由 `alacrterm::shell_integration` 编译时嵌入，
+运行时不依赖外部脚本目录。
+
+集成职责由应用层持有：`local.rs` 准备本地启动文件，`remote.rs` 决定远端启用、安装与更新，
+`protocol.rs` 解释 Alacrterm 专用 OSC 扩展。`ssh` 不再持有集成脚本或集成开关，
+通过 `SessionSetup`/`SessionContext` 提供环境变量申请和严格校验主机密钥的辅助连接；
+辅助连接提供有超时和输出上限的通用 exec。`terminal` 通过 `LaunchOptions` 接收宿主准备钩子、
+资源和扩展解码函数，保留标准 OSC 133/633 生命周期及 OSC 7/标题目录解析。
+本地临时资源跟随 PTY 事件循环存活，事件循环退出后释放。设置变更只更新后续重连和新会话的启动策略，
+分屏及复制终端沿用宿主选项。SSH 仍在启动原生 Shell 前完成辅助安装，未改为后台延迟安装。
 SSH 已存在的 OSC 133/633 集成也可提供生命周期标记。当前追踪标准字符输入、
 删除、左右移动及 Home/End、Ctrl+A/E；历史导航和原生编辑后，会尝试从已确认提示符的单行终端内容重新同步；无法确认时回退。
 
@@ -166,6 +175,10 @@ PowerShell/Fish 等远端 shell 目前回退普通 shell，PowerShell 可手动�
 - SSH 持久集成：隔离 HOME 的真实 Bash/Zsh 启动测试；SSH 协议往返模拟 OpenSSH 首个 exec 消耗 PAM 登录消息，验证 MOTD/厂商欢迎信息保留、认证横幅只显示一次、重复连接复用、环境变量拒绝回退及普通客户端隔离。
 - 真实 OpenSSH 持久集成测试需专用隔离账户并允许会话标识，默认忽略，未在共享账户上运行。
 - 工作区编译检查及相关单元/SSH 回归通过；Clippy 性能 lint 通过（仍有既有及样式建议警告）。
+
+职责迁移验证：应用层 53 项、终端视图 26 项、SSH 单元/往返 29 项通过；终端排除路径超链接测试组后 52 项通过。
+完整终端测试仍有 23 项路径超链接失败，重构前提交也存在相同失败；终端测试代码的 Clippy 性能检查
+同样受既有 `hyperlinks.rs:1553` 警告阻塞。SSH、应用和视图全目标 Clippy 性能检查及工作区全目标编译通过。
 
 Windows/macOS GUI 和 PowerShell 脚本尚未原生验证，未宣称与 VS Code 完全等同。
 

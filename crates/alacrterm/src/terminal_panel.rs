@@ -153,8 +153,9 @@ impl AppRoot {
         let handler = target
             .is_ssh()
             .then(|| host_key::host_key_prompt_handler(root));
+        let options = crate::shell_integration::launch_options(settings.suggestions.remote_integration);
         let view = cx.new(|cx| {
-            TerminalView::new(working_directory, target, handler, settings, window, cx)
+            TerminalView::new(working_directory, target, handler, options, settings, window, cx)
         });
         // 标题 / 焦点 / 连接状态变化时重绘（标签栏的文字也跟着它走）。
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
@@ -495,8 +496,12 @@ impl TabPane {
 
     /// 把渲染参数推给本页所有格子。
     pub(crate) fn set_render_settings(&mut self, settings: Arc<RenderSettings>, cx: &mut App) {
+        let options = crate::shell_integration::launch_options(settings.suggestions.remote_integration);
         for view in &self.panes {
-            view.update(cx, |view, cx| view.set_render_settings(settings.clone(), cx));
+            view.update(cx, |view, cx| {
+                view.set_launch_options(options.clone(), cx);
+                view.set_render_settings(settings.clone(), cx);
+            });
         }
     }
 

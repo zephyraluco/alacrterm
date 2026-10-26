@@ -15,26 +15,29 @@ pub(crate) struct ObservedPty {
     pty: AlacrittyPty,
     scanner: PromptScanner,
     events: UnboundedSender<TerminalBackendEvent>,
-    _integration: Option<tempfile::TempDir>,
+    _resources: Option<crate::SessionResources>,
+    decoder: Option<crate::OscDecoder>,
 }
 impl ObservedPty {
     pub(crate) fn new(
         pty: AlacrittyPty,
         events: UnboundedSender<TerminalBackendEvent>,
-        integration: Option<tempfile::TempDir>,
+        resources: Option<crate::SessionResources>,
+        decoder: Option<crate::OscDecoder>,
     ) -> Self {
         Self {
             pty,
             events,
             scanner: Default::default(),
-            _integration: integration,
+            _resources: resources,
+            decoder,
         }
     }
 }
 impl Read for ObservedPty {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let count = self.pty.reader().read(bytes)?;
-        for event in self.scanner.feed(&bytes[..count]) {
+        for event in self.scanner.feed(&bytes[..count], self.decoder) {
             let _ = self
                 .events
                 .unbounded_send(TerminalBackendEvent::Prompt(event));

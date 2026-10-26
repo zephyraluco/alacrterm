@@ -139,7 +139,7 @@ pub struct SshSession {
 /// 这次连接要远端干什么。
 enum Launch {
     /// 交互式 shell:申请 PTY 再申请 shell(终端走这条)。
-    Shell(SshSize),
+    Shell(SshSize, Option<Arc<dyn crate::SessionSetup>>),
     /// 执行一条命令:**不申请 PTY**,命令跑完会话就结束(与 `ssh host cmd` 同)。
     Exec(String),
 }
@@ -155,7 +155,17 @@ impl SshSession {
         size: SshSize,
         events: UnboundedSender<SshEvent>,
     ) -> std::io::Result<Self> {
-        Self::spawn(params, Launch::Shell(size), events)
+        Self::connect_with_setup(params, size, events, None)
+    }
+
+    /// Run optional host preparation after authentication, before PTY/shell.
+    pub fn connect_with_setup(
+        params: SshParams,
+        size: SshSize,
+        events: UnboundedSender<SshEvent>,
+        setup: Option<Arc<dyn crate::SessionSetup>>,
+    ) -> std::io::Result<Self> {
+        Self::spawn(params, Launch::Shell(size, setup), events)
     }
 
     /// 建一个**执行单条命令**的会话(与 `ssh host <cmd>` 同语义):没有 PTY、不走 shell 的
@@ -332,38 +342,13 @@ async fn run_session(
     if !accepted {
         x11.disable();
     }
-    // Activate only this connection. Many servers accept LC_* by default; no
-    // sshd configuration is changed, and refusal leaves a normal native login.
-    if matches!(launch, Launch::Shell(_)) {
-        if let Some(scripts) = params.shell_integration {
-            let mut activated = false;
-            for variable in ["ALACRTERM_REMOTE_INTEGRATION", "LC_ALACRTERM_INTEGRATION"] {
-                if channel.set_env(true, variable, "1").await.is_err() {
-                    break;
-                }
-                let accepted = tokio::time::timeout(Duration::from_secs(2), async {
-                    loop {
-                        match channel.wait().await {
-                            Some(ChannelMsg::Success) => return true,
-                            Some(ChannelMsg::Failure | ChannelMsg::Close) | None => return false,
-                            _ => {}
-                        }
-                    }
-                })
-                .await
-                .unwrap_or(false);
-                if accepted {
-                    activated = true;
-                    break;
-                }
-            }
-            if activated && !crate::shell_integration::install(params, scripts, sink).await {
-                log::debug!("Persistent shell integration unavailable; continuing native login");
-            }
-        }
+    if let Launch::Shell(_, Some(setup)) = launch {
+        setup
+            .prepare(crate::SessionContext::new(params, &mut channel, sink))
+            .await;
     }
     let interactive = match launch {
-        Launch::Shell(size) => {
+        Launch::Shell(size, _) => {
             let size = size.sanitized();
             // 终端模式(termios)留空:让远端用自己的默认值。上报一堆猜出来的 termios 反而
             // 容易把远端 shell 弄成坏状态(比如删字符键不对),窗口尺寸才是我们真正知道的信息。

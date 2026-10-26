@@ -34,7 +34,7 @@ use gpui::{
 };
 use terminal::{
     Event as TerminalEvent, HostKeyPrompt, Modes, SshFs, Terminal, TerminalBounds, TerminalBuilder,
-    TerminalTarget,
+    TerminalTarget, LaunchOptions,
 };
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
@@ -99,6 +99,7 @@ pub struct TerminalView {
     scrollbar_target: std::rc::Rc<std::cell::Cell<Option<usize>>>,
     /// 主机密钥确认的回调（仅远端会话有）。
     host_key_prompt: Option<HostKeyPromptHandler>,
+    launch_options: LaunchOptions,
 }
 
 impl TerminalView {
@@ -110,20 +111,18 @@ impl TerminalView {
     /// 本地会话传 `None` 即可。
     pub fn new(
         working_directory: Option<PathBuf>,
-        mut target: TerminalTarget,
+        target: TerminalTarget,
         host_key: Option<HostKeyPromptHandler>,
+        launch_options: LaunchOptions,
         settings: Arc<TerminalRenderSettings>,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
-        target.configure_shell_integration(
-            settings.suggestions.remote_integration
-                && std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
-                    != Some(std::ffi::OsStr::new("0")),
-        );
         let remote = target.is_ssh();
         let env = std::env::vars().collect();
-        let builder = TerminalBuilder::new(working_directory, target, env, cx);
+        let builder = TerminalBuilder::new_with_options(
+            working_directory, target, env, launch_options.clone(), cx,
+        );
         let focus_handle = cx.focus_handle();
 
         // 焦点进出：通知终端应用（FOCUS_IN_OUT 模式），并设置默认光标形状
@@ -196,6 +195,9 @@ impl TerminalView {
 
                 cx.update(|app| {
                     let _ = this.update(app, |this, cx| {
+                        terminal.update(cx, |terminal, _| {
+                            terminal.set_launch_options(this.launch_options.clone());
+                        });
                         this.terminal = Some(terminal.clone());
                         this.subscription = Some(subscription);
                         // 终端实体的**通知**也要让本视图重绘：鼠标交互（拖选 / 滚轮 / 点击）
@@ -230,6 +232,7 @@ impl TerminalView {
             grid_cache: Default::default(),
             scrollbar_target: Default::default(),
             host_key_prompt: host_key,
+            launch_options,
         }
     }
 
@@ -249,9 +252,18 @@ impl TerminalView {
         }
     }
 
+    /// Host policy for future reconnects; rendering does not choose startup behavior.
+    pub fn set_launch_options(&mut self, options: LaunchOptions, cx: &mut gpui::Context<Self>) {
+        self.launch_options = options;
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |terminal, _| {
+                terminal.set_launch_options(self.launch_options.clone());
+            });
+        }
+    }
+
     /// 运行期替换渲染参数（设置窗口改完立刻生效，不必重启）。
-    ///
-    /// 渲染读的是 `self.settings`（同一个 `Arc` 也传给了 `TerminalElement`），
+    /// 渲染读的是 `self.settings`（同一个 `Arc` 也传给了 `TerminalElement`）。
     /// 换掉它 + `notify` 即可重绘；光标形状还要同步给终端实体
     /// ——`focus_in` 里做的是同一件事（终端可能被应用改成 DECSCUSR 指定的形状）。
     pub fn set_render_settings(
@@ -264,11 +276,6 @@ impl TerminalView {
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.set_cursor_shape(self.settings.cursor_shape);
-                terminal.configure_remote_integration(
-                    self.settings.suggestions.remote_integration
-                        && std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
-                            != Some(std::ffi::OsStr::new("0")),
-                );
             });
         }
         cx.notify();
@@ -782,7 +789,7 @@ impl TerminalView {
             .is_some_and(|terminal| terminal.read_with(cx, |terminal, _| terminal.is_connected()))
     }
 
-    /// 远端 shell 说出来的当前目录（见 `terminal::shell_integration`）；本地会话或
+    /// 远端 shell 说出来的当前目录（见 `terminal::directory`）；本地会话或
     /// 没说到过时为 `None`。
     ///
     /// 这是「文件管理器跟着终端走」的数据源。远端没有本地进程可采样，目录只能由远端
