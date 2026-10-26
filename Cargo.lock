@@ -6781,6 +6781,7 @@ dependencies = [
  "serde_json",
  "settings",
  "terminal",
+ "util",
 ]
 
 [[package]]

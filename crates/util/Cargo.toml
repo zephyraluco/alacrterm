@@ -12,6 +12,7 @@ path = "src/util.rs"
 doctest = true
 
 [dependencies]
+tempfile = "3"
 notify = "8.2"
 async-channel = "2.5"
 anyhow.workspace = true
@@ -38,5 +39,4 @@ nix.workspace = true
 tendril.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
 pretty_assertions.workspace = true

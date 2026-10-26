@@ -342,8 +342,11 @@ pub(crate) fn update_render(
 ) {
     let mut settings = config::settings(cx).render.clone();
     change(&mut settings);
+    if let Err(error) = config::save_render_settings(&settings, config::settings(cx).color_scheme.as_deref()) {
+        eprintln!("[config] 保存终端设置失败，保持原设置：{error:#}");
+        return;
+    }
     config::settings_mut(cx).render = settings.clone();
-    config::save_render_settings(&settings, config::settings(cx).color_scheme.as_deref());
     if let Some(root) = root.upgrade() {
         root.update(cx, |root, cx| root.apply_render_settings(settings, cx));
     }

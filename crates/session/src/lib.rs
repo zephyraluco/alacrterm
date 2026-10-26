@@ -248,25 +248,27 @@ impl SessionTree {
             .unwrap_or_default()
     }
 
-    pub fn persist(entries: &[SessionEntry], expanded: &[u64]) {
+    pub fn persist(entries: &[SessionEntry], expanded: &[u64]) -> std::io::Result<()> {
         let path = settings::sessions_config_path();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => { serde_json::from_str::<PersistedSessions>(&text).map_err(std::io::Error::other)?; }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         let stored = PersistedSessions {
             entries: entries.iter().map(PersistedEntry::from).collect(),
             expanded: expanded.to_vec(),
         };
 
-        let result = serde_json::to_string_pretty(&stored)
+        serde_json::to_string_pretty(&stored)
             .map_err(std::io::Error::other)
             .and_then(|mut text| {
                 text.push('\n');
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(&path, text)
-            });
-        if let Err(error) = result {
-            eprintln!("[sessions] 保存会话记录 {} 失败：{error}", path.display());
-        }
+                util::atomic_file::write(&path, text.as_bytes())
+            })
     }
 
     fn children_mut<'a>(

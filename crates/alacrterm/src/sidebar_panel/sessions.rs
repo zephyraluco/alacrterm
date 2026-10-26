@@ -49,7 +49,9 @@ impl SessionsState {
     }
 
     fn persist(&self) {
-        SessionTree::persist(self.tree.entries(), &self.expanded);
+        if let Err(error) = SessionTree::persist(self.tree.entries(), &self.expanded) {
+            eprintln!("[sessions] 保存会话记录失败：{error}");
+        }
     }
 
     fn rows(&mut self) -> Rc<Vec<SessionRow>> {
