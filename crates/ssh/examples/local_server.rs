@@ -88,6 +88,7 @@ pub struct LocalServer {
     suggest_integration: bool,
     integration_home: Option<std::path::PathBuf>,
     integration_enabled: bool,
+    login_messages_consumed: bool,
 }
 
 impl LocalServer {
@@ -101,6 +102,7 @@ impl LocalServer {
             suggest_integration: false,
             integration_home: None,
             integration_enabled: false,
+            login_messages_consumed: false,
         }
     }
 
@@ -187,6 +189,13 @@ impl russh::server::Server for LocalServer {
 
 impl russh::server::Handler for LocalServer {
     type Error = russh::Error;
+
+    async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {
+        Ok(self
+            .integration_home
+            .as_ref()
+            .map(|_| "SSH_AUTH_NOTICE\n".into()))
+    }
 
     /// 只认一个密码,用来验证「公钥全失败后回落密码」这条链。
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
@@ -338,6 +347,13 @@ impl russh::server::Handler for LocalServer {
         self.shell = Some(channel);
         self.probe_x11(channel, session);
         if let Some(home) = &self.integration_home {
+            if !self.login_messages_consumed {
+                session.data(
+                    channel,
+                    b"PAM_MOTD: Welcome to Ubuntu\r\nVENDOR_WELCOME\r\n".to_vec(),
+                )?;
+            }
+            self.login_messages_consumed = true;
             session.data(channel, BANNER.as_bytes().to_vec())?;
             let mut command = std::process::Command::new("bash");
             command
@@ -459,6 +475,9 @@ impl russh::server::Handler for LocalServer {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).trim().to_string();
         if let Some(home) = &self.integration_home {
+            // Like OpenSSH, exec consumes connection-scoped login messages
+            // without displaying them for a non-interactive command.
+            self.login_messages_consumed = true;
             let output = std::process::Command::new("sh")
                 .args(["-c", &command])
                 .env("HOME", home)

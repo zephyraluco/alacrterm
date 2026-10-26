@@ -1132,6 +1132,10 @@ async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
         .await;
         assert!(text.contains(BANNER));
         assert!(text.contains("633;AlacrtermShell;posix"));
+        assert!(text.contains("PAM_MOTD: Welcome to Ubuntu\r\nVENDOR_WELCOME\r\n"));
+        assert_eq!(text.matches("SSH_AUTH_NOTICE\r\n").count(), 1);
+        assert!(text.find("SSH_AUTH_NOTICE").unwrap() < text.find("PAM_MOTD").unwrap());
+        assert!(text.find("VENDOR_WELCOME").unwrap() < text.find(BANNER).unwrap());
         assert!(
             !text.contains("source ")
                 && !text.contains("loader.sh")

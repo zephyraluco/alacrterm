@@ -134,7 +134,11 @@ SSH 补全查询与首次连接各有 5 秒超时，取消的排队请求直接�
 `LC_ALACRTERM_INTEGRATION=1`，兼容常见的 `AcceptEnv LC_*` 配置。两者都被拒绝时不安装入口，
 直接普通登录，不修改 sshd 配置。每次变量申请最多等待 2 秒。
 
-服务器接受标识后，通过独立 exec 通道探测并安装；探测和安装各最多等待 5 秒。
+服务器接受标识后，通过独立 SSH 连接中的 exec 通道探测并安装；该辅助连接复用认证参数，
+只接受已记录的主机密钥，不重复询问信任。探测和安装各最多等待 5 秒，辅助连接总限时 20 秒。
+不能复用交互连接的 exec 通道：OpenSSH 会在首个 exec/shell 启动后清空连接级 PAM 登录消息，
+即使是无输出的探测命令也会导致后续 Shell 丢失 MOTD。交互连接的首个执行请求始终是 `request_shell`。
+认证阶段的 SSH 横幅也发送到终端显示；辅助连接的横幅不重复显示。
 脚本保存在 `$HOME/.local/share/alacrterm/shell/`，统一使用 LF 换行。
 Bash 在 `.bashrc` 和首个存在的 `.bash_profile`、`.bash_login`、`.profile` 中加入带标记的入口，
 没有登录配置时使用 `.profile`；Zsh 使用探测到的 `ZDOTDIR` 下的 `.zshrc`。
@@ -159,7 +163,7 @@ PowerShell/Fish 等远端 shell 目前回退普通 shell，PowerShell 可手动�
 - 配置：关闭自动触发后不弹菜单，Ctrl+Space 仍能手动查询。
 - 项目候选：本地 npm/Git 和 SSH SFTP 元数据，不执行项目脚本。
 - 原生 Bash/Zsh：启动配置加载、清单自动刷新、临时文件清理。
-- SSH 持久集成：隔离 HOME 的真实 Bash/Zsh 启动测试；SSH 协议往返验证欢迎输出、重复连接复用、环境变量拒绝回退及普通客户端隔离。
+- SSH 持久集成：隔离 HOME 的真实 Bash/Zsh 启动测试；SSH 协议往返模拟 OpenSSH 首个 exec 消耗 PAM 登录消息，验证 MOTD/厂商欢迎信息保留、认证横幅只显示一次、重复连接复用、环境变量拒绝回退及普通客户端隔离。
 - 真实 OpenSSH 持久集成测试需专用隔离账户并允许会话标识，默认忽略，未在共享账户上运行。
 - 工作区编译检查及相关单元/SSH 回归通过；Clippy 性能 lint 通过（仍有既有及样式建议警告）。
 

@@ -1,5 +1,10 @@
 //! Install optional startup integration before requesting the native login shell.
-use crate::{handler::ClientHandler, params::ShellIntegration};
+use crate::{
+    auth,
+    handler::ClientHandler,
+    params::{HostKeyPolicy, ShellIntegration, SshParams},
+    session::EventSink,
+};
 use russh::{ChannelMsg, client};
 use std::time::Duration;
 fn quote(value: &str) -> String {
@@ -47,8 +52,49 @@ fn installation(kind: &str, scripts: ShellIntegration, zdotdir: &str) -> String 
     )
 }
 
-/// Called only after this channel accepted a per-session activation variable.
+/// Use a separate transport: OpenSSH consumes connection-scoped PAM login
+/// messages on the first exec, even when that command's output is discarded.
+/// The terminal transport must execute request_shell first.
 pub(crate) async fn install(
+    params: &SshParams,
+    scripts: ShellIntegration,
+    events: &EventSink,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        // The interactive connection has already verified and recorded this key.
+        // Never ask again or accept a different unknown key on the helper.
+        let handler = ClientHandler::new(
+            params.user.clone(),
+            params.host.clone(),
+            params.port,
+            HostKeyPolicy::Strict,
+            params.known_hosts.clone(),
+            None,
+        );
+        let config = std::sync::Arc::new(client::Config {
+            preferred: crate::compression::preferred(),
+            nodelay: true,
+            ..Default::default()
+        });
+        let Ok(mut helper) =
+            client::connect(config, (params.host.as_str(), params.port), handler).await
+        else {
+            return false;
+        };
+        let installed = auth::authenticate(&mut helper, params, events)
+            .await
+            .is_ok()
+            && install_on_handle(&helper, scripts).await;
+        let _ = helper
+            .disconnect(russh::Disconnect::ByApplication, "", "")
+            .await;
+        installed
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn install_on_handle(
     handle: &client::Handle<ClientHandler>,
     scripts: ShellIntegration,
 ) -> bool {

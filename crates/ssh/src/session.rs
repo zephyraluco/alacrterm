@@ -91,7 +91,7 @@ impl EventSink {
         let _ = self.0.unbounded_send(SshEvent::Connected);
     }
 
-    async fn data(&self, bytes: &[u8]) {
+    pub(crate) async fn data(&self, bytes: &[u8]) {
         for chunk in bytes.chunks(OUTPUT_CHUNK) {
             let Ok(permit) = self.1.clone().acquire_many_owned(chunk.len() as u32).await else {
                 return;
@@ -357,7 +357,7 @@ async fn run_session(
                     break;
                 }
             }
-            if activated && !crate::shell_integration::install(&handle, scripts).await {
+            if activated && !crate::shell_integration::install(params, scripts, sink).await {
                 log::debug!("Persistent shell integration unavailable; continuing native login");
             }
         }
