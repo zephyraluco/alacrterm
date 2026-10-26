@@ -164,7 +164,9 @@ impl AppRoot {
             .then(|| host_key::host_key_prompt_handler(root));
         let options = crate::shell_integration::launch_options(settings.suggestions.remote_integration);
         let view = cx.new(|cx| {
-            TerminalView::new(working_directory, target, handler, options, settings, window, cx)
+            let mut view = TerminalView::new(working_directory, target, handler, options, settings, window, cx);
+            view.set_completion_service(Arc::new(crate::completion::CompletionEngine::default()));
+            view
         });
         // 标题 / 焦点 / 连接状态变化时重绘（标签栏的文字也跟着它走）。
         cx.observe(&view, |_, _, cx| cx.notify()).detach();

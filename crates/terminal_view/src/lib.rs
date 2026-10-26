@@ -9,19 +9,16 @@
 //! - IME 组合文本状态
 //! - 高性能网格渲染（批量文本 / 背景矩形 / 块字符 / 光标 / 高亮）
 
-mod command_specs;
-mod completion;
+pub mod completion;
+pub mod completion_service;
 mod completion_controller;
-mod completion_provider;
-mod completion_resources;
 mod contrast;
-mod path_suggestions;
-mod project_completions;
 mod prompt_input;
 mod scrollbar;
 mod suggestion_popup;
 
 mod suggestions;
+pub use suggestions::Suggestions as SuggestionModel;
 pub use settings::SuggestionSettings;
 pub mod terminal_element;
 
@@ -234,6 +231,12 @@ impl TerminalView {
             host_key_prompt: host_key,
             launch_options,
         }
+    }
+
+    /// Install the host's completion providers before starting user interaction.
+    pub fn set_completion_service(&mut self, service: Arc<dyn completion_service::CompletionService>) {
+        self.completion.cancel();
+        self.completion.model.service = Some(service);
     }
 
     /// Retry only a disconnected SSH pane; keep the same view and scrollback.
@@ -535,9 +538,9 @@ impl TerminalView {
                     .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
                 let backend = if this.remote {
-                    completion_resources::Backend::Remote(this.remote_fs(cx)?)
+                    completion_service::Backend::Remote(this.remote_fs(cx)?)
                 } else {
-                    completion_resources::Backend::local()
+                    completion_service::Backend::Local
                 };
                 this.completion.request(manual, backend)
             }) else {

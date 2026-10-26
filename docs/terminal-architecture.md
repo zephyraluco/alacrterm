@@ -1075,3 +1075,7 @@ cargo run -p ssh --example local_server -- 2299
 SSH 的 `SessionOptions` 接收可选的 `X11Target`，只处理协议、转发 cookie 校验和数据桥接。
 应用层 `x11::WayxTarget` 决定 WayX Endpoint、额度与服务代次生命周期；SSH 不再依赖 platform。
 通用 SSH 会话默认不申请 X11，应用启动终端时注入目标，保持自动 X11 转发行为。
+
+补全提供者与本地/远端资源访问由 `alacrterm::completion::CompletionEngine` 持有，应用创建每个终端时
+注入独立服务。`terminal_view::completion_service` 只定义候选查询及延迟任务接口；视图维护输入、
+菜单、请求取消和过期结果过滤，不依赖具体文件系统提供者。缓存代次跟随会话重置。

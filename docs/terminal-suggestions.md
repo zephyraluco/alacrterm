@@ -184,19 +184,30 @@ Windows/macOS GUI 和 PowerShell 脚本尚未原生验证，未宣称与 VS Code
 
 ## 实现结构
 
-| 模块 | 职责 |
+| 位置 | 职责 |
 | --- | --- |
-| `completion_controller.rs` | 每个分屏独立的查询调度、取消、请求代号、结果校验、输入恢复和接受决策 |
-| `completion_provider.rs` | 历史、shell 命令、规格、路径和项目参数的统一查询接口 |
-| `completion_resources.rs` | 本地/SSH 资源读取、原有超时策略、3 秒缓存与手动刷新 |
-| `suggestions.rs` | 输入状态、内存历史、候选合并排序与文本替换 |
-| `prompt_input.rs` | 提示符锚点及等待终端回显恢复的状态 |
-| `suggestion_popup.rs` | 现有单行列表、滚动、鼠标与光标末端定位 |
+| `alacrterm::completion::CompletionEngine` | 每个分屏独立的应用层补全服务，提供即时候选和延迟任务 |
+| `alacrterm/src/completion/completion_provider.rs` | 历史、shell 命令、规格、路径和项目参数的提供者选择 |
+| `alacrterm/src/completion/completion_resources.rs` | 本地/SSH 资源读取、超时、3 秒缓存与手动刷新 |
+| `alacrterm/src/completion/path_suggestions.rs` | Shell 路径解析、转义和路径候选计算 |
+| `alacrterm/src/completion/project_completions.rs` | npm/Git 等项目元数据解析和候选计算 |
+| `terminal_view::completion_service` | 通用候选服务接口；借用查询上下文，延迟任务持有必要的独立数据 |
+| `terminal_view/src/completion_controller.rs` | UI 请求调度、取消、请求代号、结果校验、输入恢复和接受决策 |
+| `terminal_view::SuggestionModel` | 输入状态、当前会话历史与命令清单、候选列表及文本替换 |
+| `terminal_view/src/prompt_input.rs` | 提示符锚点及等待终端回显恢复的状态 |
+| `terminal_view/src/suggestion_popup.rs` | 列表、滚动、鼠标与光标末端定位 |
 
-输入通过明确的 Inactive / Prompt / Editing / Submitted 状态流转，已提交命令只能在 Execute 标记确认后进入历史。
+视图不读取文件系统、不解析项目配置、不选择候选提供者。应用为每个终端注入独立服务；
+上下文同步借用历史和命令清单，避免每次按键复制全部清单。服务只使用当前会话的数据源。
+缓存最多保存一份目录数据和一份项目数据；重连时清空缓存并递增代次，旧任务不能回填新会话缓存。
+未注入服务时保留正常终端输入，不生成应用候选。
+
+输入通过 Inactive / Prompt / Editing / Submitted 状态流转，已提交命令只能在 Execute 标记确认后进入历史。
 菜单关闭状态只属于 Editing；等待原生编辑恢复时必须持有当前提示符锚点，提交、结束或重连会丢弃该锚点。
-异步结果统一校验请求代号、输入版本、工作目录和路径查询；相同文字的新请求也不会接受旧结果。
-缓存仍最多保存一份目录数据和一份项目数据，保留现有来源优先级、TTL、超时、候选评分和按键行为。
+异步结果校验请求代号、输入版本、工作目录、完整输入、光标和 Shell 类型；相同文字的新请求也不会接受旧结果。
+候选评分、来源优先级、TTL、超时和按键行为保持原有规则。
 
-本轮回归覆盖 25 项终端视图测试、49 项应用测试、工作区编译和 Clippy 性能检查，
-并通过 Linux GUI 验证原生历史恢复、行中替换参数完整性、密码隔离、本地路径、本地及 SSH 项目候选。
+本次边界修复验证：应用 74 项、视图 6 项、会话 4 项、SSH 29 项通过；工作区全目标编译和相关 crate
+全目标 Clippy 性能检查通过。真实 OpenSSH 安装和带桌面的 WayX 测试默认忽略，未声称已运行。
+
+Linux Xvfb 实际界面验证了应用服务提供路径候选、Tab 插入后执行文件读取，以及右箭头接受 Shell 原生建议后清除旧命令候选。

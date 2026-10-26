@@ -1,5 +1,5 @@
 //! Filesystem execution, bounded caches and deadlines for deferred providers.
-use crate::{
+use super::{
     completion::Candidate, completion_provider::Lookup, path_suggestions::Entry,
     project_completions,
 };

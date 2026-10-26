@@ -1,9 +1,8 @@
 //! Session orchestration: query selection, cancellation and result identity.
 use crate::{
     SuggestionSettings,
-    completion_provider::{Provider, Work},
-    completion_resources::{self, Backend, CacheEntry},
-    path_suggestions::PathQuery,
+    completion::Candidate,
+    completion_service::{Backend, CompletionJob},
     suggestions::Suggestions,
 };
 use gpui::{BackgroundExecutor, Task};
@@ -12,15 +11,17 @@ struct Identity {
     generation: u64,
     revision: u64,
     cwd: String,
-    query: PathQuery,
+    text: String,
+    cursor: usize,
+    powershell: Option<bool>,
 }
 pub(super) struct Request {
     identity: Identity,
-    work: completion_resources::Request,
+    work: Box<dyn CompletionJob>,
 }
 pub(super) struct Response {
     identity: Identity,
-    data: completion_resources::Response,
+    data: Vec<Candidate>,
 }
 pub(super) enum Acceptance {
     None,
@@ -32,7 +33,6 @@ pub(super) struct CompletionController {
     pub task: Task<()>,
     tracking: crate::prompt_input::InputTracking,
     generation: u64,
-    cache: Vec<CacheEntry>,
 }
 impl CompletionController {
     pub fn new(settings: SuggestionSettings) -> Self {
@@ -41,7 +41,6 @@ impl CompletionController {
             task: Task::ready(()),
             tracking: Default::default(),
             generation: 0,
-            cache: Vec::new(),
         }
     }
     pub fn cancel(&mut self) {
@@ -69,7 +68,9 @@ impl CompletionController {
         self.model.add_command("");
         self.model.cwd = None;
         self.model.powershell = None;
-        self.cache.clear();
+        if let Some(service) = &self.model.service {
+            service.reset();
+        }
         self.tracking.reset();
     }
     pub fn has_input_anchor(&self) -> bool {
@@ -157,30 +158,25 @@ impl CompletionController {
         Acceptance::Insert { bytes, retrigger }
     }
     pub fn request(&self, manual: bool, backend: Backend) -> Option<Request> {
+        if !self.model.can_query() {
+            return None;
+        }
         let context = self.model.provider_context();
-        let path = context.path.clone()?;
-        // Project arguments retain priority over generic file suggestions.
-        let lookup = [Provider::Project, Provider::Paths]
-            .into_iter()
-            .find_map(|provider| match provider.query(&context) {
-                Some(Work::Lookup(query)) => Some(query),
-                _ => None,
-            })?;
-        let cwd = self.model.cwd.clone().unwrap_or_default();
+        let work = self
+            .model
+            .service
+            .as_ref()?
+            .deferred(&context, backend, manual)?;
         Some(Request {
             identity: Identity {
                 generation: self.generation,
                 revision: self.model.revision,
-                cwd: cwd.clone(),
-                query: path,
+                cwd: context.cwd.into(),
+                text: context.text.into(),
+                cursor: context.cursor,
+                powershell: context.powershell,
             },
-            work: completion_resources::Request {
-                lookup,
-                backend,
-                cache: self.cache.clone(),
-                manual,
-                cwd,
-            },
+            work,
         })
     }
     /// One gate for every deferred source, including identical text on a newer prompt.
@@ -189,15 +185,13 @@ impl CompletionController {
         if identity.generation != self.generation
             || identity.revision != self.model.revision
             || self.model.cwd.as_deref().unwrap_or("") != identity.cwd
-            || self.model.path_query().as_ref() != Some(&identity.query)
+            || self.model.text != identity.text
+            || self.model.cursor != identity.cursor
+            || self.model.powershell != identity.powershell
         {
             return false;
         }
-        // Keep one path cache and one project cache, matching the original bound.
-        self.cache
-            .retain(|entry| !entry.key.same_source(&response.data.cache.key));
-        self.cache.push(response.data.cache);
-        self.model.merge_candidates(response.data.candidates);
+        self.model.merge_candidates(response.data);
         true
     }
 }
@@ -205,7 +199,7 @@ impl Request {
     pub async fn resolve(self, executor: BackgroundExecutor) -> Option<Response> {
         Some(Response {
             identity: self.identity,
-            data: self.work.resolve(executor).await?,
+            data: self.work.resolve(executor).await,
         })
     }
 }
@@ -213,8 +207,42 @@ impl Request {
 mod tests {
     use super::*;
     use terminal::PromptEvent;
+    struct TestService;
+    struct TestJob;
+    impl crate::completion_service::CompletionJob for TestJob {
+        fn resolve(
+            self: Box<Self>,
+            _: BackgroundExecutor,
+        ) -> futures::future::BoxFuture<'static, Vec<Candidate>> {
+            Box::pin(async { Vec::new() })
+        }
+    }
+    impl crate::completion_service::CompletionService for TestService {
+        fn immediate(&self, query: &crate::completion_service::Context<'_>) -> Vec<Candidate> {
+            if query.text == "ca" {
+                vec![Candidate::new(
+                    "camera-settings.exe".into(),
+                    2,
+                    crate::completion::Kind::Command,
+                    crate::completion::Source::Shell,
+                    1,
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+        fn deferred(
+            &self,
+            _: &crate::completion_service::Context<'_>,
+            _: Backend,
+            _: bool,
+        ) -> Option<Box<dyn CompletionJob>> {
+            Some(Box::new(TestJob))
+        }
+    }
     fn controller() -> CompletionController {
         let mut controller = CompletionController::new(Default::default());
+        controller.model.service = Some(std::sync::Arc::new(TestService));
         controller.model.phase(PromptEvent::Prompt);
         controller.model.phase(PromptEvent::Input);
         controller.model.context("shell", "posix");
@@ -225,19 +253,14 @@ mod tests {
         controller
     }
     fn result(request: Request) -> Response {
-        let entries = vec![crate::path_suggestions::Entry {
-            name: "sample.txt".into(),
-            directory: false,
-        }];
         Response {
-            data: completion_resources::Response {
-                candidates: request.identity.query.candidates(entries.clone()),
-                cache: CacheEntry {
-                    key: completion_resources::CacheKey::Directory("/project/".into()),
-                    loaded: std::time::Instant::now(),
-                    data: completion_resources::Data::Paths(entries),
-                },
-            },
+            data: vec![Candidate::new(
+                "sample.txt".into(),
+                0,
+                crate::completion::Kind::File,
+                crate::completion::Source::Filesystem,
+                1,
+            )],
             identity: request.identity,
         }
     }
@@ -306,22 +329,21 @@ mod tests {
     #[test]
     fn a_new_request_rejects_old_results_even_when_input_is_identical() {
         let mut controller = controller();
-        let old = controller.request(false, Backend::local()).unwrap();
+        let old = controller.request(false, Backend::Local).unwrap();
         controller.begin(true);
         assert!(!controller.apply(result(old)));
-        let current = controller.request(true, Backend::local()).unwrap();
+        let current = controller.request(true, Backend::Local).unwrap();
         assert!(controller.apply(result(current)));
         assert_eq!(controller.model.candidates[0].label, "sample.txt");
     }
     #[test]
     fn changed_directory_and_reconnect_reject_inflight_results() {
         let mut controller = controller();
-        let old = controller.request(false, Backend::local()).unwrap();
+        let old = controller.request(false, Backend::Local).unwrap();
         controller.model.context("cwd", "/another-project");
         assert!(!controller.apply(result(old)));
-        let old = controller.request(false, Backend::local()).unwrap();
+        let old = controller.request(false, Backend::Local).unwrap();
         controller.reset_session();
         assert!(!controller.apply(result(old)));
-        assert!(controller.cache.is_empty());
     }
 }

@@ -1,9 +1,10 @@
 //! Shared query contract for immediate and filesystem-backed providers.
-use crate::{
+use super::{
     SuggestionSettings,
-    completion::{Candidate, Kind, Source, match_score},
+    completion::{Candidate, Kind, Source},
     path_suggestions::PathQuery,
     project_completions,
+    scoring::match_score,
 };
 pub(super) struct Context<'a> {
     pub text: &'a str,
@@ -111,7 +112,7 @@ impl Provider {
                     return None;
                 }
                 Some(Work::Ready(
-                    crate::command_specs::candidates(context.text)
+                    super::command_specs::candidates(context.text)
                         .into_iter()
                         .map(|(text, description)| {
                             let kind = if text

@@ -1,5 +1,5 @@
 //! Project metadata providers: no subprocesses, package scripts, hooks or generators.
-use crate::{
+use super::{
     completion::{Candidate, Kind, Source},
     path_suggestions::PathQuery,
 };

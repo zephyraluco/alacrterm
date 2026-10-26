@@ -6,6 +6,7 @@
 mod actions;
 mod assets;
 mod components;
+mod completion;
 mod config;
 mod dialog;
 use util::format;
