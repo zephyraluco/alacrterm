@@ -332,6 +332,36 @@ async fn run_session(
     if !accepted {
         x11.disable();
     }
+    // Activate only this connection. Many servers accept LC_* by default; no
+    // sshd configuration is changed, and refusal leaves a normal native login.
+    if matches!(launch, Launch::Shell(_)) {
+        if let Some(scripts) = params.shell_integration {
+            let mut activated = false;
+            for variable in ["ALACRTERM_REMOTE_INTEGRATION", "LC_ALACRTERM_INTEGRATION"] {
+                if channel.set_env(true, variable, "1").await.is_err() {
+                    break;
+                }
+                let accepted = tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        match channel.wait().await {
+                            Some(ChannelMsg::Success) => return true,
+                            Some(ChannelMsg::Failure | ChannelMsg::Close) | None => return false,
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .unwrap_or(false);
+                if accepted {
+                    activated = true;
+                    break;
+                }
+            }
+            if activated && !crate::shell_integration::install(&handle, scripts).await {
+                log::debug!("Persistent shell integration unavailable; continuing native login");
+            }
+        }
+    }
     let interactive = match launch {
         Launch::Shell(size) => {
             let size = size.sanitized();
@@ -369,27 +399,10 @@ async fn run_session(
         sink.connected();
     }
 
-    let mut integration = if interactive { params.shell_integration } else { None };
-    let mut prompt = crate::shell_integration::PromptGate::default();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut queued_input: Vec<Vec<u8>> = Vec::new();
-    let mut queued_bytes = 0usize;
     loop {
         tokio::select! {
             message = reader.wait() => match message {
-                Some(ChannelMsg::Data { data }) => {
-                    // Deliver all login output, including MOTD and last-login, unchanged.
-                    sink.data(&data).await;
-                    if integration.is_some() && prompt.observe(&data) {
-                        if let Some(scripts) = integration.take() {
-                            if let Some(command) = crate::shell_integration::prepare(&handle, scripts).await {
-                                writer.data_bytes(command.into_bytes()).await?;
-                            }
-                        }
-                        for bytes in queued_input.drain(..) { writer.data_bytes(bytes).await?; }
-                        queued_bytes = 0;
-                    }
-                },
+                Some(ChannelMsg::Data { data }) => sink.data(&data).await,
                 // ext = 1 是 stderr。终端里两者是同一个屏幕,一起画。
                 Some(ChannelMsg::ExtendedData { data, .. }) => sink.data(&data).await,
                 Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
@@ -399,23 +412,8 @@ async fn run_session(
                 Some(ChannelMsg::Close) | None => break,
                 Some(_) => {}
             },
-            _ = tokio::time::sleep_until(deadline), if integration.is_some() => {
-                integration = None;
-                for bytes in queued_input.drain(..) { writer.data_bytes(bytes).await?; }
-                queued_bytes = 0;
-            },
             command = commands.recv() => match command {
                 Some(Command::Write(bytes)) => {
-                    if integration.is_some() {
-                        queued_bytes += bytes.len();
-                        queued_input.push(bytes);
-                        if queued_bytes <= 64 * 1024 { continue; }
-                        // Bound startup buffering; large pastes use the native shell.
-                        integration = None;
-                        for bytes in queued_input.drain(..) { writer.data_bytes(bytes).await?; }
-                        queued_bytes = 0;
-                        continue;
-                    }
                     if let Err(error) = writer.data_bytes(bytes).await {
                         return Err(error.into());
                     }

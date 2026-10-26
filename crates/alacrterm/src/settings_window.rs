@@ -231,7 +231,7 @@ fn suggestion_group(root: WeakEntity<AppRoot>) -> SettingGroup {
         ("项目参数", "从当前项目提供脚本和分支等候选。", |s| s.dynamic, |s,v| s.dynamic=v),
         ("模糊匹配", "命令名允许子序列匹配，前缀匹配优先。", |s| s.fuzzy, |s,v| s.fuzzy=v),
         ("接受后补空格", "文件和命令接受后追加空格；目录和历史除外。", |s| s.insert_trailing_space, |s,v| s.insert_trailing_space=v),
-        ("SSH 自动集成", "为新连接的受支持远端 shell 加载会话级集成。", |s| s.remote_integration, |s,v| s.remote_integration=v),
+        ("SSH 自动集成", "为 Bash/Zsh 安装或复用启动入口，仅对 Alacrterm 会话启用。", |s| s.remote_integration, |s,v| s.remote_integration=v),
     ];
     let mut group = SettingGroup::new();
     for &(title, description, read, write) in fields {

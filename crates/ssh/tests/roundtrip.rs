@@ -967,7 +967,7 @@ async fn completion_metadata_reads_are_bounded_and_do_not_block_browsing() {
 }
 
 #[tokio::test]
-async fn native_login_preserves_banner_and_flushes_early_input_on_prompt_timeout() {
+async fn native_login_preserves_banner_and_early_input_when_activation_is_refused() {
     let port = local_server::serve().await.unwrap();
     let known_hosts = temp_known_hosts("login-input-order");
     let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
@@ -988,7 +988,7 @@ async fn native_login_preserves_banner_and_flushes_early_input_on_prompt_timeout
 }
 
 #[tokio::test]
-async fn unavailable_shell_probe_silently_falls_back_to_an_interactive_shell() {
+async fn refused_activation_preserves_plain_interactive_shell() {
     let port = local_server::serve().await.unwrap();
     let known_hosts = temp_known_hosts("integration-fallback");
     let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
@@ -1005,8 +1005,8 @@ async fn unavailable_shell_probe_silently_falls_back_to_an_interactive_shell() {
 }
 
 #[tokio::test]
-#[ignore = "requires a native OpenSSH test server and SSH_INTEGRATION_TEST_PORT/KEY"]
-async fn native_openssh_loads_session_integration_without_changing_startup_files() {
+#[ignore = "modifies startup files: requires an isolated OpenSSH account accepting integration env variables and SSH_INTEGRATION_TEST_PORT/KEY"]
+async fn native_openssh_loads_persistent_integration_in_an_isolated_account() {
     let port: u16 = std::env::var("SSH_INTEGRATION_TEST_PORT").unwrap().parse().unwrap();
     let key = PathBuf::from(std::env::var("SSH_INTEGRATION_TEST_KEY").unwrap());
     let user = std::env::var("SSH_INTEGRATION_TEST_USER").unwrap_or_else(|_| "agent".into());
@@ -1103,5 +1103,57 @@ async fn file_transfer_survives_closing_its_terminal_connection() {
     drive(&mut upload).await.unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), contents);
     let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(".bashrc"), "# USER_STARTUP\n").unwrap();
+    let port = local_server::serve_with_integration_home(home.path().to_owned())
+        .await
+        .unwrap();
+    let known_hosts = temp_known_hosts("persistent-startup");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    params.shell_integration = Some(ssh::ShellIntegration {
+        bash: include_str!("../../terminal/shell-integration/bash.sh"),
+        zsh: include_str!("../../terminal/shell-integration/zsh.zsh"),
+    });
+    let mut first_rc = Vec::new();
+    for attempt in 0..2 {
+        let (sender, mut events) = futures::channel::mpsc::unbounded();
+        let session = SshSession::connect(params.clone(), SshSize::cells(80, 24), sender).unwrap();
+        let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+            text.contains("633;AlacrtermShell;posix") && text.ends_with(PROMPT)
+        })
+        .await;
+        assert!(text.contains(BANNER));
+        assert!(text.contains("633;AlacrtermShell;posix"));
+        assert!(
+            !text.contains("source ")
+                && !text.contains("loader.sh")
+                && !text.contains("command rm")
+        );
+        let rc = std::fs::read(home.path().join(".bashrc")).unwrap();
+        if attempt == 0 {
+            first_rc = rc;
+        } else {
+            assert_eq!(rc, first_rc);
+        }
+        session.disconnect();
+    }
+    params.shell_integration = None;
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
+    let (text, _) = collect_until(&mut events, Duration::from_secs(5), None, |text, _| {
+        text.ends_with(PROMPT)
+    })
+    .await;
+    assert!(text.contains(BANNER));
+    assert!(!text.contains("633;AlacrtermShell"));
+    session.disconnect();
     let _ = std::fs::remove_file(known_hosts);
 }

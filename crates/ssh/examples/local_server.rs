@@ -86,6 +86,8 @@ pub struct LocalServer {
     x11_cookie: Option<[u8; 16]>,
     reject_x11: bool,
     suggest_integration: bool,
+    integration_home: Option<std::path::PathBuf>,
+    integration_enabled: bool,
 }
 
 impl LocalServer {
@@ -97,6 +99,8 @@ impl LocalServer {
             x11_cookie: None,
             reject_x11: false,
             suggest_integration: false,
+            integration_home: None,
+            integration_enabled: false,
         }
     }
 
@@ -170,7 +174,9 @@ impl russh::server::Server for LocalServer {
     type Handler = Self;
 
     fn new_client(&mut self, _peer: Option<SocketAddr>) -> Self {
-        Self::new()
+        let mut client = Self::new();
+        client.integration_home = self.integration_home.clone();
+        client
     }
 
     fn handle_session_error(&mut self, error: russh::Error) {
@@ -306,6 +312,23 @@ impl russh::server::Handler for LocalServer {
         Ok(())
     }
 
+    async fn env_request(
+        &mut self,
+        channel: ChannelId,
+        variable: &str,
+        value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if self.integration_home.is_some() && variable == "LC_ALACRTERM_INTEGRATION" && value == "1"
+        {
+            self.integration_enabled = true;
+            session.channel_success(channel)?;
+        } else {
+            session.channel_failure(channel)?;
+        }
+        Ok(())
+    }
+
     async fn shell_request(
         &mut self,
         channel: ChannelId,
@@ -314,7 +337,29 @@ impl russh::server::Handler for LocalServer {
         eprintln!("[local_server] shell_request");
         self.shell = Some(channel);
         self.probe_x11(channel, session);
-        session.data(channel, format!("{BANNER}{PROMPT}").into_bytes())?;
+        if let Some(home) = &self.integration_home {
+            session.data(channel, BANNER.as_bytes().to_vec())?;
+            let mut command = std::process::Command::new("bash");
+            command
+                .args([
+                    "--noprofile",
+                    "--rcfile",
+                    home.join(".bashrc").to_str().unwrap(),
+                    "-ic",
+                    "history",
+                ])
+                .env("HOME", home)
+                .env_remove("ALACRTERM_REMOTE_INTEGRATION")
+                .env_remove("LC_ALACRTERM_INTEGRATION");
+            if self.integration_enabled {
+                command.env("LC_ALACRTERM_INTEGRATION", "1");
+            }
+            let output = command.output()?;
+            session.data(channel, output.stdout)?;
+            session.data(channel, PROMPT.as_bytes().to_vec())?;
+        } else {
+            session.data(channel, format!("{BANNER}{PROMPT}").into_bytes())?;
+        }
         Ok(())
     }
 
@@ -413,6 +458,19 @@ impl russh::server::Handler for LocalServer {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).trim().to_string();
+        if let Some(home) = &self.integration_home {
+            let output = std::process::Command::new("sh")
+                .args(["-c", &command])
+                .env("HOME", home)
+                .env("SHELL", "/bin/bash")
+                .env("ZDOTDIR", home)
+                .output()?;
+            session.data(channel, output.stdout)?;
+            session.exit_status_request(channel, output.status.code().unwrap_or(1) as u32)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         eprintln!("[local_server] exec_request {command:?}");
         session.data(channel, format!("EXEC:{command}\r\n").into_bytes())?;
         let code = command
@@ -437,6 +495,17 @@ pub async fn serve() -> std::io::Result<u16> {
 pub async fn serve_with_compression(
     compression: std::borrow::Cow<'static, [russh::compression::Name]>,
 ) -> std::io::Result<u16> {
+    serve_internal(compression, None).await
+}
+
+pub async fn serve_with_integration_home(home: std::path::PathBuf) -> std::io::Result<u16> {
+    serve_internal(russh::Preferred::default().compression, Some(home)).await
+}
+
+async fn serve_internal(
+    compression: std::borrow::Cow<'static, [russh::compression::Name]>,
+    integration_home: Option<std::path::PathBuf>,
+) -> std::io::Result<u16> {
     let config = Arc::new(russh::server::Config {
         preferred: russh::Preferred {
             compression,
@@ -453,6 +522,7 @@ pub async fn serve_with_compression(
     let port = listener.local_addr()?.port();
     tokio::spawn(async move {
         let mut server = LocalServer::new();
+        server.integration_home = integration_home;
         if let Err(error) = server.run_on_socket(config, &listener).await {
             eprintln!("[local_server] 退出:{error}");
         }
