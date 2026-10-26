@@ -1,17 +1,24 @@
-//! SSH X11 authentication and channel bridging to the shared platform display.
+//! SSH X11 authentication and channel bridging to a host-provided display target.
 use anyhow::{Result, ensure};
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 #[derive(Clone)]
 pub(crate) struct Forwarder {
     fake: [u8; 16],
     enabled: Arc<AtomicBool>,
+    target: Arc<dyn crate::X11Target>,
 }
 impl Forwarder {
-
-    pub(crate) fn session() -> Self {
+    pub(crate) fn session(target: Arc<dyn crate::X11Target>) -> Self {
         Self {
             fake: rand::random(),
+            target,
             enabled: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -32,16 +39,12 @@ impl Forwarder {
         if !self.enabled.load(Ordering::Acquire) {
             return;
         }
-        let Ok(forwarder) = platform::wayx::Endpoint::current() else {
-            return;
-        };
-        let Ok(permit) = forwarder.acquire() else {
+        let Ok(lease) = self.target.acquire() else {
             return;
         };
         reply.accept().await;
         let fake = self.fake;
         tokio::spawn(async move {
-            let _permit = permit;
             let result: Result<()> = async {
                 let mut remote = channel.into_stream();
                 let prefix = tokio::time::timeout(
@@ -50,16 +53,11 @@ impl Forwarder {
                 )
                 .await??;
                 // Authentication must complete before opening any local X connection.
-                let mut local = forwarder.local().await?;
+                let mut local = lease.connect().await?;
                 local.write_all(&prefix).await?;
                 tokio::select! {
                     result = tokio::io::copy_bidirectional(&mut remote, &mut local) => { result?; }
-                    _ = async {
-                        loop {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            if !forwarder.is_current() { break; }
-                        }
-                    } => {}
+                    _ = lease.closed() => {}
                 }
                 Ok(())
             }
@@ -102,7 +100,7 @@ async fn validated_setup<R: AsyncRead + Unpin>(stream: &mut R, fake: &[u8; 16]) 
         .zip(fake)
         .fold(0u8, |acc, (a, b)| acc | (a ^ b));
     ensure!(difference == 0, "Invalid X11 forwarding cookie");
-    // SSH authenticates each forwarded connection; the local WayX display uses -ac.
+    // SSH authenticates each forwarded connection; the local destination uses no authentication.
     // Strip both authentication fields and their body, preserving byte order/version.
     header[6..10].fill(0);
     Ok(header.to_vec())
@@ -178,5 +176,4 @@ mod tests {
             );
         }
     }
-
 }

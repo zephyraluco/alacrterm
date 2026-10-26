@@ -7078,7 +7078,6 @@ dependencies = [
  "dirs 7.0.0",
  "futures",
  "log",
- "platform",
  "rand 0.10.3",
  "russh",
  "russh-sftp",

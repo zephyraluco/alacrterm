@@ -30,7 +30,6 @@ tokio = { version = "1", features = [
     "macros",
 ] }
 
-platform.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

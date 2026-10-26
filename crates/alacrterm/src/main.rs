@@ -23,6 +23,7 @@ mod terminal_panel;
 mod transfer_manager;
 mod welcome;
 mod wayx_control;
+mod x11;
 
 use components::ACTIVITY_BAR_WIDTH;
 use gpui::{

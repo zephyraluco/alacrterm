@@ -956,8 +956,8 @@ impl TerminalBuilder {
             let (backend, ssh_events, title_override, is_remote_terminal) = match &target {
                 TerminalTarget::Ssh(params) => {
                     let (ssh_tx, ssh_events) = unbounded::<SshEvent>();
-                    let session = SshSession::connect_with_setup(
-                        params.clone(), INITIAL_PTY_SIZE, ssh_tx, options.ssh_setup.clone(),
+                    let session = SshSession::connect_with_options(
+                        params.clone(), INITIAL_PTY_SIZE, ssh_tx, options.ssh_options(),
                     )
                     .with_context(|| format!("无法启动 SSH 会话（{}）", params.endpoint()))?;
                     log::debug!("SSH 会话已启动:{}", params.endpoint());
@@ -2769,11 +2769,11 @@ impl Terminal {
             return false;
         };
         let (sender, events) = unbounded::<SshEvent>();
-        let Ok(session) = SshSession::connect_with_setup(
+        let Ok(session) = SshSession::connect_with_options(
             params.clone(),
             crate::backend::ssh_size_from_bounds(self.last_content.terminal_bounds),
             sender,
-            self.template.options.ssh_setup.clone(),
+            self.template.options.ssh_options(),
         ) else {
             return false;
         };

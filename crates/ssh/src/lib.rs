@@ -51,7 +51,9 @@ mod params;
 mod session;
 mod setup;
 pub use setup::{SessionContext, SessionSetup, SshCommandConnection, CommandOutput};
-mod wayx;
+mod x11;
+mod x11_target;
+pub use x11_target::{SessionOptions, X11Lease, X11Stream, X11Target};
 
 pub use error::SshError;
 pub use fs::{

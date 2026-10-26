@@ -139,7 +139,7 @@ pub struct SshSession {
 /// 这次连接要远端干什么。
 enum Launch {
     /// 交互式 shell:申请 PTY 再申请 shell(终端走这条)。
-    Shell(SshSize, Option<Arc<dyn crate::SessionSetup>>),
+    Shell(SshSize, crate::SessionOptions),
     /// 执行一条命令:**不申请 PTY**,命令跑完会话就结束(与 `ssh host cmd` 同)。
     Exec(String),
 }
@@ -165,7 +165,13 @@ impl SshSession {
         events: UnboundedSender<SshEvent>,
         setup: Option<Arc<dyn crate::SessionSetup>>,
     ) -> std::io::Result<Self> {
-        Self::spawn(params, Launch::Shell(size, setup), events)
+        Self::connect_with_options(params, size, events, crate::SessionOptions { setup, ..Default::default() })
+    }
+
+    pub fn connect_with_options(
+        params: SshParams, size: SshSize, events: UnboundedSender<SshEvent>, options: crate::SessionOptions,
+    ) -> std::io::Result<Self> {
+        Self::spawn(params, Launch::Shell(size, options), events)
     }
 
     /// 建一个**执行单条命令**的会话(与 `ssh host <cmd>` 同语义):没有 PTY、不走 shell 的
@@ -282,7 +288,10 @@ async fn run_session(
     sink: &EventSink,
     commands: &mut UnboundedReceiver<Command>,
 ) -> Result<Option<u32>, SshError> {
-    let x11 = crate::wayx::Forwarder::session();
+    let x11 = match launch {
+        Launch::Shell(_, options) => options.x11.clone().map(crate::x11::Forwarder::session),
+        Launch::Exec(_) => None,
+    };
     sink.status(format!("正在连接 {} …", params.endpoint()));
     let socket = tokio::net::TcpStream::connect((params.host.as_str(), params.port))
         .await
@@ -310,7 +319,7 @@ async fn run_session(
         // 终端会话这条路有人可问(界面弹窗);没人的情况见 `HostKeyPolicy::Ask`。
         Some(sink.clone()),
     );
-    handler.x11 = Some(x11.clone());
+    handler.x11 = x11.clone();
     let mut handle = client::connect_stream(config, socket, handler).await?;
 
     auth::authenticate(&mut handle, params, sink).await?;
@@ -319,6 +328,7 @@ async fn run_session(
         .channel_open_session()
         .await
         .map_err(|error| SshError::ChannelOpen(error.to_string()))?;
+    if let Some(x11) = &x11 {
     // Declining X11 must not prevent a normal SSH terminal from opening.
     let accepted = if channel
         .request_x11(true, false, "MIT-MAGIC-COOKIE-1", x11.cookie_hex(), 0)
@@ -342,7 +352,8 @@ async fn run_session(
     if !accepted {
         x11.disable();
     }
-    if let Launch::Shell(_, Some(setup)) = launch {
+    }
+    if let Launch::Shell(_, crate::SessionOptions { setup: Some(setup), .. }) = launch {
         setup
             .prepare(crate::SessionContext::new(params, &mut channel, sink))
             .await;

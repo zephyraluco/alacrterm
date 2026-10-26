@@ -129,7 +129,7 @@ struct ResponseSlot {
 
 /// 客户端回调:主机密钥校验需要的全部上下文。
 pub(crate) struct ClientHandler {
-    pub(crate) x11: Option<crate::wayx::Forwarder>,
+    pub(crate) x11: Option<crate::x11::Forwarder>,
     user: String,
     host: String,
     port: u16,

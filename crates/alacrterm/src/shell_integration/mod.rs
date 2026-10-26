@@ -38,6 +38,7 @@ pub(crate) fn launch_options(remote_enabled: bool) -> LaunchOptions {
     let enabled = std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
         != Some(std::ffi::OsStr::new("0"));
     LaunchOptions {
+        ssh_x11: Some(Arc::new(crate::x11::WayxTarget)),
         local_setup: enabled.then(|| Arc::new(LocalIntegration) as Arc<dyn LocalSessionSetup>),
         ssh_setup: (enabled && remote_enabled)
             .then(|| Arc::new(remote::RemoteIntegration) as Arc<dyn ssh::SessionSetup>),

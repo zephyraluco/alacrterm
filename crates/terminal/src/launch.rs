@@ -29,6 +29,13 @@ pub type OscDecoder = fn(&[u8]) -> Option<ShellMetadata>;
 #[derive(Clone, Default)]
 pub struct LaunchOptions {
     pub local_setup: Option<Arc<dyn LocalSessionSetup>>,
+    pub ssh_x11: Option<Arc<dyn ssh::X11Target>>,
     pub ssh_setup: Option<Arc<dyn ssh::SessionSetup>>,
     pub osc_decoder: Option<OscDecoder>,
+}
+
+impl LaunchOptions {
+    pub(crate) fn ssh_options(&self) -> ssh::SessionOptions {
+        ssh::SessionOptions { setup: self.ssh_setup.clone(), x11: self.ssh_x11.clone() }
+    }
 }

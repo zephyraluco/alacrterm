@@ -802,110 +802,6 @@ async fn unreachable_host_reports_the_address() {
     );
 }
 
-/// Concurrent SSH sessions share WayX, and closing one must not disrupt the other.
-#[tokio::test]
-#[ignore = "requires a host display and bundled WayX runtime"]
-async fn shared_x11_server_survives_disconnecting_another_session() {
-    struct Cleanup;
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            platform::shutdown_wayx();
-        }
-    }
-    let _cleanup = Cleanup;
-    platform::start_wayx();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while platform::wayx_status() != platform::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(50)).await; }
-    }).await.unwrap();
-    let port = local_server::serve_with_compression(vec![russh::compression::ZLIB_LEGACY].into())
-        .await
-        .expect("local SSH server with delayed compression");
-    let known_hosts = temp_known_hosts("x11-forwarding");
-    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
-    params.host_key = HostKeyPolicy::AcceptNew;
-    params.known_hosts = Some(known_hosts.clone());
-    let (tx, mut events) = futures::channel::mpsc::unbounded();
-    let first = SshSession::connect(params.clone(), SshSize::cells(80, 24), tx).unwrap();
-    let (tx, mut other_events) = futures::channel::mpsc::unbounded();
-    let second = SshSession::connect(params, SshSize::cells(80, 24), tx).unwrap();
-    let text = collect_until(&mut events, Duration::from_secs(25), None, |text, _| {
-        text.contains("X11:OK") || text.contains("X11:FAILED")
-    })
-    .await;
-    assert!(text.0.contains("X11:OK"), "{text:?}");
-    let text = collect_until(
-        &mut other_events,
-        Duration::from_secs(25),
-        None,
-        |text, _| text.contains("X11:OK") || text.contains("X11:FAILED"),
-    )
-    .await;
-    assert!(text.0.contains("X11:OK"), "{text:?}");
-    first.write(b"exit\r");
-    let (_, exit) = collect_until(&mut events, Duration::from_secs(5), None, |_, _| false).await;
-    assert_eq!(exit, Some(EXIT_CODE));
-    drop(first);
-    second.write(b"x11\r");
-    let text = collect_until(
-        &mut other_events,
-        Duration::from_secs(5),
-        None,
-        |text, _| text.contains("X11:OK") || text.contains("X11:FAILED"),
-    )
-    .await;
-    assert!(text.0.contains("X11:OK"), "{text:?}");
-    platform::stop_wayx();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while platform::wayx_status() != platform::WayxStatus::Stopped { tokio::time::sleep(Duration::from_millis(20)).await; }
-    }).await.unwrap();
-    second.write(b"still-connected\r");
-    let (text, _) = collect_until(&mut other_events, Duration::from_secs(5), None, |text, _| text.contains("REPLY:still-connected")).await;
-    assert!(text.contains("REPLY:still-connected"));
-    platform::start_wayx();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while platform::wayx_status() != platform::WayxStatus::Running { tokio::time::sleep(Duration::from_millis(20)).await; }
-    }).await.unwrap();
-    second.write(b"x11\r");
-    let (text, _) = collect_until(&mut other_events, Duration::from_secs(5), None, |text, _| text.contains("X11:OK") || text.contains("X11:FAILED")).await;
-    assert!(text.contains("X11:OK"), "{text}");
-    second.write(b"exit\r");
-    let (_, exit) = collect_until(&mut other_events, Duration::from_secs(5), None, |_, _| {
-        false
-    })
-    .await;
-    assert_eq!(exit, Some(EXIT_CODE));
-    drop(second);
-    let _ = std::fs::remove_file(known_hosts);
-}
-
-
-#[tokio::test]
-async fn rejects_x11_silently_and_preserves_interactive_shell() {
-    let port = local_server::serve().await.unwrap();
-    let known_hosts = temp_known_hosts("x11-refusal");
-    let mut params = SshParams::new("127.0.0.1", port, "no-x11").with_password(PASSWORD);
-    params.host_key = HostKeyPolicy::AcceptNew;
-    params.known_hosts = Some(known_hosts.clone());
-    let (tx, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect(params, SshSize::cells(80, 24), tx).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(event) = events.next().await {
-            match event {
-                SshEvent::Status(text) => assert!(!text.contains("X11") && !text.contains("WayX")),
-                SshEvent::Connected => break,
-                SshEvent::Closed { reason, .. } => panic!("shell closed: {reason:?}"),
-                _ => {}
-            }
-        }
-    }).await.unwrap();
-    session.write(b"fallback-ok\r");
-    let (text, _) = collect_until(&mut events, Duration::from_secs(5), None, |text, _| text.contains("REPLY:fallback-ok")).await;
-    assert!(text.contains("REPLY:fallback-ok"));
-    assert_eq!(platform::wayx_status(), platform::WayxStatus::Stopped);
-    session.disconnect();
-    let _ = std::fs::remove_file(known_hosts);
-}
-
 /// A single offered algorithm forces negotiation to use it, rather than silently
 /// succeeding without compression. Exercise both directions and the SFTP connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1076,6 +972,58 @@ impl ssh::SessionSetup for ProbeEnvironment {
             assert!(!session.set_env("TEST_SESSION_SETUP", "1", Duration::from_secs(2)).await.unwrap());
         })
     }
+}
+
+#[tokio::test]
+async fn host_supplied_x11_target_receives_authenticated_setup_and_requests() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    struct Target(Arc<AtomicBool>);
+    struct Lease(Arc<AtomicBool>);
+    impl ssh::X11Target for Target {
+        fn acquire(&self) -> anyhow::Result<Box<dyn ssh::X11Lease>> {
+            Ok(Box::new(Lease(self.0.clone())))
+        }
+    }
+    impl ssh::X11Lease for Lease {
+        fn connect(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Box<dyn ssh::X11Stream>>> {
+            Box::pin(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                self.0.store(true, Ordering::SeqCst);
+                let (client, mut server) = tokio::io::duplex(4096);
+                tokio::spawn(async move {
+                    let mut header = [0; 12];
+                    server.read_exact(&mut header).await.unwrap();
+                    assert_eq!(header, [b'l', 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                    let mut body = vec![0; 72];
+                    body[20] = 1;
+                    server.write_all(&[1, 0, 11, 0, 0, 0, 18, 0]).await.unwrap();
+                    server.write_all(&body).await.unwrap();
+                    let mut requests = [0; 48];
+                    server.read_exact(&mut requests).await.unwrap();
+                    assert_eq!(requests[44], 43);
+                    let mut reply = [0; 32];
+                    reply[0] = 1;
+                    reply[2] = 3;
+                    server.write_all(&reply).await.unwrap();
+                });
+                Ok(Box::new(client) as Box<dyn ssh::X11Stream>)
+            })
+        }
+    }
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("generic-x11");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let connected = Arc::new(AtomicBool::new(false));
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let options = ssh::SessionOptions { x11: Some(Arc::new(Target(connected.clone()))), ..Default::default() };
+    let session = SshSession::connect_with_options(params, SshSize::cells(80, 24), sender, options).unwrap();
+    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| text.contains("X11:OK") || text.contains("X11:FAILED")).await;
+    assert!(text.contains("X11:OK"), "{text}");
+    assert!(connected.load(Ordering::SeqCst));
+    session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
 }
 
 #[tokio::test]

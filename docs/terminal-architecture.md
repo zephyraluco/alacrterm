@@ -1068,3 +1068,10 @@ cargo run -p ssh --example local_server -- 2299
 - SSH 的「已连上」(`Terminal::is_connected`)是**使用同一份参数做别的连接**(SFTP 文件管理器)的前置条件(§3.2 / §5.2)
 - 远端当前目录靠 **OSC 7 与窗口标题**两条:模拟器不认 OSC 7(只能自己扫,§5.4),stock bash 不发它(但发行版默认 `PS1` 会把 cwd 放进标题);**不要去改远端 shell**(`exec` 会弄丢 MOTD / `Last login`,§5.4);本地不需要这套(本地 cwd 采得到,§4.5)
 - 假 SSH 服务端(`ssh/examples/local_server.rs`)里 **`data` 回调要按通道过滤**:russh 会把**所有**通道的数据都送到 `Handler::data`,不限住的话 sftp 那条通道的协议包会被玩具 shell 当成键盘输入回显回去
+
+### 会话描述与 X11 边界
+
+`session::SessionTarget` 只描述启动意图，不依赖 terminal、SSH 或 GPUI；应用层负责转换为运行目标。
+SSH 的 `SessionOptions` 接收可选的 `X11Target`，只处理协议、转发 cookie 校验和数据桥接。
+应用层 `x11::WayxTarget` 决定 WayX Endpoint、额度与服务代次生命周期；SSH 不再依赖 platform。
+通用 SSH 会话默认不申请 X11，应用启动终端时注入目标，保持自动 X11 转发行为。
