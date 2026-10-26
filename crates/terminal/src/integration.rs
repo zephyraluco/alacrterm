@@ -29,15 +29,15 @@ pub(crate) fn prepare(
     let (script, contents) = match name.as_str() {
         "bash" => (
             "integration.sh",
-            include_str!("../shell-integration/bash.sh"),
+            include_str!("../../../scripts/shell_integration/bash.sh"),
         ),
         "zsh" => (
             "integration.zsh",
-            include_str!("../shell-integration/zsh.zsh"),
+            include_str!("../../../scripts/shell_integration/zsh.zsh"),
         ),
         _ => (
             "integration.ps1",
-            include_str!("../shell-integration/powershell.ps1"),
+            include_str!("../../../scripts/shell_integration/powershell.ps1"),
         ),
     };
     let script = dir.path().join(script);

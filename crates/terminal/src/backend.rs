@@ -41,8 +41,8 @@ impl TerminalTarget {
     pub fn configure_shell_integration(&mut self, enabled: bool) {
         if let Self::Ssh(params) = self {
             params.shell_integration = enabled.then_some(ssh::ShellIntegration {
-                bash: include_str!("../shell-integration/bash.sh"),
-                zsh: include_str!("../shell-integration/zsh.zsh"),
+                bash: include_str!("../../../scripts/shell_integration/bash.sh"),
+                zsh: include_str!("../../../scripts/shell_integration/zsh.zsh"),
             });
         }
     }

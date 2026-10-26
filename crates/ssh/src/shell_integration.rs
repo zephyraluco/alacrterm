@@ -43,11 +43,11 @@ fn installation(kind: &str, scripts: ShellIntegration, zdotdir: &str) -> String 
     let lf = |text: &str| text.replace("\r\n", "\n");
     format!(
         "sh -c {} -- {} {} {} {} {}",
-        quote(&lf(include_str!("../shell-integration/install.sh"))),
+        quote(&lf(include_str!("../../../scripts/shell_integration/install.sh"))),
         quote(kind),
         quote(&lf(scripts.bash)),
         quote(&lf(scripts.zsh)),
-        quote(&lf(include_str!("../shell-integration/loader.sh"))),
+        quote(&lf(include_str!("../../../scripts/shell_integration/loader.sh"))),
         quote(zdotdir)
     )
 }

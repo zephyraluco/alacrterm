@@ -1016,8 +1016,8 @@ async fn native_openssh_loads_persistent_integration_in_an_isolated_account() {
     params.host_key = HostKeyPolicy::AcceptNew;
     params.known_hosts = Some(known_hosts.clone());
     params.shell_integration = Some(ssh::ShellIntegration {
-        bash: include_str!("../../terminal/shell-integration/bash.sh"),
-        zsh: include_str!("../../terminal/shell-integration/zsh.zsh"),
+        bash: include_str!("../../../scripts/shell_integration/bash.sh"),
+        zsh: include_str!("../../../scripts/shell_integration/zsh.zsh"),
     });
     let (sender, mut events) = futures::channel::mpsc::unbounded();
     let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
@@ -1119,8 +1119,8 @@ async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
     params.host_key = HostKeyPolicy::AcceptNew;
     params.known_hosts = Some(known_hosts.clone());
     params.shell_integration = Some(ssh::ShellIntegration {
-        bash: include_str!("../../terminal/shell-integration/bash.sh"),
-        zsh: include_str!("../../terminal/shell-integration/zsh.zsh"),
+        bash: include_str!("../../../scripts/shell_integration/bash.sh"),
+        zsh: include_str!("../../../scripts/shell_integration/zsh.zsh"),
     });
     let mut first_rc = Vec::new();
     for attempt in 0..2 {

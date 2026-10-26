@@ -44,7 +44,7 @@ PowerShell：
 . C:\path\to\powershell.ps1
 ```
 
-脚本位于 `crates/terminal/shell-integration/`，本地使用的同份脚本嵌入应用。
+脚本位于 `scripts/shell_integration/`，本地使用的同份脚本嵌入应用。
 SSH 已存在的 OSC 133/633 集成也可提供生命周期标记。当前追踪标准字符输入、
 删除、左右移动及 Home/End、Ctrl+A/E；历史导航和原生编辑后，会尝试从已确认提示符的单行终端内容重新同步；无法确认时回退。
 
