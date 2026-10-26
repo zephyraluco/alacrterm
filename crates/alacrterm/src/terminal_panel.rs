@@ -39,6 +39,7 @@ use crate::pane_layout::{Dir, Layout, ratio_at};
 use crate::AppRoot;
 
 pub(crate) use session::SessionRequest;
+use session::SessionTarget;
 
 impl AppRoot {
     /// 新建本地终端标签页。
@@ -46,7 +47,7 @@ impl AppRoot {
         self.spawn_session(
             SessionRequest {
                 name: None,
-                target: TerminalTarget::system_shell(),
+                target: SessionTarget::Local(util::shell::Shell::System),
             },
             window,
             cx,
@@ -81,6 +82,14 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let SessionRequest { name, target } = request;
+        let target = match target {
+            SessionTarget::Local(shell) => TerminalTarget::Local(shell),
+            SessionTarget::Ssh { host, port, user, password } => {
+                let mut params = ssh::SshParams::new(host, port, user);
+                if let Some(password) = password { params = params.with_password(password); }
+                TerminalTarget::Ssh(params)
+            }
+        };
         let view = self.new_terminal(None, target.clone(), window, cx);
         let root = cx.weak_entity();
         let pane = cx.new(|cx| TabPane::new(view, name.map(Into::into), target, root, window, cx));

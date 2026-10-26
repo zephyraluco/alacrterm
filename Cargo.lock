@@ -6785,7 +6785,6 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
- "terminal",
  "util",
 ]
 

@@ -1,10 +1,21 @@
 //! Saved session models, persistence, connection requests and tree operations.
 use serde::{Deserialize, Serialize};
-use terminal::{SshParams, TerminalTarget};
+use util::shell::Shell;
 #[derive(Clone)]
 pub struct SessionRequest {
     pub name: Option<String>,
-    pub target: TerminalTarget,
+    pub target: SessionTarget,
+}
+/// Saved launch intent without terminal, GUI, or transport dependencies.
+#[derive(Clone)]
+pub enum SessionTarget {
+    Local(Shell),
+    Ssh {
+        host: String,
+        port: u16,
+        user: String,
+        password: Option<String>,
+    },
 }
 /// 条目路径:顶层开始的下标链(`[]` = 顶层)。
 pub type SessionPath = Vec<usize>;
@@ -65,14 +76,11 @@ pub struct SessionRecord {
 impl SessionRecord {
     /// 这条记录的会话参数。
     pub fn request(&self) -> SessionRequest {
-        let params = SshParams::new(self.host.clone(), self.port, self.user.clone());
-        let params = match &self.password {
-            Some(password) => params.with_password(password.clone()),
-            None => params,
-        };
         SessionRequest {
             name: Some(self.name.clone()),
-            target: TerminalTarget::Ssh(params),
+            target: SessionTarget::Ssh {
+                host: self.host.clone(), port: self.port, user: self.user.clone(), password: self.password.clone(),
+            },
         }
     }
 }
