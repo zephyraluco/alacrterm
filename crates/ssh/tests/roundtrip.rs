@@ -967,6 +967,27 @@ async fn completion_metadata_reads_are_bounded_and_do_not_block_browsing() {
 }
 
 #[tokio::test]
+async fn native_login_preserves_banner_and_flushes_early_input_on_prompt_timeout() {
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("login-input-order");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    params.shell_integration = Some(ssh::ShellIntegration { bash: "never injected", zsh: "never injected" });
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect(params, SshSize::cells(80,24), sender).unwrap();
+    session.write(b"first\nsecond\n");
+    let (text, _) = collect_until(&mut events, Duration::from_secs(9), None,
+        |text, _| text.contains("REPLY:second")).await;
+    assert!(text.contains(BANNER));
+    assert!(text.find(BANNER).unwrap() < text.find("REPLY:first").unwrap());
+    assert!(text.find("REPLY:first").unwrap() < text.find("REPLY:second").unwrap());
+    assert!(!text.contains("never injected"));
+    session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
 async fn unavailable_shell_probe_silently_falls_back_to_an_interactive_shell() {
     let port = local_server::serve().await.unwrap();
     let known_hosts = temp_known_hosts("integration-fallback");
@@ -1009,6 +1030,10 @@ async fn native_openssh_loads_session_integration_without_changing_startup_files
         |text, _| text.contains("NATIVE_INTEGRATION_OK\r\n") && text.contains("633;C")).await;
     assert!(output.contains("633;C"));
     assert!(output.contains("NATIVE_INTEGRATION_OK\r\n"));
+    session.write(b"shopt -q login_shell && printf 'NATIVE_LOGIN_OK\\n'\n");
+    let (login, _) = collect_until(&mut events, Duration::from_secs(5), None,
+        |text, _| text.contains("NATIVE_LOGIN_OK\r\n")).await;
+    assert!(login.contains("NATIVE_LOGIN_OK\r\n"), "integration replaced the login shell");
     session.write(b"exit\n");
     let (_, closed) = collect_until(&mut events, Duration::from_secs(5), None, |_, closed| closed.is_some()).await;
     assert!(closed.is_some());

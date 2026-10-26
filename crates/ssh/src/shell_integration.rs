@@ -1,231 +1,193 @@
-//! Optional session-scoped POSIX shell integration. Never edits user startup files.
+//! Source optional integration in the existing login shell; never replace that shell.
 use crate::{handler::ClientHandler, params::ShellIntegration};
 use russh::{ChannelMsg, client};
 use std::time::Duration;
-const PROBE: &str = "printf '\\036ALACRTERM_SHELL:%s\\037' \"$SHELL\"";
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
-fn parse_probe(bytes: &[u8]) -> Option<&str> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let value = text
-        .split_once("\x1eALACRTERM_SHELL:")?
+fn framed<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    text.split_once(&format!("\x1e{tag}:"))?
         .1
-        .split_once('\x1f')?
-        .0;
-    let name = value.rsplit('/').next()?;
-    (value.starts_with('/')
-        && matches!(name, "bash" | "zsh")
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || "/_.-".contains(ch)))
-    .then_some(value)
+        .split_once('\x1f')
+        .map(|pair| pair.0)
+}
+async fn exec(handle: &client::Handle<ClientHandler>, command: String) -> Option<String> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut channel = handle.channel_open_session().await.ok()?;
+        channel.exec(true, command).await.ok()?;
+        let mut output = Vec::new();
+        let mut success = false;
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } if output.len() + data.len() <= 8192 => {
+                    output.extend_from_slice(&data)
+                }
+                ChannelMsg::ExitStatus { exit_status } => success = exit_status == 0,
+                ChannelMsg::Close => break,
+                ChannelMsg::Data { .. } | ChannelMsg::Failure => return None,
+                _ => {}
+            }
+        }
+        success.then(|| String::from_utf8(output).ok()).flatten()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+fn setup(script: &str) -> String {
+    let script = script.replace("\r\n", "\n");
+    format!(
+        "umask 077; d=$(mktemp -d \"${{TMPDIR:-/tmp}}/alacrterm-shell.XXXXXXXX\") || exit 1; printf '%s' {} > \"$d/integration\" || {{ rm -rf -- \"$d\"; exit 1; }}; printf '\\036ALACRTERM_SCRIPT:%s\\037' \"$d/integration\"",
+        quote(&script)
+    )
 }
 pub(crate) async fn prepare(
     handle: &client::Handle<ClientHandler>,
     scripts: ShellIntegration,
 ) -> Option<String> {
-    let mut probe = tokio::time::timeout(Duration::from_secs(2), handle.channel_open_session())
-        .await
-        .ok()?
-        .ok()?;
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
-        probe.exec(false, PROBE).await.ok()?;
-        let mut bytes = Vec::new();
-        while let Some(message) = probe.wait().await {
-            match message {
-                ChannelMsg::Data { data } if bytes.len() + data.len() <= 8192 => {
-                    bytes.extend_from_slice(&data);
-                    if let Some(shell) = parse_probe(&bytes) {
-                        return Some(shell.to_owned());
+    let probe = exec(
+        handle,
+        "printf '\\036ALACRTERM_SHELL:%s\\037' \"$SHELL\"".into(),
+    )
+    .await?;
+    let shell = framed(&probe, "ALACRTERM_SHELL")?;
+    let script = match shell.rsplit('/').next()? {
+        "bash" => scripts.bash,
+        "zsh" => scripts.zsh,
+        _ => return None,
+    };
+    let result = exec(handle, setup(script)).await?;
+    let path = framed(&result, "ALACRTERM_SCRIPT")?;
+    let directory = std::path::Path::new(path).parent()?.to_str()?;
+    if !path.starts_with('/')
+        || !path.ends_with("/integration")
+        || !directory
+            .rsplit('/')
+            .next()?
+            .starts_with("alacrterm-shell.")
+    {
+        return None;
+    }
+    // A leading space avoids history in shells configured with ignorespace; no
+    // history settings or user startup files are modified to hide this command.
+    Some(format!(
+        " . {}; command rm -rf -- {}\n",
+        quote(path),
+        quote(directory)
+    ))
+}
+
+/// Conservative readiness hint, not a general shell prompt parser. Unrecognised
+/// prompts (including startup questions) time out to an ordinary login session.
+#[derive(Default)]
+pub(crate) struct PromptGate {
+    line: Vec<u8>,
+    escape: u8,
+}
+impl PromptGate {
+    pub fn observe(&mut self, bytes: &[u8]) -> bool {
+        for &byte in bytes {
+            match self.escape {
+                1 => {
+                    self.escape = match byte {
+                        b'[' => 2,
+                        b']' => 3,
+                        _ => 0,
                     }
                 }
-                ChannelMsg::Data { .. }
-                | ChannelMsg::Eof
-                | ChannelMsg::Close
-                | ChannelMsg::Failure => break,
-                _ => {}
+                2 => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        self.escape = 0;
+                    }
+                }
+                3 => match byte {
+                    7 => self.escape = 0,
+                    27 => self.escape = 4,
+                    _ => {}
+                },
+                4 => self.escape = if byte == b'\\' { 0 } else { 3 },
+                _ => match byte {
+                    27 => self.escape = 1,
+                    b'\r' | b'\n' => self.line.clear(),
+                    0x20..=0x7e if self.line.len() < 512 => self.line.push(byte),
+                    _ => {
+                        self.line.clear();
+                        return false;
+                    }
+                },
             }
         }
-        None
-    })
-    .await
-    .ok()
-    .flatten();
-    let _ = probe.close().await;
-    result.map(|shell| bootstrap(&shell, scripts))
-}
-fn write_file(body: &mut String, name: &str, value: &str) {
-    // include_str! preserves Windows checkout line endings. POSIX shells require
-    // LF even when the SSH client and its embedded scripts were built on Windows.
-    let value = value.replace("\r\n", "\n");
-    body.push_str(&format!("printf '%s' {} > \"$d/{name}\" 2>/dev/null || {{ rm -rf -- \"$d\"; trap - EXIT; umask \"$alacrterm_umask\"; exec \"$alacrterm_shell\" -l; }}\n", quote(&value)));
-}
-pub(crate) fn bootstrap(shell: &str, scripts: ShellIntegration) -> String {
-    let mut body = format!(
-        "alacrterm_shell={}\nalacrterm_umask=$(umask)\numask 077\nd=$(mktemp -d \"${{TMPDIR:-/tmp}}/alacrterm-shell.XXXXXXXX\" 2>/dev/null) || {{ umask \"$alacrterm_umask\"; exec \"$alacrterm_shell\" -l; }}\ntrap 'rm -rf -- \"$d\"' EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\nexport ALACRTERM_INTEGRATION_SCRIPT=\"$d/integration\"\n",
-        quote(shell)
-    );
-    if shell.ends_with("/bash") {
-        write_file(&mut body, "integration", scripts.bash);
-        write_file(
-            &mut body,
-            "bashrc",
-            r#"# Preserve login startup ordering without modifying any of those files.
-[[ -r /etc/profile ]] && source /etc/profile
-for alacrterm_profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
-    if [[ -r $alacrterm_profile ]]; then source "$alacrterm_profile"; break; fi
-done
-source "$ALACRTERM_INTEGRATION_SCRIPT"
-"#,
-        );
-        body.push_str(&format!(
-            "umask \"$alacrterm_umask\"\n{} --rcfile \"$d/bashrc\" -i\n",
-            quote(shell)
-        ));
-    } else {
-        write_file(&mut body, "integration", scripts.zsh);
-        body.push_str("export ALACRTERM_ORIGINAL_ZDOTDIR=\"${ZDOTDIR:-$HOME}\"\nexport ALACRTERM_WRAPPER_DIR=\"$d\"\n");
-        for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
-            let mut wrapper = format!(
-                "ZDOTDIR=$ALACRTERM_ORIGINAL_ZDOTDIR\n[[ -r $ZDOTDIR/{name} ]] && source \"$ZDOTDIR/{name}\"\nALACRTERM_ORIGINAL_ZDOTDIR=${{ZDOTDIR:-$HOME}}\n"
-            );
-            if name == ".zshrc" {
-                wrapper.push_str("source \"$ALACRTERM_INTEGRATION_SCRIPT\"\n");
-            }
-            if name != ".zlogin" {
-                wrapper.push_str("ZDOTDIR=$ALACRTERM_WRAPPER_DIR\n");
-            }
-            write_file(&mut body, name, &wrapper);
+        if self.escape != 0 {
+            return false;
         }
-        body.push_str(&format!(
-            "umask \"$alacrterm_umask\"\nZDOTDIR=\"$d\" {} -il\n",
-            quote(shell)
-        ));
+        let Ok(line) = std::str::from_utf8(&self.line) else {
+            return false;
+        };
+        let Some(prefix) = line
+            .strip_suffix("$ ")
+            .or_else(|| line.strip_suffix("# "))
+            .or_else(|| line.strip_suffix("% "))
+        else {
+            return false;
+        };
+        if let Some((identity, _path)) = prefix.split_once(':') {
+            if let Some((user, host)) = identity.split_once('@') {
+                return !user.is_empty()
+                    && !host.is_empty()
+                    && identity
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"@._-".contains(&b));
+            }
+        }
+        prefix.starts_with("bash-") && prefix[5..].bytes().all(|b| b.is_ascii_digit() || b == b'.')
     }
-    body.push_str("alacrterm_exit=$?\nexit \"$alacrterm_exit\"\n");
-    format!("exec sh -c {}", quote(&body))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn bootstrap_normalizes_windows_scripts_and_wrappers_for_both_shells() {
-        let lf = ShellIntegration { bash: "demo() {\n printf 'hello'\n}\n", zsh: "demo() {\n printf 'hello'\n}\n" };
-        let crlf = ShellIntegration { bash: "demo() {\r\n printf 'hello'\r\n}\r\n", zsh: "demo() {\r\n printf 'hello'\r\n}\r\n" };
-        for shell in ["/bin/bash", "/bin/zsh"] {
-            let command = bootstrap(shell, crlf);
-            assert_eq!(command, bootstrap(shell, lf));
-            assert!(!command.contains('\r'));
-        }
+    fn readiness_preserves_split_colored_prompt_and_rejects_banner_and_questions() {
+        let mut gate = PromptGate::default();
+        assert!(!gate.observe(b"Welcome to Ubuntu\r\n############ \r\nPassword: "));
+        assert!(!gate.observe(b"\r\n\x1b[32mroot@robot:~"));
+        assert!(gate.observe(b"# \x1b[0m"));
+        assert!(!PromptGate::default().observe(b"Continue? [y/N] "));
     }
     #[test]
-    fn probe_accepts_only_framed_supported_posix_shells() {
-        assert_eq!(
-            parse_probe(b"noise\x1eALACRTERM_SHELL:/bin/bash\x1f"),
-            Some("/bin/bash")
-        );
-        assert!(parse_probe(b"/bin/bash").is_none());
-        assert!(parse_probe(b"\x1eALACRTERM_SHELL:/bin/fish\x1f").is_none());
-        assert!(parse_probe(b"\x1eALACRTERM_SHELL:/bin/evil;bash\x1f").is_none());
+    fn script_preparation_normalizes_crlf_and_does_not_launch_another_shell() {
+        assert_eq!(setup("demo() {\r\n :\r\n}\r\n"), setup("demo() {\n :\n}\n"));
+        assert!(!setup("test").contains("--rcfile"));
     }
     #[test]
     #[cfg(unix)]
-    fn bash_bootstrap_loads_profiles_once_and_removes_session_files() {
-        use std::{
-            io::Write as _,
-            process::{Command, Stdio},
-        };
-        let root = std::env::temp_dir().join(format!("alacrterm-bootstrap-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("temporary")).unwrap();
-        std::fs::write(
-            root.join(".bash_profile"),
-            "printf 'USER_PROFILE\\n'\nPS1='bootstrap$ '\n",
-        )
-        .unwrap();
-        let scripts = ShellIntegration {
-            bash: Box::leak(include_str!("../../terminal/shell-integration/bash.sh")
-                .replace("\r\n", "\n").replace('\n', "\r\n").into_boxed_str()),
-            zsh: "",
-        };
-        let mut child = Command::new("sh")
-            .args(["-c", &bootstrap("/bin/bash", scripts)])
-            .env("HOME", &root)
-            .env("TMPDIR", root.join("temporary"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+    fn prepared_script_is_sourced_in_the_current_interactive_shell_and_removed() {
+        use std::process::Command;
+        let prepared = Command::new("sh")
+            .args([
+                "-c",
+                &setup("[[ $- == *i* ]] || return\r\nprintf 'INTEGRATION_READY\\n'\r\n"),
+            ])
+            .output()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"echo READY\nexit 7\n")
+        assert!(prepared.status.success());
+        let text = String::from_utf8(prepared.stdout).unwrap();
+        let path = framed(&text, "ALACRTERM_SCRIPT").unwrap();
+        let directory = std::path::Path::new(path).parent().unwrap();
+        let output = Command::new("bash")
+            .args([
+                "--noprofile",
+                "--norc",
+                "-ic",
+                &format!(
+                    "before=$$; . {}; command rm -rf -- {}; test \"$before\" = \"$$\"",
+                    quote(path),
+                    quote(directory.to_str().unwrap())
+                ),
+            ])
+            .output()
             .unwrap();
-        let output = child.wait_with_output().unwrap();
-        let mut bytes = output.stdout;
-        bytes.extend(output.stderr);
-        let text = String::from_utf8_lossy(&bytes);
-        assert_eq!(output.status.code(), Some(7));
-        assert_eq!(text.matches("USER_PROFILE").count(), 1);
-        assert!(text.contains("633;AlacrtermShell;posix"));
-        assert_eq!(
-            std::fs::read_dir(root.join("temporary")).unwrap().count(),
-            0
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    #[cfg(unix)]
-    fn zsh_bootstrap_preserves_login_stages_and_cleans_session_files() {
-        use std::{
-            io::Write as _,
-            process::{Command, Stdio},
-        };
-        if !std::path::Path::new("/usr/bin/zsh").exists() {
-            return;
-        }
-        let root =
-            std::env::temp_dir().join(format!("alacrterm-bootstrap-zsh-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("temporary")).unwrap();
-        for (file, marker) in [
-            (".zshenv", "ENV_STAGE"),
-            (".zprofile", "PROFILE_STAGE"),
-            (".zshrc", "RC_STAGE"),
-            (".zlogin", "LOGIN_STAGE"),
-        ] {
-            std::fs::write(root.join(file), format!("printf '{marker}\\n'\n")).unwrap();
-        }
-        let scripts = ShellIntegration {
-            bash: "",
-            zsh: Box::leak(include_str!("../../terminal/shell-integration/zsh.zsh")
-                .replace("\r\n", "\n").replace('\n', "\r\n").into_boxed_str()),
-        };
-        let mut child = Command::new("sh")
-            .args(["-c", &bootstrap("/usr/bin/zsh", scripts)])
-            .env("HOME", &root)
-            .env("ZDOTDIR", &root)
-            .env("TMPDIR", root.join("temporary"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(b"exit 9\n").unwrap();
-        let output = child.wait_with_output().unwrap();
-        let mut bytes = output.stdout;
-        bytes.extend(output.stderr);
-        let text = String::from_utf8_lossy(&bytes);
-        assert_eq!(output.status.code(), Some(9));
-        for marker in ["ENV_STAGE", "PROFILE_STAGE", "RC_STAGE", "LOGIN_STAGE"] {
-            assert_eq!(text.matches(marker).count(), 1);
-        }
-        assert!(text.contains("633;AlacrtermShell;posix"));
-        assert_eq!(
-            std::fs::read_dir(root.join("temporary")).unwrap().count(),
-            0
-        );
-        std::fs::remove_dir_all(root).unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("INTEGRATION_READY"));
+        assert!(!directory.exists());
     }
 }

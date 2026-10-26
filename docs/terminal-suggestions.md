@@ -127,9 +127,18 @@ SSH 补全查询与首次连接各有 5 秒超时，取消的排队请求直接�
 
 ## SSH 会话级集成
 
-远端 Bash 读取 `/etc/profile` 和首个个人登录配置后加载集成；Zsh 按 env/profile/rc/login 顺序加载原配置。
-临时文件只存在于随机私有目录，正常退出或收到终止信号后清理；不追加或替换用户的 rc/profile。
-Bash 使用交互式 rc 包装器读取登录配置，`login_shell` 标志与原生登录 shell 不完全相同；有依赖该标志的配置时可关闭自动集成并手动加载。
+交互会话始终使用 `PTY → request_shell`，由服务器执行正常登录流程，保留 MOTD、Last login、
+登录模式及用户启动文件顺序。不会通过 exec 包装器启动第二层 Shell，也不手动重放 profile。
+
+收到可识别的常见 Bash/Zsh 提示符后，独立 exec 通道探测 Shell、准备 LF 格式脚本，
+随后在当前交互 Shell 中 source。加载后由 OSC 标记提供补全生命周期；启动阶段的提示符识别
+只是保守的注入门槛，不用于推断命令执行状态。自定义提示符或启动提问无法确认时，5 秒后
+回退普通终端。初始化期间暂存输入并按顺序恢复；缓冲超过 64 KiB 时直接回退，避免大量积压。
+探测与准备操作各有 2 秒超时。所有登录输出原样转发，不清屏或过滤横幅。
+
+临时脚本使用私有目录，source 后立即删除。极端情况下在加载前断线可能留下临时文件。
+不修改 rc/profile、原有退出钩子或历史配置；source 命令可能回显或进入历史，
+开头的空格仅在启用了 ignorespace 的 Shell 中避免记录。
 PowerShell/Fish 等远端 shell 目前回退普通 shell，PowerShell 可手动加载脚本。
 `ALACRTERM_SHELL_INTEGRATION=0` 同时禁止本地自动加载和新 SSH 会话的自动集成。
 
