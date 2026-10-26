@@ -41,7 +41,8 @@ pub(crate) fn prepare(
         ),
     };
     let script = dir.path().join(script);
-    std::fs::write(&script, contents)?;
+    // Embedded scripts may come from a CRLF checkout on Windows.
+    std::fs::write(&script, contents.replace("\r\n", "\n"))?;
     env.insert(
         "ALACRTERM_INTEGRATION_SCRIPT".into(),
         script.to_string_lossy().into_owned(),

@@ -56,7 +56,10 @@ pub(crate) async fn prepare(
     result.map(|shell| bootstrap(&shell, scripts))
 }
 fn write_file(body: &mut String, name: &str, value: &str) {
-    body.push_str(&format!("printf '%s' {} > \"$d/{name}\" 2>/dev/null || {{ rm -rf -- \"$d\"; trap - EXIT; umask \"$alacrterm_umask\"; exec \"$alacrterm_shell\" -l; }}\n", quote(value)));
+    // include_str! preserves Windows checkout line endings. POSIX shells require
+    // LF even when the SSH client and its embedded scripts were built on Windows.
+    let value = value.replace("\r\n", "\n");
+    body.push_str(&format!("printf '%s' {} > \"$d/{name}\" 2>/dev/null || {{ rm -rf -- \"$d\"; trap - EXIT; umask \"$alacrterm_umask\"; exec \"$alacrterm_shell\" -l; }}\n", quote(&value)));
 }
 pub(crate) fn bootstrap(shell: &str, scripts: ShellIntegration) -> String {
     let mut body = format!(
@@ -107,6 +110,16 @@ source "$ALACRTERM_INTEGRATION_SCRIPT"
 mod tests {
     use super::*;
     #[test]
+    fn bootstrap_normalizes_windows_scripts_and_wrappers_for_both_shells() {
+        let lf = ShellIntegration { bash: "demo() {\n printf 'hello'\n}\n", zsh: "demo() {\n printf 'hello'\n}\n" };
+        let crlf = ShellIntegration { bash: "demo() {\r\n printf 'hello'\r\n}\r\n", zsh: "demo() {\r\n printf 'hello'\r\n}\r\n" };
+        for shell in ["/bin/bash", "/bin/zsh"] {
+            let command = bootstrap(shell, crlf);
+            assert_eq!(command, bootstrap(shell, lf));
+            assert!(!command.contains('\r'));
+        }
+    }
+    #[test]
     fn probe_accepts_only_framed_supported_posix_shells() {
         assert_eq!(
             parse_probe(b"noise\x1eALACRTERM_SHELL:/bin/bash\x1f"),
@@ -131,7 +144,8 @@ mod tests {
         )
         .unwrap();
         let scripts = ShellIntegration {
-            bash: include_str!("../../terminal/shell-integration/bash.sh"),
+            bash: Box::leak(include_str!("../../terminal/shell-integration/bash.sh")
+                .replace("\r\n", "\n").replace('\n', "\r\n").into_boxed_str()),
             zsh: "",
         };
         let mut child = Command::new("sh")
@@ -185,7 +199,8 @@ mod tests {
         }
         let scripts = ShellIntegration {
             bash: "",
-            zsh: include_str!("../../terminal/shell-integration/zsh.zsh"),
+            zsh: Box::leak(include_str!("../../terminal/shell-integration/zsh.zsh")
+                .replace("\r\n", "\n").replace('\n', "\r\n").into_boxed_str()),
         };
         let mut child = Command::new("sh")
             .args(["-c", &bootstrap("/usr/bin/zsh", scripts)])
