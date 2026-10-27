@@ -650,7 +650,23 @@ impl Render for AppRoot {
                                 .text_color(cx.theme().secondary_foreground)
                                 .child("Alacrterm"),
                         )
-                        .child(self.wayx_button(cx)),
+                        .child(self.wayx_button(cx))
+                        .child(
+                            div()
+                                .id("settings-control-area")
+                                .occlude()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    Button::new("settings-control")
+                                        .ghost()
+                                        .icon(assets::IconName::Settings)
+                                        .tooltip("设置")
+                                        .accessibility_label("设置")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(Box::new(actions::OpenSettings), cx);
+                                        }),
+                                ),
+                        ),
                 ),
             )
             .child(

@@ -16,7 +16,7 @@ use gpui_kit::component::{
 
 use super::files::FilesState;
 use super::{Sidebar, SidebarContent, SidebarView};
-use crate::actions::{NewFolder, NewSession, OpenSettings};
+use crate::actions::{NewFolder, NewSession};
 use crate::assets::IconName;
 use crate::components::Sidebar as SidebarPanel;
 use crate::dialog::name::open_name_dialog;
@@ -49,16 +49,6 @@ pub(super) fn status_bar(sidebar: &Sidebar, cx: &mut Context<Sidebar>) -> AnyEle
         .flex_none()
         .py_0()
         .left(h_flex().gap_1().children(buttons))
-        .right(
-            Button::new("activity-settings")
-                .ghost()
-                .xsmall()
-                .icon(IconName::Settings)
-                .tooltip("设置")
-                .tooltip_placement(Placement::Top)
-                .accessibility_label("设置")
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
-        )
         .into_any_element()
 }
 
