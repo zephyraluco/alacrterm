@@ -26,29 +26,34 @@ use crate::status_bar::STATUS_BAR_HEIGHT;
 pub(super) fn status_bar(sidebar: &Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
     let active = if sidebar.visible() { sidebar.active_view(cx) } else { None };
     let files_enabled = sidebar.files_view_available(cx);
-    let buttons = SidebarView::ALL
+    SidebarView::ALL
         .into_iter()
         .filter(|view| view.visible_with(files_enabled))
-        .map(|view| {
-            let state = cx.weak_entity();
-            Button::new(view.id())
-                .ghost()
-                .xsmall()
-                .icon(view.icon())
-                .tooltip(view.tooltip())
-                .tooltip_placement(Placement::Top)
-                .accessibility_label(view.tooltip())
-                .selected(active == Some(view))
-                .on_click(move |_, _, cx| {
-                    let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
-                })
-        });
-    StatusBar::new()
-        .h(STATUS_BAR_HEIGHT)
-        .w_full()
-        .flex_none()
-        .py_0()
-        .left(h_flex().gap_1().children(buttons))
+        .fold(
+            StatusBar::new()
+                .h(STATUS_BAR_HEIGHT)
+                .w_full()
+                .flex_none()
+                .py_0(),
+            |bar, view| {
+                let state = cx.weak_entity();
+                let button = Button::new(view.id())
+                    .ghost()
+                    .xsmall()
+                    .icon(view.icon())
+                    .tooltip(view.tooltip())
+                    .tooltip_placement(Placement::Top)
+                    .accessibility_label(view.tooltip())
+                    .selected(active == Some(view))
+                    .on_click(move |_, _, cx| {
+                        let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
+                    });
+                match view {
+                    SidebarView::Sessions => bar.left(button),
+                    SidebarView::Files => bar.right(button),
+                }
+            },
+        )
         .into_any_element()
 }
 
