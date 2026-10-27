@@ -41,15 +41,11 @@ pub(crate) struct TerminalDockSkin {
 }
 
 impl TerminalDockSkin {
-    pub(crate) fn new(
-        cx: &mut Context<DockArea>,
-        root: WeakEntity<AppRoot>,
-        active_group: Rc<Cell<Option<NodeId>>>,
-    ) -> Rc<Self> {
+    pub(crate) fn new(cx: &mut Context<DockArea>, root: WeakEntity<AppRoot>) -> Rc<Self> {
         let inner = DockSkin::new(cx);
         Rc::new(Self {
             inner,
-            tabs: Rc::new(TabBarState::new(root, active_group)),
+            tabs: Rc::new(TabBarState::new(root)),
         })
     }
 }
@@ -115,17 +111,15 @@ struct TabBarState {
     hovered: Cell<Option<usize>>,
     /// 应用根视图。
     root: WeakEntity<AppRoot>,
-    active_group: Rc<Cell<Option<NodeId>>>,
 }
 
 impl TabBarState {
-    fn new(root: WeakEntity<AppRoot>, active_group: Rc<Cell<Option<NodeId>>>) -> Self {
+    fn new(root: WeakEntity<AppRoot>) -> Self {
         Self {
             scroll: ScrollHandle::default(),
             last_active: Cell::new(None),
             hovered: Cell::new(None),
             root,
-            active_group,
         }
     }
 
@@ -147,6 +141,19 @@ struct TerminalTabBar {
 }
 
 impl TabGroupRenderer for TerminalTabBar {
+    fn frame(&self, group: &TabGroupContext, _: &mut Window, cx: &mut App) -> Stateful<gpui::Div> {
+        let focus = group.active_panel().map(|panel| panel.focus_handle(cx));
+        div().id("terminal-tab-group").on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            // 组内工具按钮不能冒泡到应用背景并清掉整组焦点。
+            if let Some(focus) = &focus
+                && !focus.contains_focused(window, cx)
+            {
+                window.focus(focus, cx);
+            }
+            cx.stop_propagation();
+        })
+    }
+
     fn render_tab_bar(
         &self,
         group: &TabGroupContext,
@@ -174,10 +181,10 @@ impl TabGroupRenderer for TerminalTabBar {
             .map(|ix| self.render_tab(group, *ix, active_ix, window, cx))
             .collect();
 
-        // 工具栏跟随窗口的活动组，不跟随按钮按下时会变化的输入焦点。
+        // 停靠组外框包含标签栏、工具栏和终端；匹配整组的焦点范围。
         let toolbar = group
             .active_panel()
-            .filter(|_| self.state.active_group.get() == Some(group.node()))
+            .filter(|panel| panel.focus_handle(cx).contains_focused(window, cx))
             .and_then(|panel| PanelHandle::of(panel))
             .and_then(|handle| handle.toolbar_buttons(window, cx));
 
