@@ -24,6 +24,8 @@ mod welcome;
 mod wayx_control;
 mod x11;
 
+use std::{cell::Cell, rc::Rc};
+
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Styled as _,
@@ -36,7 +38,7 @@ use gpui_kit::{
         ActiveTheme as _, Root, ThemeMode, TitleBar, WindowExt as _,
         button::{Button, ButtonVariants as _},
         dialog::DialogFooter,
-        dock::{DockArea, DockEvent, TabGroup},
+        dock::{DockArea, DockEvent, NodeId, TabGroup},
         h_flex,
         notification::Notification,
         resizable::{h_resizable, resizable_panel},
@@ -184,6 +186,8 @@ struct AppRoot {
     close_when_transfers_finish: bool,
     /// 终端会话的 dock。
     dock: Entity<DockArea>,
+    /// 窗口内最后激活的停靠组，按钮或侧栏获取输入焦点时仍保留。
+    active_dock_group: Rc<Cell<Option<NodeId>>>,
     /// dock 布局变化订阅。
     dock_layout_sub: Option<Subscription>,
     /// 下一个新建会话的标签组（用一次即清空）。
@@ -339,7 +343,8 @@ impl AppRoot {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let dock = Self::build_dock(window, cx);
+        let active_dock_group = Rc::new(Cell::new(None));
+        let dock = Self::build_dock(window, active_dock_group.clone(), cx);
         let palette_watch = cx.observe_global::<config::ColorSchemeRegistry>(|root, cx| {
             if let Some(render) = config::refresh_color_scheme(cx) {
                 root.apply_render_settings(render, cx);
@@ -398,6 +403,7 @@ impl AppRoot {
             _transfer_completion_sub: transfer_completion_sub,
             close_when_transfers_finish: false,
             dock,
+            active_dock_group,
             dock_layout_sub: None,
             pending_session_group: None,
             settings_window: None,
@@ -424,10 +430,14 @@ impl AppRoot {
     }
 
     /// 建立终端会话的 dock。
-    fn build_dock(window: &mut Window, cx: &mut Context<Self>) -> Entity<DockArea> {
+    fn build_dock(
+        window: &mut Window,
+        active_group: Rc<Cell<Option<NodeId>>>,
+        cx: &mut Context<Self>,
+    ) -> Entity<DockArea> {
         let root = cx.weak_entity();
         let dock = cx.new(|cx| {
-            let skin = TerminalDockSkin::new(cx, root);
+            let skin = TerminalDockSkin::new(cx, root, active_group);
             DockArea::new("terminal-dock", None, window, cx).with_renderer(skin)
         });
 
@@ -522,6 +532,13 @@ impl AppRoot {
         }
 
         let tab = self.tabs.get(self.active);
+        let active_group = tab
+            .and_then(|tab| tab.read(cx).group())
+            .and_then(|group| group.upgrade())
+            .map(|group| group.read(cx).node());
+        if self.active_dock_group.replace(active_group) != active_group {
+            cx.notify();
+        }
         let remote = tab.is_some_and(|tab| tab.read(cx).is_remote());
         let connected = tab.is_some_and(|tab| tab.read(cx).is_connected(cx));
         let snapshot = ActiveContext {

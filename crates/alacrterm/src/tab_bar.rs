@@ -41,11 +41,15 @@ pub(crate) struct TerminalDockSkin {
 }
 
 impl TerminalDockSkin {
-    pub(crate) fn new(cx: &mut Context<DockArea>, root: WeakEntity<AppRoot>) -> Rc<Self> {
+    pub(crate) fn new(
+        cx: &mut Context<DockArea>,
+        root: WeakEntity<AppRoot>,
+        active_group: Rc<Cell<Option<NodeId>>>,
+    ) -> Rc<Self> {
         let inner = DockSkin::new(cx);
         Rc::new(Self {
             inner,
-            tabs: Rc::new(TabBarState::new(root)),
+            tabs: Rc::new(TabBarState::new(root, active_group)),
         })
     }
 }
@@ -111,15 +115,17 @@ struct TabBarState {
     hovered: Cell<Option<usize>>,
     /// 应用根视图。
     root: WeakEntity<AppRoot>,
+    active_group: Rc<Cell<Option<NodeId>>>,
 }
 
 impl TabBarState {
-    fn new(root: WeakEntity<AppRoot>) -> Self {
+    fn new(root: WeakEntity<AppRoot>, active_group: Rc<Cell<Option<NodeId>>>) -> Self {
         Self {
             scroll: ScrollHandle::default(),
             last_active: Cell::new(None),
             hovered: Cell::new(None),
             root,
+            active_group,
         }
     }
 
@@ -168,10 +174,10 @@ impl TabGroupRenderer for TerminalTabBar {
             .map(|ix| self.render_tab(group, *ix, active_ix, window, cx))
             .collect();
 
-        // 仅在焦点所在标签组显示工具栏，非活动组不留按钮占位。
+        // 工具栏跟随窗口的活动组，不跟随按钮按下时会变化的输入焦点。
         let toolbar = group
             .active_panel()
-            .filter(|panel| panel.focus_handle(cx).contains_focused(window, cx))
+            .filter(|_| self.state.active_group.get() == Some(group.node()))
             .and_then(|panel| PanelHandle::of(panel))
             .and_then(|handle| handle.toolbar_buttons(window, cx));
 
