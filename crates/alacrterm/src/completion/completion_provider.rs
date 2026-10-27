@@ -56,16 +56,18 @@ impl Provider {
                     .history
                     .iter()
                     .enumerate()
-                    .filter(|(_, command)| {
-                        command.starts_with(context.text) && **command != context.text
-                    })
+                    .filter(|(_, command)| command.starts_with(context.text))
                     .map(|(index, command)| {
                         Candidate::new(
                             command.clone(),
                             context.text.len(),
                             Kind::History,
                             Source::History,
-                            1100 - (index as i64).min(100),
+                            if command == context.text {
+                                1500
+                            } else {
+                                1100 - (index as i64).min(100)
+                            },
                         )
                     })
                     .collect(),
@@ -124,12 +126,13 @@ impl Provider {
                             } else {
                                 Kind::Subcommand
                             };
+                            let score = if text == context.text { 1500 } else { 1250 };
                             let mut item = Candidate::new(
                                 text,
                                 context.text.len(),
                                 kind,
                                 Source::Specification,
-                                1250,
+                                score,
                             );
                             item.description = Some(description.into());
                             item

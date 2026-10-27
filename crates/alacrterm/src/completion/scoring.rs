@@ -1,8 +1,5 @@
 //! Prefixes outrank subsequence matches; case folding follows the active shell.
 pub(super) fn match_score(query: &str, value: &str, insensitive: bool, fuzzy: bool) -> Option<i64> {
-    if query == value {
-        return None;
-    }
     let folded_query = if insensitive {
         query.to_lowercase()
     } else {
@@ -13,6 +10,9 @@ pub(super) fn match_score(query: &str, value: &str, insensitive: bool, fuzzy: bo
     } else {
         value.into()
     };
+    if folded_value == folded_query {
+        return Some(1500);
+    }
     if folded_value.starts_with(&folded_query) {
         return Some(1000);
     }
@@ -33,6 +33,8 @@ mod tests {
     use super::*;
     #[test]
     fn prefixes_outrank_fuzzy_matches_and_case_folding_is_explicit() {
+        assert!(match_score("git", "git", false, false) > match_score("git", "gitk", false, false));
+        assert_eq!(match_score("get-item", "Get-Item", true, false), Some(1500));
         assert!(match_score("gi", "git", false, true) > match_score("gt", "git", false, true));
         assert!(match_score("get-i", "Get-Item", false, true).is_none());
         assert!(match_score("get-i", "Get-Item", true, true).is_some());

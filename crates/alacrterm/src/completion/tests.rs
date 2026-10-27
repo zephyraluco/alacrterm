@@ -27,6 +27,48 @@ mod behavior {
         state.phase(PromptEvent::Execute);
     }
     #[test]
+    fn exact_commands_remain_visible_rank_first_and_accept_without_execution() {
+        let mut state = state();
+        for command in ["git", "gitk"] {
+            state.add_command(command);
+        }
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.context("shell", "posix");
+        state.input("git");
+        state.refresh(false);
+        assert_eq!(texts(&state), ["git", "gitk"]);
+        assert_eq!(state.accept().as_deref(), Some(""));
+        assert_eq!(state.text, "git");
+        assert!(!state.has_current_candidates());
+
+        state.synchronize("git status".into(), 10);
+        state.refresh(false);
+        assert_eq!(texts(&state), ["git status"]);
+        assert_eq!(state.accept().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn exact_history_survives_source_deduplication_and_outranks_longer_entries() {
+        let mut state = state();
+        execute(&mut state, "echo hello");
+        execute(&mut state, "echo hello world");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("echo hello");
+        state.refresh(false);
+        assert_eq!(texts(&state), ["echo hello", "echo hello world"]);
+
+        state.add_command("git");
+        execute(&mut state, "git");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input("git");
+        state.refresh(false);
+        assert_eq!(texts(&state), ["git"]);
+    }
+
+    #[test]
     fn interrupted_submission_and_out_of_order_markers_never_enter_history() {
         let mut state = state();
         state.phase(PromptEvent::Input);
