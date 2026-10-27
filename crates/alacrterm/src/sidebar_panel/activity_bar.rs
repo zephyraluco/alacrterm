@@ -49,8 +49,18 @@ pub(super) fn status_bar(sidebar: &Sidebar, cx: &mut Context<Sidebar>) -> AnyEle
                         let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
                     });
                 match view {
-                    SidebarView::Sessions => bar.left(button),
-                    SidebarView::Files => bar.right(button),
+                    SidebarView::Sessions => bar.left(
+                        h_flex()
+                            .items_center()
+                            .child(button)
+                            .child(separator(&cx.theme().border)),
+                    ),
+                    SidebarView::Files => bar.right(
+                        h_flex()
+                            .items_center()
+                            .child(separator(&cx.theme().border))
+                            .child(button),
+                    ),
                 }
             },
         )
@@ -246,7 +256,7 @@ fn tool_button(
         .on_click(move |_, window, cx| on_click(window, cx))
 }
 
-/// 工具栏上两组按钮之间的细竖线。
+/// 工具栏和状态栏中划分按钮区域的细竖线。
 fn separator(color: &Hsla) -> AnyElement {
     div()
         .flex_none()
