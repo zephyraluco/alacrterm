@@ -86,6 +86,36 @@ fn bash_hooks_preserve_status_and_do_not_execute_on_blank_lines() {
 }
 
 #[test]
+fn command_inventory_is_unique_and_only_retransmitted_when_names_change() {
+    for program in bash_programs() {
+        let (stdout, _) = run_bash(
+            &program,
+            "mkdir -p \"$HOME/bin\"\nPATH=\"$HOME/bin:$PATH\"\n",
+            b"alacrterm_refresh_completions\nalias freshalias=:\nalacrterm_refresh_completions\nunalias freshalias\nprintf '' > \"$HOME/bin/periodic-tool\"; chmod +x \"$HOME/bin/periodic-tool\"\nSECONDS=$((SECONDS + 31))\nalacrterm_refresh_completions\nexit\n",
+        );
+        let text = String::from_utf8_lossy(&stdout);
+        // Initial inventory, alias addition/removal, and periodic PATH rescan.
+        assert_eq!(
+            text.matches("\x1b]633;CommandReset\x07").count(),
+            4,
+            "{}",
+            program.display()
+        );
+        assert!(text.contains("\x1b]633;Command;freshalias\x07"));
+        assert!(text.contains("\x1b]633;Command;periodic-tool\x07"));
+        for inventory in text.split("\x1b]633;CommandReset\x07").skip(1) {
+            let names: Vec<_> = inventory
+                .split("\x1b]633;Command;")
+                .skip(1)
+                .map(|record| record.split('\x07').next().unwrap())
+                .collect();
+            let unique: std::collections::HashSet<_> = names.iter().collect();
+            assert_eq!(names.len(), unique.len(), "duplicate inventory names");
+        }
+    }
+}
+
+#[test]
 fn existing_debug_traps_are_preserved() {
     for program in bash_programs() {
         let (stdout, stderr) = run_bash(

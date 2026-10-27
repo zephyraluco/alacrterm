@@ -33,10 +33,16 @@
 在 dash 等非 Bash Shell 中可手动 source，提供初始命令清单，以及支持 PS1 命令替换时的提示符/目录信息；
 POSIX 没有统一的 preexec 钩子，因此不猜测执行开始。当前自动安装入口仍支持 Bash/Zsh。
 兼容性回归可通过 `ALACRTERM_TEST_BASH=/path/to/bash cargo test -p alacrterm shell_integration::script_tests`
-加入指定版本。本次使用实际 Bash 3.2、4.3、系统 Bash 及 dash 验证；旧版 Bash 的 Readline 补全/
+加入指定版本。
+
+Bash 命令清单按 C locale 排序、去重后批量上报；内容相同则不发送 CommandReset 或完整清单。
+Bash 提示符直接读取 SECONDS，并将本次签名和时间传给刷新函数，避免重复计算。
+PATH/别名/函数变化检查与 30 秒提示符阶段扫描保留，自动补全防抖仍为 100 ms。
+本次使用实际 Bash 3.2、4.3、系统 Bash 及 dash 验证；旧版 Bash 的 Readline 补全/
 按键回调不发送 Execute，用户提交命令时才发送。
 
-
+本机对照粗测：完整清单刷新约 49 ms → 31 ms，普通提示符约 2.45 ms → 1.62 ms；
+首次上报约 81 KB → 42 KB。测量包含摊销后的启动开销，不代表所有远端环境的耗时。
 
 SSH 默认读取远端 `/etc/shells`，为已安装且受支持的 Bash/Zsh 安装持久入口，仅在带有 Alacrterm 会话标识时加载。
 服务器不接受会话标识、安装或探测失败时静默保留普通登录。可在设置中关闭新连接的自动集成。
@@ -167,13 +173,13 @@ Bash 在 `.bashrc` 和首个存在的 `.bash_profile`、`.bash_login`、`.profil
 
 一次 exec 内先读取 `/etc/shells`，过滤注释、空行和不存在/不可执行的路径，按 Bash/Zsh 类型去重；
 清单不可读时使用 `$SHELL` 回退。随后读取 `$HOME/.local/share/alacrterm/shell/version`：
-第一行是集成版本（当前 `1.0.1`，独立于应用版本），后续每行是已集成的 Shell 类型。
+第一行是集成版本（当前 `1.0.2`，独立于应用版本），后续每行是已集成的 Shell 类型。
 版本与类型集合完全匹配时立即返回，不检查入口或脚本，不创建目录或锁，也不写回 version；
 类型顺序和重复项不影响比较。此时用户手动删除入口/脚本不会自动修复，删除 version 可触发重装。
 版本文件示例：
 
 ```text
-1.0.1
+1.0.2
 bash
 zsh
 ```

@@ -9,6 +9,7 @@ __alacrterm_bel=$(printf '\007')
 __alacrterm_cr=$(printf '\r')
 __alacrterm_nl='
 '
+__alacrterm_marker='\[\e]633;B\a\]'
 
 __alacrterm_signature() {
     printf '%s|' "${PATH-}"
@@ -16,11 +17,11 @@ __alacrterm_signature() {
     if [ -n "${BASH_VERSION-}" ]; then builtin declare -F; fi
 }
 __alacrterm_clock() {
-    if [ -n "${SECONDS-}" ]; then
-        printf '%s' "$SECONDS"
-    else
-        date +%s 2>/dev/null || :
-    fi
+    __alacrterm_now=${SECONDS-}
+    case $__alacrterm_now in
+        ''|*[!0-9]*) __alacrterm_now=$(date +%s 2>/dev/null || :) ;;
+    esac
+    case $__alacrterm_now in ''|*[!0-9]*) __alacrterm_now=0 ;; esac
 }
 __alacrterm_command_names() {
     if [ -n "${BASH_VERSION-}" ]; then
@@ -50,13 +51,27 @@ __alacrterm_command_names() {
     fi
 }
 alacrterm_refresh_completions() {
-    printf '\033]633;CommandReset\007'
-    __alacrterm_command_names | while IFS= read -r __alacrterm_name; do
-        case $__alacrterm_name in ''|*[!a-zA-Z0-9_.:+-]*) continue ;; esac
-        printf '\033]633;Command;%s\007' "$__alacrterm_name"
-    done
-    __alacrterm_inventory_signature=$(__alacrterm_signature)
-    __alacrterm_last_refresh=$(__alacrterm_clock)
+    # Canonical order also avoids retransmitting an unchanged set when PATH
+    # order changes. Keep data separate from printf's format string.
+    __alacrterm_new_inventory=$(__alacrterm_command_names | LC_ALL=C command -p sort -u | LC_ALL=C command -p awk '
+        /^[a-zA-Z0-9_.:+-]+$/ { printf "\033]633;Command;%s\007", $0 }
+    ')
+    if [ "${__alacrterm_inventory+x}" != x ] ||
+        [ "$__alacrterm_new_inventory" != "$__alacrterm_inventory" ]; then
+        printf '\033]633;CommandReset\007%s' "$__alacrterm_new_inventory"
+        __alacrterm_inventory=$__alacrterm_new_inventory
+    fi
+    if [ "$#" -ge 1 ]; then
+        __alacrterm_inventory_signature=$1
+    else
+        __alacrterm_inventory_signature=$(__alacrterm_signature)
+    fi
+    if [ "$#" -ge 2 ]; then
+        __alacrterm_last_refresh=$2
+    else
+        __alacrterm_clock
+        __alacrterm_last_refresh=$__alacrterm_now
+    fi
 }
 __alacrterm_before_prompt() {
     __alacrterm_status=$?
@@ -64,12 +79,12 @@ __alacrterm_before_prompt() {
     return "$__alacrterm_status"
 }
 __alacrterm_prompt() {
-    __alacrterm_now=$(__alacrterm_clock)
-    case $__alacrterm_now in ''|*[!0-9]*) __alacrterm_now=0 ;; esac
+    __alacrterm_clock
+    __alacrterm_current_signature=$(__alacrterm_signature)
     case ${__alacrterm_last_refresh-} in ''|*[!0-9]*) __alacrterm_last_refresh=0 ;; esac
-    if [ "$(__alacrterm_signature)" != "${__alacrterm_inventory_signature-}" ] ||
+    if [ "$__alacrterm_current_signature" != "${__alacrterm_inventory_signature-}" ] ||
         [ "$((__alacrterm_now - __alacrterm_last_refresh))" -ge 30 ]; then
-        alacrterm_refresh_completions
+        alacrterm_refresh_completions "$__alacrterm_current_signature" "$__alacrterm_now"
     fi
     case ${PWD-} in
         *"$__alacrterm_esc"*|*"$__alacrterm_bel"*|*"$__alacrterm_cr"*|*"$__alacrterm_nl"*) printf '\033]633;AlacrtermCwd;\007' ;;
@@ -77,7 +92,6 @@ __alacrterm_prompt() {
     esac
     printf '\033]633;D;%s\007\033]633;A\007' "${__alacrterm_status:-0}"
     if [ -n "${BASH_VERSION-}" ]; then
-        __alacrterm_marker='\[\e]633;B\a\]'
         case ${PS1-} in *"$__alacrterm_marker") ;; *) PS1="${PS1-}$__alacrterm_marker" ;; esac
     fi
     __alacrterm_ready=1
