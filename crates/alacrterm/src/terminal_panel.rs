@@ -19,6 +19,7 @@ use gpui::{
     relative,
 };
 use gpui_kit::component::{
+    Placement,
     button::Button,
     dock::{
         BasePanel, DockPlacement, InsertTarget, Panel, PanelControl, PanelEvent, PanelId, TabGroup,
@@ -143,6 +144,47 @@ impl AppRoot {
         let (target, working_directory) = tab.read(cx).split_params(cx);
         let view = self.new_terminal(working_directory, target, window, cx);
         tab.update(cx, |tab, cx| tab.add_pane(view, axis, window, cx));
+        cx.notify();
+    }
+
+    /// 新停靠组继承来源终端的连接参数与工作目录，保留原组的所有标签页。
+    pub(crate) fn split_terminal_group(
+        &mut self,
+        source: PanelId,
+        placement: Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter()
+            .find(|tab| panel_handle((*tab).clone()).panel_id(cx) == source)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(group) = tab.read(cx).group().and_then(|group| group.upgrade()) else {
+            return;
+        };
+        let node = group.read(cx).node();
+        let (target, directory) = tab.read(cx).split_params(cx);
+        let name = tab.read(cx).name.clone();
+        let view = self.new_terminal(directory, target.clone(), window, cx);
+        let root = cx.weak_entity();
+        let pane = cx.new(|cx| TabPane::new(view, name, target, root, window, cx));
+        let handle = panel_handle(pane.clone());
+        let panel = handle.panel_id(cx);
+        self.dock.update(cx, |area, cx| {
+            area.add_panel_view(handle, DockPlacement::Center, None, window, cx);
+            area.move_panel(
+                panel,
+                InsertTarget::Split { node, placement, size: None },
+                window,
+                cx,
+            );
+        });
+        self.tabs.push(pane);
+        self.active = self.tabs.len() - 1;
+        self.sync_tabs_with_dock(cx);
+        self.sync_active_context(window, cx);
         cx.notify();
     }
 

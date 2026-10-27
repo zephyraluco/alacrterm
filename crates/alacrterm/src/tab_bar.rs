@@ -1,10 +1,16 @@
 //! 自绘标签栏（dock 的 `TabGroupRenderer`）：定宽标签 + 图标 + 关闭按钮。
 //! 渲染器不是实体：跨帧状态放 `Cell`，改完回调根视图重绘。
 
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+};
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext as _, Axis, Context, CursorStyle, InteractiveElement as _,
+    Anchor, AnyElement, AnyView, App, AppContext as _, Axis, Context, CursorStyle, FocusHandle,
+    Focusable as _, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window,
     div, prelude::FluentBuilder as _, px, svg,
@@ -12,8 +18,9 @@ use gpui::{
 use gpui_kit::{
     base::ResizeHandleContext,
     component::{
-        ActiveTheme as _, IconNamed as _, Sizable as _, h_flex,
-        button::ButtonVariants as _,
+        ActiveTheme as _, IconNamed as _, Placement, Sizable as _, h_flex,
+        button::{Button, ButtonVariants as _},
+        menu::{DropdownMenu as _, PopupMenuItem},
         dock::{
             BasePanelView, DockArea, DockAreaRenderer, DockContext, DockSkin, DragPanel,
             DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext, TabGroupRenderer,
@@ -111,6 +118,8 @@ struct TabBarState {
     hovered: Cell<Option<usize>>,
     /// 应用根视图。
     root: WeakEntity<AppRoot>,
+    menu_focus: RefCell<Option<(NodeId, FocusHandle)>>,
+    group_focus: RefCell<HashMap<NodeId, FocusHandle>>,
 }
 
 impl TabBarState {
@@ -120,7 +129,17 @@ impl TabBarState {
             last_active: Cell::new(None),
             hovered: Cell::new(None),
             root,
+            menu_focus: RefCell::new(None),
+            group_focus: RefCell::new(HashMap::new()),
         }
+    }
+
+    fn group_focus(&self, node: NodeId, cx: &mut App) -> FocusHandle {
+        self.group_focus
+            .borrow_mut()
+            .entry(node)
+            .or_insert_with(|| cx.focus_handle())
+            .clone()
     }
 
     /// 通知根视图重绘。
@@ -143,10 +162,12 @@ struct TerminalTabBar {
 impl TabGroupRenderer for TerminalTabBar {
     fn frame(&self, group: &TabGroupContext, _: &mut Window, cx: &mut App) -> Stateful<gpui::Div> {
         let focus = group.active_panel().map(|panel| panel.focus_handle(cx));
+        let group_focus = self.state.group_focus(group.node(), cx);
         div().id("terminal-tab-group").on_mouse_down(MouseButton::Left, move |_, window, cx| {
             // 组内工具按钮不能冒泡到应用背景并清掉整组焦点。
             if let Some(focus) = &focus
                 && !focus.contains_focused(window, cx)
+                && !group_focus.contains_focused(window, cx)
             {
                 window.focus(focus, cx);
             }
@@ -181,10 +202,17 @@ impl TabGroupRenderer for TerminalTabBar {
             .map(|ix| self.render_tab(group, *ix, active_ix, window, cx))
             .collect();
 
-        // 停靠组外框包含标签栏、工具栏和终端；匹配整组的焦点范围。
+        let group_focus = self.state.group_focus(group.node(), cx);
+        // 终端、工具栏及关联菜单共同组成停靠组的焦点范围。
         let toolbar = group
             .active_panel()
-            .filter(|panel| panel.focus_handle(cx).contains_focused(window, cx))
+            .filter(|panel| {
+                panel.focus_handle(cx).contains_focused(window, cx)
+                    || group_focus.contains_focused(window, cx)
+                    || self.state.menu_focus.borrow().as_ref().is_some_and(|(node, focus)| {
+                        *node == group.node() && focus.contains_focused(window, cx)
+                    })
+            })
             .and_then(|panel| PanelHandle::of(panel))
             .and_then(|handle| handle.toolbar_buttons(window, cx));
 
@@ -226,13 +254,15 @@ impl TabGroupRenderer for TerminalTabBar {
             .when_some(toolbar, |this, buttons| {
                 this.child(
                     h_flex()
+                        .track_focus(&group_focus)
                         .flex_none()
                         .h_full()
                         .px_1()
                         .gap_1()
                         .border_l_1()
                         .border_color(border)
-                        .children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false))),
+                        .children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false)))
+                        .child(self.split_button(group, cx)),
                 )
             })
             .into_any_element()
@@ -277,6 +307,56 @@ impl TabGroupRenderer for TerminalTabBar {
 }
 
 impl TerminalTabBar {
+    fn split_button(&self, group: &TabGroupContext, cx: &mut App) -> AnyElement {
+        let Some(panel) = group.active_panel() else {
+            return div().into_any_element();
+        };
+        let source = panel.panel_id(cx);
+        let node = group.node();
+        let focus = panel.focus_handle(cx);
+        let state = self.state.clone();
+        let dismiss_state = self.state.clone();
+        Button::new("split-terminal-group")
+            .xsmall()
+            .ghost()
+            .tab_stop(false)
+            .icon(IconName::Columns2)
+            .tooltip("拆分停靠组")
+            .accessibility_label("拆分停靠组")
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
+                state.menu_focus.replace(Some((node, menu.focus_handle(cx))));
+                menu = menu.action_context(focus.clone());
+                for (label, placement) in [
+                    ("向右拆分", Placement::Right),
+                    ("向左拆分", Placement::Left),
+                    ("向上拆分", Placement::Top),
+                    ("向下拆分", Placement::Bottom),
+                ] {
+                    let root = state.root.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let _ = root.update(cx, |root, cx| {
+                            root.split_terminal_group(source, placement, window, cx);
+                        });
+                    }));
+                }
+                menu
+            })
+            .on_open_change(move |open, window, cx| {
+                if *open {
+                    // 弹层先接收焦点，下一帧才创建菜单实体。
+                    if let Some(focus) = window.focused(cx) {
+                        dismiss_state.menu_focus.replace(Some((node, focus)));
+                    }
+                } else if dismiss_state.menu_focus.borrow().as_ref()
+                    .is_some_and(|(owner, _)| *owner == node)
+                {
+                    dismiss_state.menu_focus.take();
+                }
+                dismiss_state.repaint(cx);
+            })
+            .into_any_element()
+    }
+
     fn render_tab(
         &self,
         group: &TabGroupContext,
