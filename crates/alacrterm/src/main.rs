@@ -1,4 +1,4 @@
-//! 程序入口与根视图 [`AppRoot`]：标题栏 + 主体（最左整列 | 中间终端区）。
+//! 程序入口与根视图 [`AppRoot`]：标题栏、侧边栏与终端主体、全局底部状态栏。
 //! 外壳分模块（`components` / `sidebar_panel` / `terminal_panel` 等），终端核心在 `crates/terminal`。
 
 mod actions;
@@ -24,7 +24,6 @@ mod welcome;
 mod wayx_control;
 mod x11;
 
-use components::ACTIVITY_BAR_WIDTH;
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Styled as _,
@@ -174,6 +173,7 @@ struct AppRoot {
     active: usize,
     /// 侧边栏。
     sidebar: Entity<Sidebar>,
+    _sidebar_sub: Subscription,
     /// 「会话」视图状态。
     sessions: Entity<SessionsState>,
     /// 「文件管理器」视图状态。
@@ -374,6 +374,7 @@ impl AppRoot {
         });
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
         let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
+        let sidebar_sub = cx.observe(&sidebar, |_, _, cx| cx.notify());
 
         platform::start_wayx();
         let wayx_watch = cx.spawn(async move |root, cx| {
@@ -389,6 +390,7 @@ impl AppRoot {
             tabs: Vec::new(),
             active: 0,
             sidebar,
+            _sidebar_sub: sidebar_sub,
             sessions,
             files,
             _transfers: transfers,
@@ -611,30 +613,21 @@ impl Render for AppRoot {
                 })
                 .child(
                     resizable_panel()
-                        .size(ACTIVITY_BAR_WIDTH + width)
-                        // 下界是图标栏，上界不限。
-                        .size_range(ACTIVITY_BAR_WIDTH..Pixels::MAX)
+                        .size(width)
+                        // 可以拖到左沿以折叠面板。
+                        .size_range(px(0.)..Pixels::MAX)
                         .flex_none()
                         .child(panel),
                 )
                 .child(resizable_panel().child(mid_column))
                 .into_any_element()
         } else {
-            // 折叠态：中间列铺满剩余宽度。
-            h_flex()
-                .h_full()
-                .w_full()
-                .child(panel)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .overflow_hidden()
-                        .child(mid_column),
-                )
-                .into_any_element()
+            mid_column
         };
+
+        let status_bar = self
+            .sidebar
+            .update(cx, |sidebar, cx| sidebar.render_status_bar(cx));
 
         v_flex()
             .id("app-root")
@@ -668,6 +661,7 @@ impl Render for AppRoot {
                     .overflow_hidden()
                     .child(body),
             )
+            .child(status_bar)
             // 覆盖层由 gpui-kit 的 `Root` 渲染。
     }
 }

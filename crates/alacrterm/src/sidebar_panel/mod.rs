@@ -1,6 +1,5 @@
-//! 最左侧的整列（VS Code 的「活动栏 + 侧边栏」）：48px 图标栏 + 右侧侧边栏面板（面板标题栏 +
-//! 视图内容）。整列 = 一个实体 [`Sidebar`]，外观由 `components/` 的组件画，本模块只做装配；
-//! 视图内容是两个共享实体 [`sessions::SessionsState`] 与 [`files::FilesState`]（只摆一个）。
+//! 左侧可折叠面板，共享会话和文件视图的状态。
+//! 视图切换入口位于全局底部状态栏。
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels,
@@ -14,7 +13,7 @@ use gpui_kit::component::{
 
 use crate::AppRoot;
 use crate::assets::IconName;
-use crate::components::{ACTIVITY_BAR_WIDTH, SidebarRow};
+use crate::components::SidebarRow;
 
 mod activity_bar;
 pub(crate) mod files;
@@ -34,9 +33,8 @@ const SIDEBAR_COLLAPSE_WIDTH: Pixels = px(24.);
 /// 侧边栏在分栏组里的下标。
 const SIDEBAR_PANEL_INDEX: usize = 0;
 
-/// 整列宽度 → 侧边栏宽度;贴着图标栏（≤ [`SIDEBAR_COLLAPSE_WIDTH`]）返回 `None`。
-fn sidebar_width_after_drag(panel_width: Pixels) -> Option<Pixels> {
-    let width = panel_width - ACTIVITY_BAR_WIDTH;
+/// 拖到窗口左沿（≤ [`SIDEBAR_COLLAPSE_WIDTH`]）时折叠面板。
+fn sidebar_width_after_drag(width: Pixels) -> Option<Pixels> {
     (width > SIDEBAR_COLLAPSE_WIDTH).then_some(width)
 }
 
@@ -121,7 +119,7 @@ pub(crate) struct Sidebar {
     files_enabled: bool,
     /// 是否显示侧边栏面板。
     visible: bool,
-    /// 期望宽度（不含图标栏）。
+    /// 期望宽度。
     width: Pixels,
     /// 分栏面板共享状态。
     resize: Entity<ResizableState>,
@@ -156,6 +154,10 @@ impl Sidebar {
         }
     }
 
+    pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        activity_bar::status_bar(self, cx)
+    }
+
     pub(crate) fn visible(&self) -> bool {
         self.visible
     }
@@ -183,12 +185,12 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// 期望宽度（不含图标栏）。
+    /// 期望宽度。
     pub(crate) fn width(&self) -> Pixels {
         self.width
     }
 
-    /// 记下拖拽后的整列宽度；贴着图标栏则收起。
+    /// 记下拖拽后的面板宽度；拖到左沿则收起。
     pub(crate) fn set_panel_width(&mut self, panel_width: Pixels, cx: &mut Context<Self>) {
         let Some(width) = sidebar_width_after_drag(panel_width) else {
             self.set_visible(false, cx);
@@ -212,7 +214,7 @@ impl Sidebar {
         if !self.visible {
             return;
         }
-        let width = ACTIVITY_BAR_WIDTH + self.width;
+        let width = self.width;
         let container = self.resize.read(cx).container_size();
         if self.split_width != Some(container) {
             self.split_width = Some(container);
@@ -263,7 +265,7 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        activity_bar::left_column(self, cx)
+        activity_bar::panel(self, cx)
     }
 }
 
@@ -300,28 +302,19 @@ impl SidebarRow for SidebarContent {
 
 #[cfg(test)]
 mod tests {
-    use super::{ACTIVITY_BAR_WIDTH, SIDEBAR_COLLAPSE_WIDTH, sidebar_width_after_drag};
+    use super::{SIDEBAR_COLLAPSE_WIDTH, sidebar_width_after_drag};
     use gpui::px;
 
     #[test]
     fn sidebar_width_has_no_min_or_max() {
-        assert_eq!(
-            sidebar_width_after_drag(ACTIVITY_BAR_WIDTH + px(25.)),
-            Some(px(25.))
-        );
-        assert_eq!(
-            sidebar_width_after_drag(ACTIVITY_BAR_WIDTH + px(2000.)),
-            Some(px(2000.))
-        );
+        assert_eq!(sidebar_width_after_drag(px(25.)), Some(px(25.)));
+        assert_eq!(sidebar_width_after_drag(px(2000.)), Some(px(2000.)));
     }
 
     #[test]
-    fn dragging_flush_against_the_icon_bar_collapses() {
-        assert_eq!(sidebar_width_after_drag(ACTIVITY_BAR_WIDTH), None);
-        assert_eq!(sidebar_width_after_drag(ACTIVITY_BAR_WIDTH - px(10.)), None);
-        assert_eq!(
-            sidebar_width_after_drag(ACTIVITY_BAR_WIDTH + SIDEBAR_COLLAPSE_WIDTH),
-            None
-        );
+    fn dragging_to_the_left_edge_collapses() {
+        assert_eq!(sidebar_width_after_drag(px(0.)), None);
+        assert_eq!(sidebar_width_after_drag(px(-10.)), None);
+        assert_eq!(sidebar_width_after_drag(SIDEBAR_COLLAPSE_WIDTH), None);
     }
 }

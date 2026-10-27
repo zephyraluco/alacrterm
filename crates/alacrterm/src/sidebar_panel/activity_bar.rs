@@ -1,4 +1,4 @@
-//! 最左侧整列的装配:48px 图标栏 + 右侧侧边栏面板。
+//! 侧边栏面板与全局底部状态栏的装配。
 
 use std::path::PathBuf;
 
@@ -7,50 +7,65 @@ use gpui::{
     IntoElement, ParentElement as _, PathPromptOptions, SharedString, Styled as _, Window, div, px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Placement, Sizable as _,
+    ActiveTheme as _, Disableable as _, Placement, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{ContextMenuExt as _, PopupMenuItem},
+    status_bar::StatusBar,
 };
 
 use super::files::FilesState;
 use super::{Sidebar, SidebarContent, SidebarView};
 use crate::actions::{NewFolder, NewSession, OpenSettings};
 use crate::assets::IconName;
-use crate::components::{ActivityBar, ActivityBarItem, Sidebar as SidebarPanel};
+use crate::components::Sidebar as SidebarPanel;
 use crate::dialog::name::open_name_dialog;
+use crate::status_bar::STATUS_BAR_HEIGHT;
 
-/// 整条左列:图标栏 + 侧边栏面板。
-pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
-    let active = if sidebar.visible() {
-        sidebar.active_view(cx)
-    } else {
-        None
-    };
+/// 全窗口底栏：紧凑的视图切换按钮，侧边栏折叠时仍可操作。
+pub(super) fn status_bar(sidebar: &Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
+    let active = if sidebar.visible() { sidebar.active_view(cx) } else { None };
     let files_enabled = sidebar.files_view_available(cx);
-
-    let bar = SidebarView::ALL
-        .iter()
-        .copied()
+    let buttons = SidebarView::ALL
+        .into_iter()
         .filter(|view| view.visible_with(files_enabled))
-        .fold(ActivityBar::new("activity-bar"), |bar, view| {
+        .map(|view| {
             let state = cx.weak_entity();
-            bar.item(
-                ActivityBarItem::new(view.id(), view.icon(), view.tooltip(), move |_, _, cx| {
+            Button::new(view.id())
+                .ghost()
+                .xsmall()
+                .icon(view.icon())
+                .tooltip(view.tooltip())
+                .tooltip_placement(Placement::Top)
+                .accessibility_label(view.tooltip())
+                .selected(active == Some(view))
+                .on_click(move |_, _, cx| {
                     let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
                 })
-                .active(active == Some(view)),
-            )
-        })
-        .footer_item(ActivityBarItem::new(
-            "activity-settings",
-            IconName::Settings,
-            "设置",
-            |_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx),
-        ));
+        });
+    StatusBar::new()
+        .h(STATUS_BAR_HEIGHT)
+        .w_full()
+        .flex_none()
+        .py_0()
+        .left(h_flex().gap_1().children(buttons))
+        .right(
+            Button::new("activity-settings")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Settings)
+                .tooltip("设置")
+                .tooltip_placement(Placement::Top)
+                .accessibility_label("设置")
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
+        )
+        .into_any_element()
+}
 
-    let Some(active) = active else {
-        return bar.into_any_element();
+/// 面板内容不再为竖向图标栏预留空间。
+pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
+    let Some(active) = sidebar.visible().then(|| sidebar.active_view(cx)).flatten() else {
+        return div().into_any_element();
     };
 
     let rows: Vec<SidebarContent> = match active {
@@ -100,7 +115,11 @@ pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> A
         SidebarView::Files => files_panel(panel, sidebar.files.clone()),
     };
 
-    bar.sidebar(panel).into_any_element()
+    div()
+        .size_full()
+        .key_context(crate::keymap::SIDEBAR_CONTEXT)
+        .child(panel)
+        .into_any_element()
 }
 
 /// 「文件管理器」顶部那一行工具栏（照 MobaXterm 的摆法：按钮在上、路径框在下）。

@@ -35,7 +35,7 @@ const USER_KEYMAP_RELATIVE_PATH: &str = "config/keymap.json";
 /// 「标签栏 / 面板」的 key context（打在 [`crate::tab_bar`] 的标签栏上）。
 pub(crate) const DOCK_CONTEXT: &str = "Dock";
 
-/// 「侧边栏」的 key context（打在 `components::ActivityBar` 的整列根节点上）。
+/// 「侧边栏」的 key context（打在 侧边栏面板根节点上）。
 pub(crate) const SIDEBAR_CONTEXT: &str = "Sidebar";
 
 /// 「预览窗口」的 key context（打在 `preview_window` 的窗口根节点上）。
