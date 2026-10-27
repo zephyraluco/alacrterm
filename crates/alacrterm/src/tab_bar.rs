@@ -168,9 +168,10 @@ impl TabGroupRenderer for TerminalTabBar {
             .map(|ix| self.render_tab(group, *ix, active_ix, window, cx))
             .collect();
 
-        // 右端固定区：工具栏按钮。
+        // 仅在焦点所在标签组显示工具栏，非活动组不留按钮占位。
         let toolbar = group
             .active_panel()
+            .filter(|panel| panel.focus_handle(cx).contains_focused(window, cx))
             .and_then(|panel| PanelHandle::of(panel))
             .and_then(|handle| handle.toolbar_buttons(window, cx));
 
@@ -209,18 +210,18 @@ impl TabGroupRenderer for TerminalTabBar {
                             .children(tabs),
                     ),
             )
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h_full()
-                    .px_1()
-                    .gap_1()
-                    .border_l_1()
-                    .border_color(border)
-                    .when_some(toolbar, |this, buttons| {
-                        this.children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false)))
-                    }),
-            )
+            .when_some(toolbar, |this, buttons| {
+                this.child(
+                    h_flex()
+                        .flex_none()
+                        .h_full()
+                        .px_1()
+                        .gap_1()
+                        .border_l_1()
+                        .border_color(border)
+                        .children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false))),
+                )
+            })
             .into_any_element()
     }
 
@@ -280,6 +281,7 @@ impl TerminalTabBar {
         let drag_border = cx.theme().drag_border;
 
         let panel = &group.panels()[ix];
+        let focus_handle = panel.focus_handle(cx);
         let selected = ix == active_ix;
         let hovered = self.state.hovered.get() == Some(ix);
         // 关闭按钮：选中常驻，否则悬停。
@@ -350,7 +352,11 @@ impl TerminalTabBar {
             })
             .on_click({
                 let group = group.clone();
-                move |_, window, cx| group.select_tab(ix, window, cx)
+                move |_, window, cx| {
+                    group.select_tab(ix, window, cx);
+                    // 已选中的标签仍需把焦点从其他停靠组移回来。
+                    window.focus(&focus_handle, cx);
+                }
             })
             .on_mouse_up(MouseButton::Middle, {
                 let root = self.state.root.clone();
