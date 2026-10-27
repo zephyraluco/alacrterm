@@ -42,3 +42,12 @@ platform.workspace = true
 session.workspace = true
 
 transfer.workspace = true
+
+ssh.workspace = true
+tempfile = "3"
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+russh = { version = "0.63", default-features = false, features = ["ring", "flate2"] }
+russh-sftp = "3.0.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }

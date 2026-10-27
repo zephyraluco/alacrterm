@@ -1,4 +1,4 @@
-//! russh 的客户端回调:主机密钥校验 + 认证横幅留痕。
+//! russh 的客户端回调:主机密钥校验 + 认证横幅显示。
 //!
 //! 这是**安全关键**的一环 —— russh 在密钥交换时已经验过签名,但「这个公钥是不是我信任的
 //! 那一台」只能由回调回答(它的默认实现是**一律拒绝**)。
@@ -129,7 +129,7 @@ struct ResponseSlot {
 
 /// 客户端回调:主机密钥校验需要的全部上下文。
 pub(crate) struct ClientHandler {
-    pub(crate) x11: Option<crate::wayx::Forwarder>,
+    pub(crate) x11: Option<crate::x11::Forwarder>,
     user: String,
     host: String,
     port: u16,
@@ -314,6 +314,11 @@ impl Handler for ClientHandler {
         _session: &mut russh::client::Session,
     ) -> Result<(), Self::Error> {
         log::info!("{} 的认证横幅:{banner}", self.host);
+        if let Some(events) = &self.events {
+            // Authentication banners bypass the remote PTY's ONLCR conversion.
+            let banner = banner.replace("\r\n", "\n").replace('\n', "\r\n");
+            events.data(banner.as_bytes()).await;
+        }
         Ok(())
     }
 }

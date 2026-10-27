@@ -1,9 +1,10 @@
 //! Shared query contract for immediate and filesystem-backed providers.
-use crate::{
+use super::{
     SuggestionSettings,
-    completion::{Candidate, Kind, Source, match_score},
+    completion::{Candidate, Kind, Source},
     path_suggestions::PathQuery,
     project_completions,
+    scoring::match_score,
 };
 pub(super) struct Context<'a> {
     pub text: &'a str,
@@ -55,16 +56,18 @@ impl Provider {
                     .history
                     .iter()
                     .enumerate()
-                    .filter(|(_, command)| {
-                        command.starts_with(context.text) && **command != context.text
-                    })
+                    .filter(|(_, command)| command.starts_with(context.text))
                     .map(|(index, command)| {
                         Candidate::new(
                             command.clone(),
                             context.text.len(),
                             Kind::History,
                             Source::History,
-                            1100 - (index as i64).min(100),
+                            if command == context.text {
+                                1500
+                            } else {
+                                1100 - (index as i64).min(100)
+                            },
                         )
                     })
                     .collect(),
@@ -111,7 +114,7 @@ impl Provider {
                     return None;
                 }
                 Some(Work::Ready(
-                    crate::command_specs::candidates(context.text)
+                    super::command_specs::candidates(context.text)
                         .into_iter()
                         .map(|(text, description)| {
                             let kind = if text
@@ -123,12 +126,13 @@ impl Provider {
                             } else {
                                 Kind::Subcommand
                             };
+                            let score = if text == context.text { 1500 } else { 1250 };
                             let mut item = Candidate::new(
                                 text,
                                 context.text.len(),
                                 kind,
                                 Source::Specification,
-                                1250,
+                                score,
                             );
                             item.description = Some(description.into());
                             item

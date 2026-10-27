@@ -6,8 +6,10 @@
 ## 使用
 
 输入已有历史命令的前缀，约 100 ms 后显示候选，默认视口最多 10 行；完整结果保留并支持滚动。
-`Ctrl+Space` 手动触发，`↑` / `↓` 选择，`Tab` 或鼠标点击插入，`Esc` 关闭。
-`Enter` 始终执行当前输入，不默认接受选中候选。插入候选不会附带回车。
+`Ctrl+Space` 手动触发。提示框可见且候选有效时，`↑` / `↓` 选择，`Tab`、`Enter` 或鼠标点击插入，`Esc` 关闭。
+接受候选只插入文本，不执行命令；普通候选插入后关闭提示框，再按 `Enter` 执行。目录候选可以继续触发补全。
+`Shift+Tab` 始终交给终端；左右方向键保留 Shell 编辑行为并刷新候选。提示框隐藏或候选过期时，按键交给终端。
+控制组合键关闭提示框并传给终端；关闭后丢弃尚未返回的补全结果。
 
 历史仅保存在当前分屏内存中，最多 256 条，不读取或写入用户的历史文件。
 只有用户提交且 shell 发出执行确认的命令才进入历史；以空白开头的命令不记录。
@@ -22,13 +24,30 @@
 通过 OSC 633（兼容 OSC 133）的 A/B/C/D 生命周期标记判断提示符、输入、执行和结束，
 不通过 `$`、`#` 或 `❯` 猜测。未集成的 shell 保留原生行为，不弹应用建议。
 
-默认本地 Bash 4.4+、Zsh 和使用 PSReadLine 的 PowerShell 会加载会话临时集成脚本。
+默认本地 Bash、Zsh 和使用 PSReadLine 的 PowerShell 会加载会话临时集成脚本。
 用户的 Bash rc、Zsh 配置及 PowerShell profile 保留，不修改任何启动文件；临时文件
 随 PTY 生命周期清理。显式配置了自定义 shell 参数时保持原启动方式，不自动注入。
 设置 `ALACRTERM_SHELL_INTEGRATION=0` 可禁止本地自动加载。
 
-SSH 默认会探测远端 shell，对 Bash/Zsh 使用会话临时目录加载集成；不修改远端启动文件。
-探测、临时目录创建或 exec 不支持时静默保留普通 shell。可在设置中关闭新连接的自动集成。
+`bash.sh` 使用 POSIX sh 语法，不再按 Bash 最低版本拒绝加载。Bash 支持 PS0 时使用 PS0，
+旧版使用 DEBUG 钩子；数组形式的 PROMPT_COMMAND 会转为兼容旧版的调用包装，并保留原有命令顺序和退出状态。
+已有 DEBUG trap 或函数跟踪不会被覆盖；旧 Bash 缺少安全执行前钩子时保守省略 Execute 上报。
+在 dash 等非 Bash Shell 中可手动 source，提供初始命令清单，以及支持 PS1 命令替换时的提示符/目录信息；
+POSIX 没有统一的 preexec 钩子，因此不猜测执行开始。当前自动安装入口仍支持 Bash/Zsh。
+兼容性回归可通过 `ALACRTERM_TEST_BASH=/path/to/bash cargo test -p alacrterm shell_integration::script_tests`
+加入指定版本。
+
+Bash 命令清单按 C locale 排序、去重后批量上报；内容相同则不发送 CommandReset 或完整清单。
+Bash 提示符直接读取 SECONDS，并将本次签名和时间传给刷新函数，避免重复计算。
+PATH/别名/函数变化检查与 30 秒提示符阶段扫描保留，自动补全防抖仍为 100 ms。
+本次使用实际 Bash 3.2、4.3、系统 Bash 及 dash 验证；旧版 Bash 的 Readline 补全/
+按键回调不发送 Execute，用户提交命令时才发送。
+
+本机对照粗测：完整清单刷新约 49 ms → 31 ms，普通提示符约 2.45 ms → 1.62 ms；
+首次上报约 81 KB → 42 KB。测量包含摊销后的启动开销，不代表所有远端环境的耗时。
+
+SSH 默认读取远端 `/etc/shells`，为已安装且受支持的 Bash/Zsh 安装持久入口，仅在带有 Alacrterm 会话标识时加载。
+服务器不接受会话标识、安装或探测失败时静默保留普通登录。可在设置中关闭新连接的自动集成。
 也可手动把对应脚本复制到远端后，在交互会话中加载：
 
 ```sh
@@ -44,7 +63,16 @@ PowerShell：
 . C:\path\to\powershell.ps1
 ```
 
-脚本位于 `crates/terminal/shell-integration/`，本地使用的同份脚本嵌入应用。
+脚本统一位于根目录 `scripts/shell_integration/`，由 `alacrterm::shell_integration` 编译时嵌入，
+运行时不依赖外部脚本目录。
+
+集成职责由应用层持有：`local.rs` 准备本地启动文件，`remote.rs` 决定远端启用、安装与更新，
+`protocol.rs` 解释 Alacrterm 专用 OSC 扩展。`ssh` 不再持有集成脚本或集成开关，
+通过 `SessionSetup`/`SessionContext` 提供环境变量申请和严格校验主机密钥的辅助连接；
+辅助连接提供有超时和输出上限的通用 exec。`terminal` 通过 `LaunchOptions` 接收宿主准备钩子、
+资源和扩展解码函数，保留标准 OSC 133/633 生命周期及 OSC 7/标题目录解析。
+本地临时资源跟随 PTY 事件循环存活，事件循环退出后释放。设置变更只更新后续重连和新会话的启动策略，
+分屏及复制终端沿用宿主选项。SSH 仍在启动原生 Shell 前完成辅助安装，未改为后台延迟安装。
 SSH 已存在的 OSC 133/633 集成也可提供生命周期标记。当前追踪标准字符输入、
 删除、左右移动及 Home/End、Ctrl+A/E；历史导航和原生编辑后，会尝试从已确认提示符的单行终端内容重新同步；无法确认时回退。
 
@@ -107,7 +135,9 @@ SSH 补全查询与首次连接各有 5 秒超时，取消的排队请求直接�
 原生历史召回、删除单词等编辑后，等待终端回显，再校验提示符前缀、行号、列数和光标位置。
 可确认的 ASCII 单行输入会恢复建议；换行、窗口尺寸变化、宽字符/组合字符或搜索中的临时提示符保持原生行为。
 执行命令时立即丢弃输入锚点，密码输入阶段不尝试恢复。接受前还会核对已回显的输入。
-命令名称支持子序列模糊匹配，前缀匹配优先；PowerShell 按不区分大小写匹配。
+命令名称支持子序列模糊匹配，完全匹配优先于前缀和模糊匹配；PowerShell 按不区分大小写匹配。
+模糊命中的字符分别高亮，位置与命令匹配算法一致；高亮使用原始文本的 UTF-8 字节范围。
+完全匹配的命令名、历史命令和内置子命令仍显示在列表中，接受后关闭列表，不附带执行。
 可在命令词中间替换，后面的参数保持不变；右箭头不接受候选，未恢复灰色行内建议。
 
 ## 配置
@@ -115,7 +145,7 @@ SSH 补全查询与首次连接各有 5 秒超时，取消的排队请求直接�
 设置窗口的「终端」页可控制建议总开关、自动触发、历史/shell/路径/规格/项目参数来源、模糊匹配、接受后补空格和新 SSH 连接的自动集成。
 配置保存在 `config/terminal.json` 的 `suggestions` 对象中，缺失字段使用默认值。
 默认开启建议及自动触发，默认不补空格。关闭自动触发后，Ctrl+Space 仍可手动查询；关闭总开关后手动查询也不显示。
-关闭历史来源会清除当前分屏已保存的建议历史。右箭头和 Enter 的原生行为保持不变。
+关闭历史来源会清除当前分屏已保存的建议历史。右箭头保留原生行为；Enter 在提示框可见时接受候选，隐藏时执行命令。
 
 ## 项目元数据提供者
 
@@ -125,11 +155,51 @@ SSH 补全查询与首次连接各有 5 秒超时，取消的排队请求直接�
 本地后台读取；SSH 使用独立、懒加载的 SFTP 补全 worker，不占用文件浏览或传输 worker。
 元数据文件最多 256 KiB，远端提供者查询总时限 5 秒，缓存 3 秒，Ctrl+Space 跳过缓存。
 
-## SSH 会话级集成
+## SSH 持久启动集成
 
-远端 Bash 读取 `/etc/profile` 和首个个人登录配置后加载集成；Zsh 按 env/profile/rc/login 顺序加载原配置。
-临时文件只存在于随机私有目录，正常退出或收到终止信号后清理；不追加或替换用户的 rc/profile。
-Bash 使用交互式 rc 包装器读取登录配置，`login_shell` 标志与原生登录 shell 不完全相同；有依赖该标志的配置时可关闭自动集成并手动加载。
+交互会话始终使用 `PTY → request_shell`，由服务器执行正常登录流程，保留 MOTD、Last login、
+登录模式及用户启动文件顺序。不会通过 exec 包装器启动第二层 Shell，也不手动重放 profile。
+
+请求交互 Shell 前，先申请会话环境变量 `ALACRTERM_REMOTE_INTEGRATION=1`；服务器拒绝时尝试
+`LC_ALACRTERM_INTEGRATION=1`，兼容常见的 `AcceptEnv LC_*` 配置。两者都被拒绝时不安装入口，
+直接普通登录，不修改 sshd 配置。每次变量申请最多等待 2 秒。
+
+服务器接受标识后，通过独立 SSH 连接中的一次 exec 完成检查和安装；该辅助连接复用认证参数，
+只接受已记录的主机密钥，不重复询问信任。exec 最多等待 5 秒，辅助连接总限时 20 秒。
+不能复用交互连接的 exec 通道：OpenSSH 会在首个 exec/shell 启动后清空连接级 PAM 登录消息，
+即使是无输出的探测命令也会导致后续 Shell 丢失 MOTD。交互连接的首个执行请求始终是 `request_shell`。
+认证阶段的 SSH 横幅也发送到终端显示；辅助连接的横幅不重复显示。
+脚本保存在 `$HOME/.local/share/alacrterm/shell/`，统一使用 LF 换行。
+Bash 在 `.bashrc` 和首个存在的 `.bash_profile`、`.bash_login`、`.profile` 中加入带标记的入口，
+没有登录配置时使用 `.profile`；Zsh 使用探测到的 `ZDOTDIR` 下的 `.zshrc`。
+入口在正常启动过程中加载集成，无需向交互输入通道发送初始化命令，因此初始化命令不会进入回显或历史。
+已有脚本的幂等保护避免重复加载；仅在交互 Shell 且具有会话标识时启用，随后清除标识，避免嵌套 SSH 传播。
+
+一次 exec 内先读取 `/etc/shells`，过滤注释、空行和不存在/不可执行的路径，按 Bash/Zsh 类型去重；
+清单不可读时使用 `$SHELL` 回退。随后读取 `$HOME/.local/share/alacrterm/shell/version`：
+第一行是集成版本（当前 `1.0.2`，独立于应用版本），后续每行是已集成的 Shell 类型。
+版本与类型集合完全匹配时立即返回，不检查入口或脚本，不创建目录或锁，也不写回 version；
+类型顺序和重复项不影响比较。此时用户手动删除入口/脚本不会自动修复，删除 version 可触发重装。
+版本文件示例：
+
+```text
+1.0.2
+bash
+zsh
+```
+
+
+不匹配时才检查目标配置、更新脚本和安装入口，全部成功后最后原子提交 version；
+新增 Shell 会补齐入口，已移除 Shell 从清单移除，其旧配置入口保留。脚本内容相同时不重写，
+更新时使用同目录临时文件原子替换。旧 `installed-bash`/`installed-zsh` 标记迁移后删除。
+用户启动文件原有内容和权限保留；已有托管块被改写或目标是符号链接时不强制覆盖，需要手动修复。
+安装所需的 Zsh 配置探测也在这一次 exec 内执行，支持非默认 Zsh 在 `.zshenv` 中设置未导出的 ZDOTDIR；
+版本匹配时不执行此探测。并发安装使用目录锁；失败时尝试撤销会话标识，再继续原生登录。
+所有登录输出原样转发，不清屏或过滤横幅。
+
+关闭 SSH 自动集成后，新连接不再发送标识；已安装文件保留，但普通客户端不加载集成。
+手动卸载时，仅删除启动文件中 `# >>> alacrterm shell integration >>>` 至
+`# <<< alacrterm shell integration <<<` 的托管块，以及上述专用脚本目录。
 PowerShell/Fish 等远端 shell 目前回退普通 shell，PowerShell 可手动加载脚本。
 `ALACRTERM_SHELL_INTEGRATION=0` 同时禁止本地自动加载和新 SSH 会话的自动集成。
 
@@ -140,26 +210,42 @@ PowerShell/Fish 等远端 shell 目前回退普通 shell，PowerShell 可手动�
 - 配置：关闭自动触发后不弹菜单，Ctrl+Space 仍能手动查询。
 - 项目候选：本地 npm/Git 和 SSH SFTP 元数据，不执行项目脚本。
 - 原生 Bash/Zsh：启动配置加载、清单自动刷新、临时文件清理。
-- 真实 OpenSSH：应用无需手动 source 即可补全，命令输出、执行标记和退出状态往返正常；探测不支持时普通 shell 回退。
+- SSH 持久集成：隔离 HOME 的真实 Bash/Zsh 启动测试；SSH 协议往返模拟 OpenSSH 首个 exec 消耗 PAM 登录消息，验证 MOTD/厂商欢迎信息保留、认证横幅只显示一次、重复连接复用、环境变量拒绝回退及普通客户端隔离。
+- 真实 OpenSSH 持久集成测试需专用隔离账户并允许会话标识，默认忽略，未在共享账户上运行。
 - 工作区编译检查及相关单元/SSH 回归通过；Clippy 性能 lint 通过（仍有既有及样式建议警告）。
+
+职责迁移验证：应用层 53 项、终端视图 26 项、SSH 单元/往返 29 项通过；终端排除路径超链接测试组后 52 项通过。
+完整终端测试仍有 23 项路径超链接失败，重构前提交也存在相同失败；终端测试代码的 Clippy 性能检查
+同样受既有 `hyperlinks.rs:1553` 警告阻塞。SSH、应用和视图全目标 Clippy 性能检查及工作区全目标编译通过。
 
 Windows/macOS GUI 和 PowerShell 脚本尚未原生验证，未宣称与 VS Code 完全等同。
 
 ## 实现结构
 
-| 模块 | 职责 |
+| 位置 | 职责 |
 | --- | --- |
-| `completion_controller.rs` | 每个分屏独立的查询调度、取消、请求代号、结果校验、输入恢复和接受决策 |
-| `completion_provider.rs` | 历史、shell 命令、规格、路径和项目参数的统一查询接口 |
-| `completion_resources.rs` | 本地/SSH 资源读取、原有超时策略、3 秒缓存与手动刷新 |
-| `suggestions.rs` | 输入状态、内存历史、候选合并排序与文本替换 |
-| `prompt_input.rs` | 提示符锚点及等待终端回显恢复的状态 |
-| `suggestion_popup.rs` | 现有单行列表、滚动、鼠标与光标末端定位 |
+| `alacrterm::completion::CompletionEngine` | 每个分屏独立的应用层补全服务，提供即时候选和延迟任务 |
+| `alacrterm/src/completion/completion_provider.rs` | 历史、shell 命令、规格、路径和项目参数的提供者选择 |
+| `alacrterm/src/completion/completion_resources.rs` | 本地/SSH 资源读取、超时、3 秒缓存与手动刷新 |
+| `alacrterm/src/completion/path_suggestions.rs` | Shell 路径解析、转义和路径候选计算 |
+| `alacrterm/src/completion/project_completions.rs` | npm/Git 等项目元数据解析和候选计算 |
+| `terminal_view::completion_service` | 通用候选服务接口；借用查询上下文，延迟任务持有必要的独立数据 |
+| `terminal_view/src/completion_controller.rs` | UI 请求调度、取消、请求代号、结果校验、输入恢复和接受决策 |
+| `terminal_view::SuggestionModel` | 输入状态、当前会话历史与命令清单、候选列表及文本替换 |
+| `terminal_view/src/prompt_input.rs` | 提示符锚点及等待终端回显恢复的状态 |
+| `terminal_view/src/suggestion_popup.rs` | 列表、滚动、鼠标与光标末端定位 |
 
-输入通过明确的 Inactive / Prompt / Editing / Submitted 状态流转，已提交命令只能在 Execute 标记确认后进入历史。
+视图不读取文件系统、不解析项目配置、不选择候选提供者。应用为每个终端注入独立服务；
+上下文同步借用历史和命令清单，避免每次按键复制全部清单。服务只使用当前会话的数据源。
+缓存最多保存一份目录数据和一份项目数据；重连时清空缓存并递增代次，旧任务不能回填新会话缓存。
+未注入服务时保留正常终端输入，不生成应用候选。
+
+输入通过 Inactive / Prompt / Editing / Submitted 状态流转，已提交命令只能在 Execute 标记确认后进入历史。
 菜单关闭状态只属于 Editing；等待原生编辑恢复时必须持有当前提示符锚点，提交、结束或重连会丢弃该锚点。
-异步结果统一校验请求代号、输入版本、工作目录和路径查询；相同文字的新请求也不会接受旧结果。
-缓存仍最多保存一份目录数据和一份项目数据，保留现有来源优先级、TTL、超时、候选评分和按键行为。
+异步结果校验请求代号、输入版本、工作目录、完整输入、光标和 Shell 类型；相同文字的新请求也不会接受旧结果。
+候选评分、来源优先级、TTL、超时和按键行为保持原有规则。
 
-本轮回归覆盖 25 项终端视图测试、49 项应用测试、工作区编译和 Clippy 性能检查，
-并通过 Linux GUI 验证原生历史恢复、行中替换参数完整性、密码隔离、本地路径、本地及 SSH 项目候选。
+本次边界修复验证：应用 74 项、视图 6 项、会话 4 项、SSH 29 项通过；工作区全目标编译和相关 crate
+全目标 Clippy 性能检查通过。真实 OpenSSH 安装和带桌面的 WayX 测试默认忽略，未声称已运行。
+
+Linux Xvfb 实际界面验证了应用服务提供路径候选、Tab 插入后执行文件读取，以及右箭头接受 Shell 原生建议后清除旧命令候选。

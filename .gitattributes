@@ -1,0 +1,3 @@
+# POSIX shell integration must work when embedded by a Windows build.
+*.sh text eol=lf
+*.zsh text eol=lf

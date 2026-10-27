@@ -109,6 +109,13 @@ impl TransferBook {
     }
 }
 
+// The owner of active work must also cancel it when the application service ends.
+impl Drop for TransferBook {
+    fn drop(&mut self) {
+        self.cancel_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +132,16 @@ mod tests {
             bytes_total: 0,
             cancel: CancelToken::default(),
         }
+    }
+
+    #[test]
+    fn dropping_the_transfer_owner_cancels_remaining_workers() {
+        let cancel = CancelToken::default();
+        let mut book = TransferBook::default();
+        let source = SshFs::new(ssh::SshParams::new("example.test", 22, "user"));
+        book.start(source, "active".into(), cancel.clone());
+        drop(book);
+        assert!(cancel.is_cancelled());
     }
 
     #[test]

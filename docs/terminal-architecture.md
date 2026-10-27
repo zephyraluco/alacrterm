@@ -916,7 +916,7 @@ graph LR
 
 **1. OSC 7**(`ESC ] 7 ; file://host/path BEL`,精确)
 
-- ⚠️ **必须自己扫**(`crates/terminal/src/shell_integration.rs` 的 `Osc7Scanner`):`alacritty_terminal` / `vte` 只认 OSC 0/1/2/4/8/10/11/12/52 这一批,OSC 7 在 `Handler` / `EventListener` 上**没有任何回调**(`vte 0.15` 的 `Handler` 里根本没有 working directory)⇒ 模拟器拿不到的信息,只能在我们把字节喂给模拟器**之前**先扫一遍(`Terminal::feed_remote_bytes` 的入口处)。
+- ⚠️ **必须自己扫**(`crates/terminal/src/directory.rs` 的 `Osc7Scanner`):`alacritty_terminal` / `vte` 只认 OSC 0/1/2/4/8/10/11/12/52 这一批,OSC 7 在 `Handler` / `EventListener` 上**没有任何回调**(`vte 0.15` 的 `Handler` 里根本没有 working directory)⇒ 模拟器拿不到的信息,只能在我们把字节喂给模拟器**之前**先扫一遍(`Terminal::feed_remote_bytes` 的入口处)。
 - 扫描器是**跨块**的状态机(远端字节以任意边界到达,一条 OSC 7 完全可能被切成两块);只认 `file://` 且**必须是绝对路径**,别的 OSC 原样跳过,载荷超 64 KiB 就丢弃(OSC 8/52 的载荷可以是任意大)。路径按 URL 规则解码(`%20` → 空格)。
 - ⚠️ 攒着不写的那一段(`ssh_pending`,见 §5.2)也要扫 —— 远端第一条上报往往就在里面。
 - 事实标准(iTerm2 / kitty / VSCode / oh-my-zsh / Starship 都发),但 **stock bash 默认不发**:想让远端发**精确**的 OSC 7,把下面这段加进远端 `~/.bashrc` 即可(也是我们**不**替用户塞进去的原因,见下):
@@ -1068,3 +1068,14 @@ cargo run -p ssh --example local_server -- 2299
 - SSH 的「已连上」(`Terminal::is_connected`)是**使用同一份参数做别的连接**(SFTP 文件管理器)的前置条件(§3.2 / §5.2)
 - 远端当前目录靠 **OSC 7 与窗口标题**两条:模拟器不认 OSC 7(只能自己扫,§5.4),stock bash 不发它(但发行版默认 `PS1` 会把 cwd 放进标题);**不要去改远端 shell**(`exec` 会弄丢 MOTD / `Last login`,§5.4);本地不需要这套(本地 cwd 采得到,§4.5)
 - 假 SSH 服务端(`ssh/examples/local_server.rs`)里 **`data` 回调要按通道过滤**:russh 会把**所有**通道的数据都送到 `Handler::data`,不限住的话 sftp 那条通道的协议包会被玩具 shell 当成键盘输入回显回去
+
+### 会话描述与 X11 边界
+
+`session::SessionTarget` 只描述启动意图，不依赖 terminal、SSH 或 GPUI；应用层负责转换为运行目标。
+SSH 的 `SessionOptions` 接收可选的 `X11Target`，只处理协议、转发 cookie 校验和数据桥接。
+应用层 `x11::WayxTarget` 决定 WayX Endpoint、额度与服务代次生命周期；SSH 不再依赖 platform。
+通用 SSH 会话默认不申请 X11，应用启动终端时注入目标，保持自动 X11 转发行为。
+
+补全提供者与本地/远端资源访问由 `alacrterm::completion::CompletionEngine` 持有，应用创建每个终端时
+注入独立服务。`terminal_view::completion_service` 只定义候选查询及延迟任务接口；视图维护输入、
+菜单、请求取消和过期结果过滤，不依赖具体文件系统提供者。缓存代次跟随会话重置。

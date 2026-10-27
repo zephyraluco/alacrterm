@@ -204,14 +204,19 @@ dependencies = [
  "gpui-pre",
  "log",
  "platform",
+ "russh",
+ "russh-sftp",
  "rust-embed",
  "schemars",
  "serde",
  "serde_json",
  "session",
  "settings",
+ "ssh",
+ "tempfile",
  "terminal",
  "terminal_view",
+ "tokio",
  "transfer",
  "util",
 ]
@@ -6780,7 +6785,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
- "terminal",
+ "util",
 ]
 
 [[package]]
@@ -7073,7 +7078,6 @@ dependencies = [
  "dirs 7.0.0",
  "futures",
  "log",
- "platform",
  "rand 0.10.3",
  "russh",
  "russh-sftp",
@@ -7455,7 +7459,6 @@ dependencies = [
  "serde",
  "ssh",
  "sysinfo 0.39.6",
- "tempfile",
  "thiserror 2.0.21",
  "url",
  "util",
@@ -7471,7 +7474,6 @@ dependencies = [
  "gpui-pre",
  "itertools 0.15.0",
  "log",
- "serde_json",
  "settings",
  "terminal",
 ]

@@ -1,8 +1,9 @@
 //! Non-focusing, cursor-anchored terminal completion surface.
 use crate::TerminalView;
 use gpui::{
-    AnyElement, Context, InteractiveElement as _, IntoElement as _, MouseButton,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, point, px, size,
+    AnyElement, Context, HighlightStyle, InteractiveElement as _, IntoElement as _, MouseButton,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledText, div, point, px,
+    size,
 };
 use gpui_kit::{
     base::Positioner,
@@ -10,13 +11,14 @@ use gpui_kit::{
         ActiveTheme as _, Icon, IconName, list::ListItem, scroll::Scrollbar, v_virtual_list,
     },
 };
+use std::ops::Range;
 use terminal::Modes;
 impl TerminalView {
     pub(crate) fn render_suggestions(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.completion.popup_visible = false;
         if !self.focused
             || self.ime_state.is_some()
-            || !self.completion.model.is_editing()
-            || self.completion.model.candidates.is_empty()
+            || !self.completion.model.has_current_candidates()
         {
             return None;
         }
@@ -50,6 +52,7 @@ impl TerminalView {
         if width < px(120.) || visible_rows == 0 {
             return None;
         }
+        self.completion.popup_visible = true;
         let height = row_height * visible_rows as f32 + px(2.);
         let top = if place_below {
             below
@@ -85,6 +88,13 @@ impl TerminalView {
                             detail.push('\n');
                             detail.push_str(description);
                         }
+                        let highlights = highlight_ranges(
+                            &command.label,
+                            &this.completion.model.query_for(command),
+                            this.completion.model.powershell == Some(true),
+                            command.kind == crate::completion::Kind::Command
+                                && this.completion.model.settings.fuzzy,
+                        );
                         let mut content = div()
                             .flex()
                             .w_full()
@@ -103,16 +113,22 @@ impl TerminalView {
                                 .text_color(foreground.opacity(0.65)),
                             )
                             .child(
-                                div().flex_1().min_w_0().truncate().child(
-                                    gpui_kit::component::label::Label::new(command.label.clone())
-                                        .highlights(
-                                            gpui_kit::component::label::HighlightsMatch::Full(
-                                                this.completion.model.query_for(command).into(),
-                                            ),
-                                        )
-                                        .line_height(px(20.))
-                                        .truncate(),
-                                ),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .line_height(px(20.))
+                                    .truncate()
+                                    .child(StyledText::new(command.label.clone()).with_highlights(
+                                        highlights.into_iter().map(|range| {
+                                            (
+                                                range,
+                                                HighlightStyle {
+                                                    color: Some(cx.theme().blue),
+                                                    ..Default::default()
+                                                },
+                                            )
+                                        }),
+                                    )),
                             );
                         if let Some(description) = &command.description {
                             content = content.child(
@@ -212,5 +228,97 @@ impl TerminalView {
             )
             .into_any_element(),
         )
+    }
+}
+
+/// Use the same left-to-right subsequence as command scoring, and contiguous
+/// matching for other providers. Map folded bytes back to the original label.
+fn highlight_ranges(label: &str, query: &str, insensitive: bool, fuzzy: bool) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut folded = String::with_capacity(label.len());
+    let mut original = Vec::with_capacity(label.len());
+    for (start, ch) in label.char_indices() {
+        let before = folded.len();
+        if insensitive {
+            folded.extend(ch.to_lowercase());
+        } else {
+            folded.push(ch);
+        }
+        original.extend(std::iter::repeat_n(
+            start..start + ch.len_utf8(),
+            folded.len() - before,
+        ));
+    }
+    let query = if insensitive {
+        query.to_lowercase()
+    } else {
+        query.into()
+    };
+    if let Some(start) = folded.find(&query)
+        && (start == 0 || !fuzzy)
+    {
+        return std::iter::once(original[start].start..original[start + query.len() - 1].end)
+            .collect();
+    }
+    if !fuzzy {
+        return Vec::new();
+    }
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    let mut at = 0;
+    for ch in query.chars() {
+        let Some(offset) = folded[at..].find(ch) else {
+            return Vec::new();
+        };
+        let start = at + offset;
+        at = start + ch.len_utf8();
+        let range = original[start].start..original[at - 1].end;
+        if let Some(previous) = ranges
+            .last_mut()
+            .filter(|previous| previous.end >= range.start)
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            ranges.push(range);
+        }
+    }
+    ranges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::highlight_ranges;
+
+    #[test]
+    fn highlights_prefixes_and_noncontiguous_command_characters() {
+        assert_eq!(highlight_ranges("git", "gi", false, true), vec![0..2]);
+        assert_eq!(highlight_ranges("git", "gt", false, true), vec![0..1, 2..3]);
+        assert_eq!(
+            highlight_ranges("gxxgt", "gt", false, true),
+            vec![0..1, 4..5]
+        );
+        assert_eq!(
+            highlight_ranges("cargo-clippy", "ccl", false, true),
+            vec![0..1, 6..8]
+        );
+        assert!(highlight_ranges("git", "gx", false, true).is_empty());
+        assert!(highlight_ranges("git", "gt", false, false).is_empty());
+        assert!(highlight_ranges("git", "", false, true).is_empty());
+    }
+
+    #[test]
+    fn highlights_use_shell_casing_and_original_utf8_offsets() {
+        assert_eq!(
+            highlight_ranges("Get-Item", "gt", true, true),
+            vec![0..1, 2..3]
+        );
+        assert!(highlight_ranges("Get-Item", "gt", false, true).is_empty());
+        assert_eq!(
+            highlight_ranges("écho工具", "é工", false, true),
+            vec![0..2, 5..8]
+        );
+        assert_eq!(highlight_ranges("İ-tool", "i-t", true, true), vec![0..4]);
+        assert_eq!(highlight_ranges("İ-tool", "tool", true, false), vec![3..7]);
     }
 }

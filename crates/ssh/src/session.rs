@@ -91,7 +91,7 @@ impl EventSink {
         let _ = self.0.unbounded_send(SshEvent::Connected);
     }
 
-    async fn data(&self, bytes: &[u8]) {
+    pub(crate) async fn data(&self, bytes: &[u8]) {
         for chunk in bytes.chunks(OUTPUT_CHUNK) {
             let Ok(permit) = self.1.clone().acquire_many_owned(chunk.len() as u32).await else {
                 return;
@@ -133,12 +133,13 @@ pub struct SshSession {
     commands: TokioSender<Command>,
     fs: SshFs,
     output_budget: Arc<tokio::sync::Semaphore>,
+    cancel: tokio::sync::watch::Sender<bool>,
 }
 
 /// 这次连接要远端干什么。
 enum Launch {
     /// 交互式 shell:申请 PTY 再申请 shell(终端走这条)。
-    Shell(SshSize),
+    Shell(SshSize, crate::SessionOptions),
     /// 执行一条命令:**不申请 PTY**,命令跑完会话就结束(与 `ssh host cmd` 同)。
     Exec(String),
 }
@@ -154,7 +155,23 @@ impl SshSession {
         size: SshSize,
         events: UnboundedSender<SshEvent>,
     ) -> std::io::Result<Self> {
-        Self::spawn(params, Launch::Shell(size), events)
+        Self::connect_with_setup(params, size, events, None)
+    }
+
+    /// Run optional host preparation after authentication, before PTY/shell.
+    pub fn connect_with_setup(
+        params: SshParams,
+        size: SshSize,
+        events: UnboundedSender<SshEvent>,
+        setup: Option<Arc<dyn crate::SessionSetup>>,
+    ) -> std::io::Result<Self> {
+        Self::connect_with_options(params, size, events, crate::SessionOptions { setup, ..Default::default() })
+    }
+
+    pub fn connect_with_options(
+        params: SshParams, size: SshSize, events: UnboundedSender<SshEvent>, options: crate::SessionOptions,
+    ) -> std::io::Result<Self> {
+        Self::spawn(params, Launch::Shell(size, options), events)
     }
 
     /// 建一个**执行单条命令**的会话(与 `ssh host <cmd>` 同语义):没有 PTY、不走 shell 的
@@ -176,6 +193,7 @@ impl SshSession {
         events: UnboundedSender<SshEvent>,
     ) -> std::io::Result<Self> {
         let (commands, receiver) = unbounded_channel();
+        let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
         let fs = SshFs::new(params.clone());
         let sink = EventSink::new(events);
         let output_budget = sink.1.clone();
@@ -194,13 +212,20 @@ impl SshSession {
                         return;
                     }
                 };
-                runtime.block_on(run(params, launch, sink, receiver));
+                runtime.block_on(async move {
+                    tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => sink.closed(None, None),
+                        _ = run(params, launch, sink.clone(), receiver) => {}
+                    }
+                });
             })?;
 
         Ok(Self {
             commands,
             fs,
             output_budget,
+            cancel,
         })
     }
 
@@ -218,6 +243,7 @@ impl SshSession {
 
     /// 主动断开。幂等,可以在 `Drop` 之后重复调用。
     pub fn disconnect(&self) {
+        self.cancel.send_replace(true);
         self.output_budget.close();
         let _ = self.commands.send(Command::Disconnect);
     }
@@ -262,7 +288,10 @@ async fn run_session(
     sink: &EventSink,
     commands: &mut UnboundedReceiver<Command>,
 ) -> Result<Option<u32>, SshError> {
-    let x11 = crate::wayx::Forwarder::session();
+    let x11 = match launch {
+        Launch::Shell(_, options) => options.x11.clone().map(crate::x11::Forwarder::session),
+        Launch::Exec(_) => None,
+    };
     sink.status(format!("正在连接 {} …", params.endpoint()));
     let socket = tokio::net::TcpStream::connect((params.host.as_str(), params.port))
         .await
@@ -290,24 +319,16 @@ async fn run_session(
         // 终端会话这条路有人可问(界面弹窗);没人的情况见 `HostKeyPolicy::Ask`。
         Some(sink.clone()),
     );
-    handler.x11 = Some(x11.clone());
+    handler.x11 = x11.clone();
     let mut handle = client::connect_stream(config, socket, handler).await?;
 
     auth::authenticate(&mut handle, params, sink).await?;
 
-    let integration = if matches!(launch, Launch::Shell(_)) {
-        if let Some(scripts) = params.shell_integration {
-            crate::shell_integration::prepare(&handle, scripts).await
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     let mut channel = handle
         .channel_open_session()
         .await
         .map_err(|error| SshError::ChannelOpen(error.to_string()))?;
+    if let Some(x11) = &x11 {
     // Declining X11 must not prevent a normal SSH terminal from opening.
     let accepted = if channel
         .request_x11(true, false, "MIT-MAGIC-COOKIE-1", x11.cookie_hex(), 0)
@@ -331,8 +352,14 @@ async fn run_session(
     if !accepted {
         x11.disable();
     }
+    }
+    if let Launch::Shell(_, crate::SessionOptions { setup: Some(setup), .. }) = launch {
+        setup
+            .prepare(crate::SessionContext::new(params, &mut channel, sink))
+            .await;
+    }
     let interactive = match launch {
-        Launch::Shell(size) => {
+        Launch::Shell(size, _) => {
             let size = size.sanitized();
             // 终端模式(termios)留空:让远端用自己的默认值。上报一堆猜出来的 termios 反而
             // 容易把远端 shell 弄成坏状态(比如删字符键不对),窗口尺寸才是我们真正知道的信息。
@@ -347,31 +374,7 @@ async fn run_session(
                     &[],
                 )
                 .await?;
-            let mut integrated = false;
-            if let Some(command) = integration {
-                if channel.exec(true, command).await.is_ok() {
-                    integrated = tokio::time::timeout(Duration::from_secs(2), async {
-                        loop {
-                            match channel.wait().await {
-                                Some(ChannelMsg::Success) => return true,
-                                Some(ChannelMsg::Data { data }) => {
-                                    sink.data(&data).await;
-                                    return true;
-                                }
-                                Some(ChannelMsg::Failure | ChannelMsg::Close) | None => {
-                                    return false;
-                                }
-                                _ => {}
-                            }
-                        }
-                    })
-                    .await
-                    .unwrap_or(false);
-                }
-            }
-            if !integrated {
-                channel.request_shell(false).await?;
-            }
+            channel.request_shell(false).await?;
             true
         }
         Launch::Exec(command) => {

@@ -1,13 +1,29 @@
 use futures::StreamExt as _;
-use gpui::{AsyncApp, Context, SharedString, WeakEntity};
-use terminal::{SshFs, Transfer, TransferEvent, TransferProgress};
+use gpui::{AsyncApp, Context, EventEmitter, SharedString, WeakEntity};
+use std::{collections::HashMap, path::PathBuf};
+use terminal::{SessionId, SshError, SshFs, Transfer, TransferEvent, TransferProgress};
 
-use crate::sidebar_panel::files::{FilesState, TransferDone};
+use crate::preview_window::PreviewRequest;
+
+pub(crate) enum TransferDone {
+    Preview(PreviewRequest),
+    OpenExternally(PathBuf),
+    Nothing,
+}
+
+pub(crate) struct TransferCompleted {
+    pub session: SessionId,
+    pub label: SharedString,
+    pub result: Result<(), SshError>,
+    pub refresh: Option<String>,
+    pub done: TransferDone,
+}
 
 pub(crate) use transfer::TransferState;
 #[derive(Default)]
 pub(crate) struct TransferManager {
     book: transfer::TransferBook,
+    tasks: HashMap<u64, gpui::Task<()>>,
 }
 impl TransferManager {
     pub(crate) fn active_count(&self) -> usize {
@@ -34,14 +50,13 @@ impl TransferManager {
         refresh: Option<String>,
         transfer: Transfer,
         done: TransferDone,
-        files: WeakEntity<FilesState>,
         cx: &mut Context<Self>,
     ) {
         let Transfer { mut events, cancel } = transfer;
         let id = self.book.start(source.clone(), label.to_string(), cancel);
         cx.notify();
 
-        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        let task = cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 while let Some(event) = events.next().await {
@@ -55,34 +70,52 @@ impl TransferManager {
                             }
                         }
                         TransferEvent::Done(result) => {
-                            let _ = files.update(&mut cx, |files, cx| {
-                                files.on_transfer_done(
-                                    source.session_id(),
-                                    label,
-                                    result,
-                                    refresh,
-                                    done,
+                            let _ = this.update(&mut cx, |manager, cx| {
+                                manager.complete(
+                                    id,
+                                    TransferCompleted {
+                                        session: source.session_id(),
+                                        label,
+                                        result,
+                                        refresh,
+                                        done,
+                                    },
                                     cx,
-                                )
+                                );
                             });
-                            let _ = this.update(&mut cx, |manager, cx| manager.remove(id, cx));
                             return;
                         }
                     }
                 }
-                let _ = files.update(&mut cx, |files, cx| files.report_transfer_lost(label, cx));
-                let _ = this.update(&mut cx, |manager, cx| manager.remove(id, cx));
+                let _ = this.update(&mut cx, |manager, cx| {
+                    manager.complete(
+                        id,
+                        TransferCompleted {
+                            session: source.session_id(),
+                            label,
+                            refresh,
+                            done,
+                            result: Err(SshError::Sftp("传输中断:远端文件系统线程已退出".into())),
+                        },
+                        cx,
+                    );
+                });
             }
-        })
-        .detach();
+        });
+        self.tasks.insert(id, task);
     }
 
     fn progress(&mut self, id: u64, progress: TransferProgress, cx: &mut Context<Self>) {
         self.book.progress(id, progress);
         cx.notify();
     }
-    fn remove(&mut self, id: u64, cx: &mut Context<Self>) {
+    fn complete(&mut self, id: u64, completion: TransferCompleted, cx: &mut Context<Self>) {
+        // The task is delivering its final result. Release its handle without
+        // cancelling the update that is currently dispatching completion effects.
+        if let Some(task) = self.tasks.remove(&id) { task.detach(); }
         self.book.remove(id);
+        cx.emit(completion);
         cx.notify();
     }
 }
+impl EventEmitter<TransferCompleted> for TransferManager {}

@@ -2,13 +2,19 @@ mod mappings;
 
 mod alacritty;
 mod backend;
-mod integration;
+mod launch;
+pub use launch::{
+    LaunchOptions, LocalSessionSetup, OscDecoder, PreparedShell, SessionResources, ShellMetadata,
+};
 mod observed_pty;
 mod prompt;
+mod lifecycle;
+pub use lifecycle::ConnectionState;
+use lifecycle::Lifecycle;
 pub use prompt::PromptEvent;
 mod parser_events;
 mod pty_info;
-mod shell_integration;
+mod directory;
 
 use alacritty_terminal::grid::Dimensions as _;
 use anyhow::{Context as _, Result, bail};
@@ -74,7 +80,7 @@ use crate::alacritty::{
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
-use crate::shell_integration::{DirectoryScanner, Report};
+use crate::directory::{DirectoryScanner, Report};
 
 /// Cooperative yield to the async executor so other tasks (e.g. rendering)
 /// can make progress. Replaces `futures_lite::future::yield_now`.
@@ -902,7 +908,17 @@ impl TerminalBuilder {
     pub fn new(
         working_directory: Option<PathBuf>,
         target: TerminalTarget,
+        env: HashMap<String, String>,
+        cx: &App,
+    ) -> Task<Result<TerminalBuilder>> {
+        Self::new_with_options(working_directory, target, env, LaunchOptions::default(), cx)
+    }
+
+    pub fn new_with_options(
+        working_directory: Option<PathBuf>,
+        target: TerminalTarget,
         mut env: HashMap<String, String>,
+        options: LaunchOptions,
         cx: &App,
     ) -> Task<Result<TerminalBuilder>> {
         let background_executor = cx.background_executor().clone();
@@ -940,8 +956,10 @@ impl TerminalBuilder {
             let (backend, ssh_events, title_override, is_remote_terminal) = match &target {
                 TerminalTarget::Ssh(params) => {
                     let (ssh_tx, ssh_events) = unbounded::<SshEvent>();
-                    let session = SshSession::connect(params.clone(), INITIAL_PTY_SIZE, ssh_tx)
-                        .with_context(|| format!("无法启动 SSH 会话（{}）", params.endpoint()))?;
+                    let session = SshSession::connect_with_options(
+                        params.clone(), INITIAL_PTY_SIZE, ssh_tx, options.ssh_options(),
+                    )
+                    .with_context(|| format!("无法启动 SSH 会话（{}）", params.endpoint()))?;
                     log::debug!("SSH 会话已启动:{}", params.endpoint());
                     (TerminalBackend::Ssh(session), Some(ssh_events), None, true)
                 }
@@ -1022,14 +1040,18 @@ impl TerminalBuilder {
                         .as_ref()
                         .map(|(_, args)| args.as_slice())
                         .unwrap_or(&[]);
-                    let integration_files = match integration::prepare(&program, args, &mut env) {
-                        Ok(Some((args, files))) => {
-                            alacritty_shell = Some((program, args));
-                            Some(files)
+                    let preparation = match &options.local_setup {
+                        Some(setup) => setup.prepare(&program, args, &mut env),
+                        None => Ok(None),
+                    };
+                    let resources = match preparation {
+                        Ok(Some(prepared)) => {
+                            alacritty_shell = Some((program, prepared.args));
+                            Some(prepared.resources)
                         }
                         Ok(None) => None,
                         Err(error) => {
-                            log::debug!("Shell integration: {error:#}");
+                            log::debug!("Local startup preparation: {error:#}");
                             None
                         }
                     };
@@ -1067,7 +1089,8 @@ impl TerminalBuilder {
                         events_tx.clone(),
                         pty,
                         pty_options.drain_on_exit,
-                        integration_files,
+                        resources,
+                        options.osc_decoder,
                     )?;
 
                     (
@@ -1094,9 +1117,8 @@ impl TerminalBuilder {
                 directory_scanner: DirectoryScanner::default(),
                 prompt_scanner: Default::default(),
                 resized_once: false,
-                ssh_status_shown: false,
                 // 本地：PTY 建好就算可用；远端：等 `SshEvent::Connected`（见 `is_connected`）。
-                connected: !is_remote_terminal,
+                lifecycle: Lifecycle::new(is_remote_terminal),
                 snapshot_dirty: true,
                 content_generation: 0,
                 term,
@@ -1122,7 +1144,7 @@ impl TerminalBuilder {
                 mouse_down_position: None,
                 #[cfg(windows)]
                 shell_program,
-                template: CopyTemplate { target, env },
+                template: CopyTemplate { target, env, options },
                 child_exited: None,
                 keyboard_input_sent: false,
                 event_loop_task: Task::ready(Ok(())),
@@ -1243,7 +1265,7 @@ pub struct Terminal {
     ssh_events: Option<UnboundedReceiver<SshEvent>>,
     /// 终端按真实尺寸重排之前攒下的远端输出（见 [`Terminal::feed_remote_bytes`]）。
     ssh_pending: Option<Vec<u8>>,
-    /// 远端 shell 上报的当前目录（见 [`crate::shell_integration`] 的两个来源）。
+    /// 远端 shell 上报的当前目录（见 [`crate::directory`] 的两个来源）。
     ///
     /// **只有远端会话**可能有：[`Terminal::working_directory`] 取的是本地 PTY 前台进程的
     /// cwd，远端没有本地进程可采样，所以那条路恒为 `None` —— 远端目录只能由远端 shell
@@ -1253,18 +1275,16 @@ pub struct Terminal {
     ///
     /// 收到过就不再用标题那条启发式路子盖它（见 [`Self::feed_remote_bytes`]）。
     osc7_seen: bool,
-    /// OSC 扫描器（跨块状态，见 [`crate::shell_integration::DirectoryScanner`]）。
+    /// OSC 扫描器（跨块状态，见 [`crate::directory::DirectoryScanner`]）。
     directory_scanner: DirectoryScanner,
     prompt_scanner: prompt::PromptScanner,
     /// 是否已经按真实尺寸重排过一次（见 [`Terminal::feed_remote_bytes`]）。
     resized_once: bool,
-    /// 屏幕上是否正摆着一行 SSH 进度（远端一开口就擦掉，见 [`Terminal::process_ssh_event`]）。
-    ssh_status_shown: bool,
-    /// 会话是否可用了：本地恒为 `true`（PTY 建好就算可用），远端等 `SshEvent::Connected`。
+    /// 会话运行状态：本地 PTY 创建后运行，远端等待 Connected；退出后统一结束。
     ///
     /// 远端在它变真之前，同一份连接参数还不能拿去做别的连接（那时主机密钥可能还没确认，
     /// 见 [`Terminal::remote_fs`]）。
-    connected: bool,
+    lifecycle: Lifecycle,
     snapshot_dirty: bool,
     content_generation: u64,
     term: Arc<AlacrittyTermLock>,
@@ -1305,6 +1325,7 @@ pub struct Terminal {
 struct CopyTemplate {
     target: TerminalTarget,
     env: HashMap<String, String>,
+    options: LaunchOptions,
 }
 
 /// Whether to keep the selection after copying it to the clipboard.
@@ -1327,6 +1348,7 @@ const SSH_PENDING_LIMIT: usize = 256 * 1024;
 
 impl Terminal {
     fn start_ssh_events(&mut self, mut events: UnboundedReceiver<SshEvent>, cx: &Context<Self>) {
+        let epoch = self.lifecycle.epoch();
         self.event_loop_task = cx.spawn(async move |terminal, cx| {
             while let Some(first) = events.next().await {
                 // Bound each UI update by both event count and bytes. Do not delay
@@ -1345,14 +1367,17 @@ impl Terminal {
                     }
                     batch.push(event);
                 }
-                terminal.update(cx, |terminal, cx| {
+                let current = terminal.update(cx, |terminal, cx| {
+                    if !terminal.lifecycle.is_current(epoch) { return false; }
                     for event in batch {
                         terminal.process_ssh_event(event, cx);
                     }
                     terminal.schedule_sync_timeout(cx);
                     cx.emit(Event::Wakeup);
                     cx.notify();
+                    true
                 })?;
+                if !current { break; }
                 yield_now().await;
             }
             anyhow::Ok(())
@@ -1401,25 +1426,20 @@ impl Terminal {
     /// 本地那条路是「alacritty 事件循环把字节写进 term，只发一条 `Wakeup` 告诉我们重绘」；
     /// SSH 没有那层，所以**字节由本函数亲手写进 term**（顺手补一次重绘）。
     fn process_ssh_event(&mut self, event: SshEvent, cx: &mut Context<Self>) {
+        // Connection progress belongs in logs, not in the remote terminal stream.
+        if let SshEvent::Status(text) = &event {
+            log::debug!("SSH: {text}");
+            return;
+        }
         self.snapshot_dirty = true;
         match event {
-            // 进度（连接中 / 认证中）：写成屏幕上的一行，原地刷新（不堆积）。
-            // 建连可能要几秒，不写用户就只能干等。
-            SshEvent::Status(text) => {
-                self.ssh_status_shown = true;
-                self.feed_remote_bytes(format!("\r\x1b[2K\x1b[2m{text}\x1b[0m").as_bytes());
-            }
+            SshEvent::Status(_) => unreachable!("SSH status was handled above"),
             SshEvent::Data(bytes) => {
-                // 远端开始说话了 ⇒ 擦掉进度行，别让它和真输出混在一起。
-                if self.ssh_status_shown {
-                    self.ssh_status_shown = false;
-                    self.feed_remote_bytes(b"\r\x1b[2K");
-                }
                 self.feed_remote_bytes(&bytes);
             }
             // 连接可用了：文件管理器据此才敢去连远端文件系统（见 [`Self::remote_fs`]）。
             SshEvent::Connected => {
-                self.connected = true;
+                self.lifecycle.connected();
             }
             // 首次连接某台主机：交给界面弹窗问用户（握手线程在等回答）。
             SshEvent::HostKeyPrompt(prompt) => {
@@ -1430,11 +1450,6 @@ impl Terminal {
                 exit_status,
                 reason,
             } => {
-                self.connected = false;
-                if self.ssh_status_shown {
-                    self.ssh_status_shown = false;
-                    self.feed_remote_bytes(b"\r\x1b[2K");
-                }
                 if let Some(reason) = reason {
                     // 断开原因必须留在网格里（面板不会关，用户要能回头看）。见
                     // [`TerminalView::handle_terminal_event`] 的 `CloseTerminal` 分支。
@@ -1463,10 +1478,10 @@ impl Terminal {
     ///
     /// 这里也是**远端目录的唯一入口**：远端 shell 说的两种话（精确的 OSC 7、以及
     /// 塞在窗口标题里的 cwd）都只能在我们把字节交给模拟器**之前**认出来
-    /// （[`crate::shell_integration`] 里解释了为什么模拟器那条路不行）。
+    /// （[`crate::directory`] 里解释了为什么模拟器那条路不行）。
     /// 攒着不写的那一段同样要扫 —— 远端第一条上报往往就在里面。
     fn feed_remote_bytes(&mut self, bytes: &[u8]) {
-        for event in self.prompt_scanner.feed(bytes) {
+        for event in self.prompt_scanner.feed(bytes, self.template.options.osc_decoder) {
             let _ = self
                 .parser_events_sender
                 .unbounded_send(TerminalBackendEvent::Prompt(event));
@@ -2730,34 +2745,35 @@ impl Terminal {
         self.backend.remote_fs()
     }
 
-    /// Updates only future reconnects; the current remote shell is untouched.
-    pub fn configure_remote_integration(&mut self, enabled: bool) {
-        self.template.target.configure_shell_integration(enabled);
+    /// Replace host hooks for future reconnects and cloned sessions.
+    pub fn set_launch_options(&mut self, options: LaunchOptions) {
+        self.template.options = options;
     }
 
     /// Reconnect a finished SSH session while retaining its terminal grid and history.
     pub fn reconnect(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.lifecycle.state() != ConnectionState::Exited { return false; }
         let TerminalTarget::Ssh(params) = &self.template.target else {
             return false;
         };
         let (sender, events) = unbounded::<SshEvent>();
-        let Ok(session) = SshSession::connect(
+        let Ok(session) = SshSession::connect_with_options(
             params.clone(),
             crate::backend::ssh_size_from_bounds(self.last_content.terminal_bounds),
             sender,
+            self.template.options.ssh_options(),
         ) else {
             return false;
         };
         self.backend.shutdown();
         self.backend = TerminalBackend::Ssh(session);
-        self.connected = false;
+        self.lifecycle.reconnect();
         self.remote_cwd = None;
         self.osc7_seen = false;
         self.directory_scanner = DirectoryScanner::default();
         self.prompt_scanner = Default::default();
         self.sync_task = Task::ready(());
         self.output_processor = Processor::new();
-        self.ssh_status_shown = false;
         self.child_exited = None;
         self.keyboard_input_sent = false;
         self.feed_remote_bytes(b"\r\n\x1b[0m");
@@ -2768,12 +2784,16 @@ impl Terminal {
         true
     }
 
-    /// 这个会话是否可用了（本地会话恒为真；远端会话要等连接建立）。
+    /// 这个会话是否正在运行（本地退出和远端断开后均为 false）。
     pub fn is_connected(&self) -> bool {
-        self.connected
+        self.lifecycle.state() == ConnectionState::Running
     }
 
-    /// 远端 shell 说出来的当前目录（OSC 7 或窗口标题，见 [`crate::shell_integration`]）；
+    pub fn has_exited(&self) -> bool {
+        self.lifecycle.state() == ConnectionState::Exited
+    }
+
+    /// 远端 shell 说出来的当前目录（OSC 7 或窗口标题，见 [`crate::directory`]）；
     /// 没说到过就是 `None`。
     ///
     /// 与 [`Self::working_directory`] 的区别：那个取**本地** PTY 前台进程的 cwd，远端恒为
@@ -2797,7 +2817,8 @@ impl Terminal {
         } else {
             self.child_exited.is_none_or(|e| e.code() == Some(0))
         };
-        if should_close {
+        let first_exit = self.lifecycle.finish();
+        if should_close && first_exit {
             cx.emit(Event::CloseTerminal);
         }
     }
@@ -2808,10 +2829,11 @@ impl Terminal {
 
     pub fn clone_builder(&self, cx: &App, cwd: Option<PathBuf>) -> Task<Result<TerminalBuilder>> {
         let working_directory = self.working_directory().or_else(|| cwd);
-        TerminalBuilder::new(
+        TerminalBuilder::new_with_options(
             working_directory,
             self.template.target.clone(),
             self.template.env.clone(),
+            self.template.options.clone(),
             cx,
         )
     }

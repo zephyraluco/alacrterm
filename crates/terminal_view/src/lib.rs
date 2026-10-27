@@ -9,19 +9,16 @@
 //! - IME 组合文本状态
 //! - 高性能网格渲染（批量文本 / 背景矩形 / 块字符 / 光标 / 高亮）
 
-mod command_specs;
-mod completion;
+pub mod completion;
+pub mod completion_service;
 mod completion_controller;
-mod completion_provider;
-mod completion_resources;
 mod contrast;
-mod path_suggestions;
-mod project_completions;
 mod prompt_input;
 mod scrollbar;
 mod suggestion_popup;
 
 mod suggestions;
+pub use suggestions::Suggestions as SuggestionModel;
 pub use settings::SuggestionSettings;
 pub mod terminal_element;
 
@@ -34,7 +31,7 @@ use gpui::{
 };
 use terminal::{
     Event as TerminalEvent, HostKeyPrompt, Modes, SshFs, Terminal, TerminalBounds, TerminalBuilder,
-    TerminalTarget,
+    TerminalTarget, LaunchOptions,
 };
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
@@ -81,11 +78,6 @@ pub struct TerminalView {
     subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
     error: Option<String>,
-    /// 会话进程是否已结束（本地 shell 退出 / ssh 断开等）。
-    ///
-    /// 由 `CloseTerminal` 事件置位；应用据此在状态栏显示「已断开」，
-    /// 但不会因此退出程序（见 `handle_terminal_event`）。
-    exited: bool,
     remote: bool,
     settings: Arc<TerminalRenderSettings>,
     title: SharedString,
@@ -98,10 +90,13 @@ pub struct TerminalView {
     completion: completion_controller::CompletionController,
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
     _blink_task: gpui::Task<()>,
+    _startup_task: gpui::Task<()>,
+    recovery_task: gpui::Task<()>,
     grid_cache: std::cell::RefCell<terminal_element::GridCache>,
     scrollbar_target: std::rc::Rc<std::cell::Cell<Option<usize>>>,
     /// 主机密钥确认的回调（仅远端会话有）。
     host_key_prompt: Option<HostKeyPromptHandler>,
+    launch_options: LaunchOptions,
 }
 
 impl TerminalView {
@@ -113,20 +108,18 @@ impl TerminalView {
     /// 本地会话传 `None` 即可。
     pub fn new(
         working_directory: Option<PathBuf>,
-        mut target: TerminalTarget,
+        target: TerminalTarget,
         host_key: Option<HostKeyPromptHandler>,
+        launch_options: LaunchOptions,
         settings: Arc<TerminalRenderSettings>,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
-        target.configure_shell_integration(
-            settings.suggestions.remote_integration
-                && std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
-                    != Some(std::ffi::OsStr::new("0")),
-        );
         let remote = target.is_ssh();
         let env = std::env::vars().collect();
-        let builder = TerminalBuilder::new(working_directory, target, env, cx);
+        let builder = TerminalBuilder::new_with_options(
+            working_directory, target, env, launch_options.clone(), cx,
+        );
         let focus_handle = cx.focus_handle();
 
         // 焦点进出：通知终端应用（FOCUS_IN_OUT 模式），并设置默认光标形状
@@ -152,7 +145,7 @@ impl TerminalView {
                             if this.focused
                                 && this.settings.cursor_blinks
                                 && this.terminal_blinking != Some(false)
-                                && !this.exited
+                                && !this.has_exited(cx)
                                 && !this.terminal.as_ref().is_some_and(|term| {
                                     term.read(cx)
                                         .last_content()
@@ -172,7 +165,7 @@ impl TerminalView {
             }
         });
 
-        cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        let startup_task = cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 let builder = match builder.await {
@@ -199,19 +192,21 @@ impl TerminalView {
 
                 cx.update(|app| {
                     let _ = this.update(app, |this, cx| {
+                        terminal.update(cx, |terminal, _| {
+                            terminal.set_launch_options(this.launch_options.clone());
+                        });
                         this.terminal = Some(terminal.clone());
                         this.subscription = Some(subscription);
                         // 终端实体的**通知**也要让本视图重绘：鼠标交互（拖选 / 滚轮 / 点击）
                         // 只排一条 `InternalEvent` + notify（通知的是 `Terminal`），而那条队列
                         // 要等 `TerminalElement::prepaint` 里的 `sync` 才被消费 —— 视图不重绘
                         // 就等于「拖选不跟手」。原因与实测见 `docs/terminal-architecture.md` §4.4。
-                        cx.observe(&terminal, |_, _, cx| cx.notify()).detach();
+                        this._subscriptions.push(cx.observe(&terminal, |_, _, cx| cx.notify()));
                         cx.notify();
                     });
                 });
             }
-        })
-        .detach();
+        });
 
         Self {
             focus_handle,
@@ -219,7 +214,6 @@ impl TerminalView {
             subscription: None,
             _subscriptions: vec![focus_in, focus_out],
             error: None,
-            exited: false,
             remote,
             settings: settings.clone(),
             title: "终端".into(),
@@ -230,20 +224,29 @@ impl TerminalView {
             completion: completion_controller::CompletionController::new(settings.suggestions),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             _blink_task: blink_task,
+            _startup_task: startup_task,
+            recovery_task: gpui::Task::ready(()),
             grid_cache: Default::default(),
             scrollbar_target: Default::default(),
             host_key_prompt: host_key,
+            launch_options,
         }
+    }
+
+    /// Install the host's completion providers before starting user interaction.
+    pub fn set_completion_service(&mut self, service: Arc<dyn completion_service::CompletionService>) {
+        self.completion.cancel();
+        self.completion.model.service = Some(service);
     }
 
     /// Retry only a disconnected SSH pane; keep the same view and scrollback.
     pub fn reconnect(&mut self, cx: &mut gpui::Context<Self>) {
-        if !self.remote || !self.exited {
+        if !self.remote || !self.has_exited(cx) {
             return;
         }
         if let Some(terminal) = &self.terminal {
             if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
-                self.exited = false;
+                self.recovery_task = gpui::Task::ready(());
                 self.completion.reset_session();
                 self.terminal_blinking = None;
                 self.ime_state = None;
@@ -252,9 +255,18 @@ impl TerminalView {
         }
     }
 
+    /// Host policy for future reconnects; rendering does not choose startup behavior.
+    pub fn set_launch_options(&mut self, options: LaunchOptions, cx: &mut gpui::Context<Self>) {
+        self.launch_options = options;
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |terminal, _| {
+                terminal.set_launch_options(self.launch_options.clone());
+            });
+        }
+    }
+
     /// 运行期替换渲染参数（设置窗口改完立刻生效，不必重启）。
-    ///
-    /// 渲染读的是 `self.settings`（同一个 `Arc` 也传给了 `TerminalElement`），
+    /// 渲染读的是 `self.settings`（同一个 `Arc` 也传给了 `TerminalElement`）。
     /// 换掉它 + `notify` 即可重绘；光标形状还要同步给终端实体
     /// ——`focus_in` 里做的是同一件事（终端可能被应用改成 DECSCUSR 指定的形状）。
     pub fn set_render_settings(
@@ -267,11 +279,6 @@ impl TerminalView {
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.set_cursor_shape(self.settings.cursor_shape);
-                terminal.configure_remote_integration(
-                    self.settings.suggestions.remote_integration
-                        && std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
-                            != Some(std::ffi::OsStr::new("0")),
-                );
             });
         }
         cx.notify();
@@ -341,7 +348,6 @@ impl TerminalView {
                 // 这里只标记状态并刷新界面，由应用决定怎么展示（保留标签、状态栏显示
                 // 已断开，用户自行关闭或新建）。终端网格会保留最后的输出，
                 // 这样 ssh 报的断开原因不会被丢掉。
-                self.exited = true;
                 self.completion.invalidate_input();
                 cx.notify();
             }
@@ -532,9 +538,9 @@ impl TerminalView {
                     .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
                 let backend = if this.remote {
-                    completion_resources::Backend::Remote(this.remote_fs(cx)?)
+                    completion_service::Backend::Remote(this.remote_fs(cx)?)
                 } else {
-                    completion_resources::Backend::local()
+                    completion_service::Backend::Local
                 };
                 this.completion.request(manual, backend)
             }) else {
@@ -564,13 +570,12 @@ impl TerminalView {
         }
     }
     fn wake_after_input_recovery(&mut self, cx: &mut gpui::Context<Self>) {
-        cx.spawn(async move |this, cx| {
+        self.recovery_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(prompt_input::RECOVERY_DELAY)
                 .await;
             let _ = this.update(cx, |_, cx| cx.notify());
-        })
-        .detach();
+        });
     }
     fn recover_input(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         if !self.completion.recovery_due() || self.ime_state.is_some() {
@@ -650,35 +655,45 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        if allowed && !self.completion.model.candidates.is_empty() && plain {
-            match key {
-                "up" | "down" => {
-                    self.completion.model.step(if key == "up" { -1 } else { 1 });
-                    self.suggestion_scroll.scroll_to_item(
-                        self.completion.model.selected,
-                        gpui::ScrollStrategy::Nearest,
-                    );
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                }
-                "tab" if !e.keystroke.modifiers.shift => {
-                    self.accept_suggestion(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                "escape" => {
-                    self.completion.dismiss();
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => {}
+        let control_passthrough =
+            control || e.keystroke.modifiers.alt || e.keystroke.modifiers.platform;
+        if control_passthrough {
+            self.completion.dismiss();
+            cx.notify();
+        }
+        match self.completion.popup_key(
+            key,
+            plain && !e.keystroke.modifiers.shift,
+            allowed && self.focused,
+        ) {
+            completion_controller::PopupKey::Navigate(delta) => {
+                self.completion.model.step(delta);
+                self.suggestion_scroll.scroll_to_item(
+                    self.completion.model.selected,
+                    gpui::ScrollStrategy::Nearest,
+                );
+                cx.notify();
+                cx.stop_propagation();
+                return;
             }
+            completion_controller::PopupKey::Accept => {
+                self.accept_suggestion(cx);
+                cx.stop_propagation();
+                return;
+            }
+            completion_controller::PopupKey::Dismiss => {
+                self.completion.dismiss();
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            completion_controller::PopupKey::Terminal => {}
         }
         let printable =
             plain && (e.keystroke.key_char.is_some() || key.chars().count() == 1 || key == "space");
-        if key == "enter" && plain {
+        if control && matches!(key, "c" | "d") {
+            self.completion.invalidate_input();
+        } else if key == "enter" && plain {
             self.completion.submit();
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
             let refresh_native = self.completion.edit_key(key, control);
@@ -689,7 +704,9 @@ impl TerminalView {
             {
                 self.request_input_recovery(cx);
             }
-            self.schedule_suggestions(false, cx);
+            if !control_passthrough {
+                self.schedule_suggestions(false, cx);
+            }
         }
         if let Some(terminal) = &self.terminal {
             // ⚠️ 复制粘贴 / 滚动 / vi 模式不在这里：那些键由 keymap 绑成应用动作
@@ -780,14 +797,14 @@ impl TerminalView {
             .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.remote_fs()))
     }
 
-    /// 会话是否已经连上（本地会话恒为真；远端会话要等 SSH 握手 / 认证完成）。
+    /// 会话是否正在运行（本地已退出或远端已断开时为 false）。
     pub fn is_connected(&self, cx: &App) -> bool {
         self.terminal
             .as_ref()
             .is_some_and(|terminal| terminal.read_with(cx, |terminal, _| terminal.is_connected()))
     }
 
-    /// 远端 shell 说出来的当前目录（见 `terminal::shell_integration`）；本地会话或
+    /// 远端 shell 说出来的当前目录（见 `terminal::directory`）；本地会话或
     /// 没说到过时为 `None`。
     ///
     /// 这是「文件管理器跟着终端走」的数据源。远端没有本地进程可采样，目录只能由远端
@@ -802,8 +819,8 @@ impl TerminalView {
     }
 
     /// 会话进程是否已结束（本地 shell 退出 / ssh 连接断开等）。
-    pub fn has_exited(&self) -> bool {
-        self.exited
+    pub fn has_exited(&self, cx: &App) -> bool {
+        self.terminal.as_ref().is_some_and(|terminal| terminal.read(cx).has_exited())
     }
 
     /// 计算光标是否可见（闪烁控制）。
@@ -933,7 +950,7 @@ impl Render for TerminalView {
             root = root.child(popup);
         }
 
-        if self.remote && self.exited {
+        if self.remote && self.has_exited(cx) {
             root = root.child(
                 div().absolute().top_0().right_0().p_2().child(
                     div()

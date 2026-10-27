@@ -89,7 +89,7 @@ pub(super) fn candidates(input: &str) -> Vec<(String, &'static str)> {
     };
     specs
         .iter()
-        .filter(|(value, _)| value.starts_with(partial) && *value != partial)
+        .filter(|(value, _)| value.starts_with(partial))
         .map(|(value, description)| (format!("{prefix}{value}"), *description))
         .collect()
 }
@@ -110,7 +110,7 @@ mod tests {
         assert!(candidates("echo git sta").is_empty());
         assert!(candidates("git $(secret) ").is_empty());
         assert!(candidates("git commit message ").is_empty());
-        assert!(candidates("git status --short").is_empty());
+        assert_eq!(candidates("git status --short")[0].0, "git status --short");
         assert_eq!(candidates("docker compose u")[0].0, "docker compose up");
     }
 }

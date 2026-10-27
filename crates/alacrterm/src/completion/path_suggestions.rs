@@ -1,5 +1,5 @@
 //! Literal shell token completion. Expressions are left to the native shell.
-use crate::completion::{Candidate, Kind, Source};
+use super::completion::{Candidate, Kind, Source};
 use std::ops::Range;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PathQuery {

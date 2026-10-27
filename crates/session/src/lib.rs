@@ -1,10 +1,21 @@
 //! Saved session models, persistence, connection requests and tree operations.
 use serde::{Deserialize, Serialize};
-use terminal::{SshParams, TerminalTarget};
+use util::shell::Shell;
 #[derive(Clone)]
 pub struct SessionRequest {
     pub name: Option<String>,
-    pub target: TerminalTarget,
+    pub target: SessionTarget,
+}
+/// Saved launch intent without terminal, GUI, or transport dependencies.
+#[derive(Clone)]
+pub enum SessionTarget {
+    Local(Shell),
+    Ssh {
+        host: String,
+        port: u16,
+        user: String,
+        password: Option<String>,
+    },
 }
 /// 条目路径:顶层开始的下标链(`[]` = 顶层)。
 pub type SessionPath = Vec<usize>;
@@ -65,14 +76,11 @@ pub struct SessionRecord {
 impl SessionRecord {
     /// 这条记录的会话参数。
     pub fn request(&self) -> SessionRequest {
-        let params = SshParams::new(self.host.clone(), self.port, self.user.clone());
-        let params = match &self.password {
-            Some(password) => params.with_password(password.clone()),
-            None => params,
-        };
         SessionRequest {
             name: Some(self.name.clone()),
-            target: TerminalTarget::Ssh(params),
+            target: SessionTarget::Ssh {
+                host: self.host.clone(), port: self.port, user: self.user.clone(), password: self.password.clone(),
+            },
         }
     }
 }
@@ -248,25 +256,27 @@ impl SessionTree {
             .unwrap_or_default()
     }
 
-    pub fn persist(entries: &[SessionEntry], expanded: &[u64]) {
+    pub fn persist(entries: &[SessionEntry], expanded: &[u64]) -> std::io::Result<()> {
         let path = settings::sessions_config_path();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => { serde_json::from_str::<PersistedSessions>(&text).map_err(std::io::Error::other)?; }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         let stored = PersistedSessions {
             entries: entries.iter().map(PersistedEntry::from).collect(),
             expanded: expanded.to_vec(),
         };
 
-        let result = serde_json::to_string_pretty(&stored)
+        serde_json::to_string_pretty(&stored)
             .map_err(std::io::Error::other)
             .and_then(|mut text| {
                 text.push('\n');
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(&path, text)
-            });
-        if let Err(error) = result {
-            eprintln!("[sessions] 保存会话记录 {} 失败：{error}", path.display());
-        }
+                util::atomic_file::write(&path, text.as_bytes())
+            })
     }
 
     fn children_mut<'a>(

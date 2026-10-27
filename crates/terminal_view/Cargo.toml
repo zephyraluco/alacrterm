@@ -9,7 +9,6 @@ gpui = { workspace = true }
 gpui-kit = { workspace = true }
 itertools.workspace = true
 log.workspace = true
-serde_json.workspace = true
 futures.workspace = true
 terminal = { workspace = true }
 

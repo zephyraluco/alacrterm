@@ -6,6 +6,7 @@
 mod actions;
 mod assets;
 mod components;
+mod completion;
 mod config;
 mod dialog;
 use util::format;
@@ -15,6 +16,7 @@ mod preview_cache;
 mod preview_window;
 mod resource_registry;
 mod settings_window;
+mod shell_integration;
 mod sidebar_panel;
 mod status_bar;
 mod tab_bar;
@@ -22,6 +24,7 @@ mod terminal_panel;
 mod transfer_manager;
 mod welcome;
 mod wayx_control;
+mod x11;
 
 use components::ACTIVITY_BAR_WIDTH;
 use gpui::{
@@ -48,7 +51,7 @@ use sidebar_panel::sessions::SessionsState;
 use sidebar_panel::Sidebar;
 use tab_bar::TerminalDockSkin;
 use terminal_panel::TabPane;
-use transfer_manager::TransferManager;
+use transfer_manager::{TransferDone, TransferManager};
 
 fn close_after_transfers(active: usize, waiting: bool) -> bool {
     active == 0 && waiting
@@ -179,6 +182,7 @@ struct AppRoot {
     files: Entity<FilesState>,
     _transfers: Entity<TransferManager>,
     _transfer_sub: Subscription,
+    _transfer_completion_sub: Subscription,
     close_when_transfers_finish: bool,
     /// 终端会话的 dock。
     dock: Entity<DockArea>,
@@ -352,6 +356,24 @@ impl AppRoot {
                 root.finish_main_close(window, cx);
             }
         });
+        let transfer_completion_sub = cx.subscribe(&transfers, |root: &mut Self, _, event, cx| {
+            if event.result.is_ok() {
+                match &event.done {
+                    TransferDone::Preview(request) => {
+                        let request = request.clone();
+                        let root = cx.weak_entity();
+                        cx.defer(move |cx| {
+                            let _ = root.update(cx, |root, cx| root.open_preview_window(request, cx));
+                        });
+                    },
+                    TransferDone::OpenExternally(path) => cx.open_with_system(path),
+                    TransferDone::Nothing => {}
+                }
+            }
+            root.files.update(cx, |files, cx| files.on_transfer_done(
+                event.session, event.label.clone(), &event.result, event.refresh.clone(), cx,
+            ));
+        });
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
         let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
 
@@ -373,6 +395,7 @@ impl AppRoot {
             files,
             _transfers: transfers,
             _transfer_sub: transfer_sub,
+            _transfer_completion_sub: transfer_completion_sub,
             close_when_transfers_finish: false,
             dock,
             dock_layout_sub: None,

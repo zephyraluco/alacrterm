@@ -1,6 +1,6 @@
 //! UI-independent application configuration and persistence.
-pub mod keymap;
 pub mod color_schemes;
+pub mod keymap;
 mod suggestions;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -96,34 +96,38 @@ pub struct AppFile {
     pub light_theme: Option<String>,
 }
 
-/// 读 JSON 文档；失败时给空对象。
-fn read_json_value(path: &Path) -> serde_json::Value {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| json!({}))
+/// A configuration document with an explicit write destination.
+/// Parse failures are returned to the caller and never replaced with an empty object.
+pub struct SettingsStore {
+    path: PathBuf,
 }
-
-fn write_json_doc(path: &Path, doc: &serde_json::Value, what: &str) {
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        eprintln!(
-            "[config] {what}保存失败（建目录 {}）：{error}",
-            parent.display()
-        );
-        return;
+impl SettingsStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
     }
-
-    match serde_json::to_string_pretty(doc) {
-        Ok(mut text) => {
-            text.push('\n');
-            match std::fs::write(path, text) {
-                Ok(()) => eprintln!("[config] {what}已保存：{}", shown_path(path)),
-                Err(error) => eprintln!("[config] {what}保存失败：{error}"),
-            }
+    pub fn read(&self) -> anyhow::Result<serde_json::Value> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => Ok(serde_json::from_str(&text)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+            Err(error) => Err(error.into()),
         }
-        Err(error) => eprintln!("[config] {what}序列化失败：{error}"),
+    }
+    pub fn update(
+        &self,
+        preferences: serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let mut document = self.read()?;
+        let map = document.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "configuration must be a JSON object: {}",
+                self.path.display()
+            )
+        })?;
+        map.extend(preferences);
+        let mut text = serde_json::to_string_pretty(&document)?;
+        text.push('\n');
+        util::atomic_file::write(&self.path, text.as_bytes())?;
+        Ok(())
     }
 }
 
@@ -148,10 +152,11 @@ pub fn load_app_config() -> AppFile {
 }
 
 /// 把主题选择写回 `config/app.json`。
-pub fn save_theme_choice(dark: Option<&str>, light: Option<&str>) {
-    let path = write_target(APP_CONFIG_RELATIVE_PATH);
-    let doc = json!({ "dark_theme": dark, "light_theme": light });
-    write_json_doc(&path, &doc, "应用偏好");
+pub fn save_theme_choice(dark: Option<&str>, light: Option<&str>) -> anyhow::Result<()> {
+    SettingsStore::new(write_target(APP_CONFIG_RELATIVE_PATH)).update(serde_json::Map::from_iter([
+        ("dark_theme".into(), json!(dark)),
+        ("light_theme".into(), json!(light)),
+    ]))
 }
 
 /// Load terminal preferences, preserving renderer defaults for omitted fields.
@@ -160,7 +165,10 @@ pub fn load_terminal_config() -> TerminalFile {
         return TerminalFile::default();
     };
     match serde_json::from_str(&text) {
-        Ok(file) => file,
+        Ok(mut file) => {
+            TerminalFile::validate(&mut file);
+            file
+        }
         Err(error) => {
             eprintln!("[config] {}: {error}", path.display());
             TerminalFile::default()
@@ -169,24 +177,70 @@ pub fn load_terminal_config() -> TerminalFile {
 }
 
 /// Save only UI-owned preferences, preserving colors and unknown keys.
-pub fn save_terminal_preferences(preferences: serde_json::Map<String, serde_json::Value>) {
-    save_terminal_preferences_at(&write_target(TERMINAL_CONFIG_RELATIVE_PATH), preferences);
+pub fn save_terminal_preferences(
+    preferences: serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    save_terminal_preferences_at(&write_target(TERMINAL_CONFIG_RELATIVE_PATH), preferences)
 }
 
 fn save_terminal_preferences_at(
     path: &Path,
     preferences: serde_json::Map<String, serde_json::Value>,
-) {
-    let mut doc = read_json_value(path);
-    if let Some(map) = doc.as_object_mut() {
-        map.extend(preferences);
-        write_json_doc(path, &doc, "终端渲染参数");
+) -> anyhow::Result<()> {
+    let mut file: TerminalFile =
+        serde_json::from_value(serde_json::Value::Object(preferences.clone()))?;
+    if file.validate() {
+        anyhow::bail!("terminal preferences contain out-of-range values");
+    }
+    SettingsStore::new(path.to_owned()).update(preferences)
+}
+
+impl TerminalFile {
+    /// Drop invalid numeric overrides, allowing renderer defaults to take effect.
+    /// Returns whether any invalid values were found.
+    pub fn validate(&mut self) -> bool {
+        let mut invalid = false;
+        for (value, minimum, maximum) in [
+            (&mut self.font_size, 6., 48.),
+            (&mut self.font_weight, 100., 900.),
+            (&mut self.line_height_multiplier, 0.8, 2.5),
+            (&mut self.minimum_contrast, 0., 106.),
+        ] {
+            if value.is_some_and(|value| !value.is_finite() || value < minimum || value > maximum) {
+                *value = None;
+                invalid = true;
+            }
+        }
+        invalid
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn corrupt_configuration_is_not_overwritten() {
+        let root =
+            std::env::temp_dir().join(format!("alacrterm-corrupt-settings-{}", std::process::id()));
+        let cache = util::file_cache::FileCache::new(&root);
+        let lease = cache.allocate("settings.json");
+        std::fs::write(lease.path(), "{broken").unwrap();
+        let store = SettingsStore::new(lease.path().to_owned());
+        assert!(store.update(serde_json::Map::new()).is_err());
+        assert_eq!(std::fs::read_to_string(lease.path()).unwrap(), "{broken");
+    }
+    #[test]
+    fn external_numeric_values_use_the_same_bounds_as_the_ui() {
+        let mut file: TerminalFile = serde_json::from_str(r#"{"font_size":-1,"font_weight":950,"line_height_multiplier":0,"minimum_contrast":107}"#).unwrap();
+        assert!(file.validate());
+        assert!(
+            file.font_size.is_none()
+                && file.font_weight.is_none()
+                && file.line_height_multiplier.is_none()
+                && file.minimum_contrast.is_none()
+        );
+        assert!(!file.validate());
+    }
     #[test]
     fn saving_preferences_preserves_palette_and_unknown_fields() {
         let root = std::env::temp_dir().join(format!("alacrterm-settings-{}", std::process::id()));
@@ -196,8 +250,9 @@ mod tests {
         save_terminal_preferences_at(
             lease.path(),
             serde_json::Map::from_iter([("font_size".into(), json!(18))]),
-        );
-        let saved = read_json_value(lease.path());
+        )
+        .unwrap();
+        let saved = SettingsStore::new(lease.path().to_owned()).read().unwrap();
         assert_eq!(saved["font_size"], 18);
         assert_eq!(saved["colors"]["terminal_background"], "#010203");
         assert_eq!(saved["future"]["keep"], true);
@@ -209,7 +264,7 @@ mod tests {
         let cache = util::file_cache::FileCache::new(&root);
         let lease = cache.allocate("terminal.json");
         std::fs::write(lease.path(), "[]").unwrap();
-        save_terminal_preferences_at(lease.path(), serde_json::Map::new());
+        assert!(save_terminal_preferences_at(lease.path(), serde_json::Map::new()).is_err());
         assert_eq!(std::fs::read_to_string(lease.path()).unwrap(), "[]");
     }
     #[test]

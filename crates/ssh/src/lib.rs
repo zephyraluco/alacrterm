@@ -49,8 +49,11 @@ mod fs;
 mod handler;
 mod params;
 mod session;
-mod shell_integration;
-mod wayx;
+mod setup;
+pub use setup::{SessionContext, SessionSetup, SshCommandConnection, CommandOutput};
+mod x11;
+mod x11_target;
+pub use x11_target::{SessionOptions, X11Lease, X11Stream, X11Target};
 
 pub use error::SshError;
 pub use fs::{
@@ -58,5 +61,5 @@ pub use fs::{
     TransferProgress,
 };
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
-pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize, ShellIntegration};
+pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize};
 pub use session::{SshOutput, SshEvent, SshSession};

@@ -92,7 +92,7 @@ pub(crate) fn palette_settings(id: Option<&str>, cx: &App) -> RenderSettings {
 }
 
 /// 把终端渲染参数写回 `config/terminal.json`（只覆盖设置窗口管的键）。
-pub(crate) fn save_render_settings(settings: &RenderSettings, color_scheme: Option<&str>) {
+pub(crate) fn save_render_settings(settings: &RenderSettings, color_scheme: Option<&str>) -> anyhow::Result<()> {
     let mut map = serde_json::Map::new();
     map.insert("color_scheme".into(), json!(color_scheme));
     map.insert("font_family".into(), json!(settings.font_family));
@@ -119,7 +119,7 @@ pub(crate) fn save_render_settings(settings: &RenderSettings, color_scheme: Opti
     map.insert("cursor_blinks".into(), json!(settings.cursor_blinks));
     map.insert("suggestions".into(), json!(settings.suggestions));
 
-    settings::save_terminal_preferences(map);
+    settings::save_terminal_preferences(map)
 }
 
 /// f32 按 3 位小数收成数字。
@@ -138,7 +138,8 @@ pub(crate) fn cursor_shape_name(shape: CursorShape) -> &'static str {
     }
 }
 
-fn apply_render_settings(settings: &mut RenderSettings, file: TerminalFile) {
+fn apply_render_settings(settings: &mut RenderSettings, mut file: TerminalFile) {
+    file.validate();
     if let Some(suggestions) = file.suggestions {
         settings.suggestions = suggestions;
     }
@@ -377,10 +378,10 @@ pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut Ap
         settings_mut(cx).light_theme = name;
     }
     let settings = settings(cx);
-    save_theme_choice(
+    if let Err(error) = save_theme_choice(
         settings.dark_theme.as_deref(),
         settings.light_theme.as_deref(),
-    );
+    ) { log::error!("Save theme preferences: {error:#}"); }
 
     let mode = Theme::global(cx).mode;
     change_theme(mode, cx);

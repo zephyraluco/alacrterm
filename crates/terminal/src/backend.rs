@@ -37,16 +37,6 @@ impl TerminalTarget {
         Self::Local(Shell::System)
     }
 
-    /// Apply the host's policy to future SSH launches, never an already running shell.
-    pub fn configure_shell_integration(&mut self, enabled: bool) {
-        if let Self::Ssh(params) = self {
-            params.shell_integration = enabled.then_some(ssh::ShellIntegration {
-                bash: include_str!("../shell-integration/bash.sh"),
-                zsh: include_str!("../shell-integration/zsh.zsh"),
-            });
-        }
-    }
-
     /// 是不是远端连接（`Terminal` 据此决定要不要走 SSH 那套收尾逻辑）。
     pub fn is_ssh(&self) -> bool {
         matches!(self, Self::Ssh(_))

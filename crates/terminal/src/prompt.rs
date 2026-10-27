@@ -14,7 +14,11 @@ pub(crate) struct PromptScanner {
     context: Vec<(&'static str, String)>,
 }
 impl PromptScanner {
-    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<PromptEvent> {
+    pub(crate) fn feed(
+        &mut self,
+        bytes: &[u8],
+        decoder: Option<crate::OscDecoder>,
+    ) -> Vec<PromptEvent> {
         let mut events = Vec::new();
         for &byte in bytes {
             match (self.state, byte) {
@@ -25,43 +29,12 @@ impl PromptScanner {
                 }
                 (1, _) => self.state = 0,
                 (2, 7) | (3, b'\\') => {
-                    if let Some(cwd) = self
-                        .payload
-                        .strip_prefix(b"633;AlacrtermCwd;")
-                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                    {
-                        self.context.push((
-                            "cwd",
-                            if cwd.chars().any(char::is_control) {
-                                String::new()
-                            } else {
-                                cwd.into()
-                            },
-                        ));
-                    }
-                    if let Some(shell) = self
-                        .payload
-                        .strip_prefix(b"633;AlacrtermShell;")
-                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                    {
-                        if matches!(shell, "posix" | "powershell") {
-                            self.context.push(("shell", shell.into()));
-                        }
-                    }
-                    if self.payload == b"633;CommandReset" {
-                        self.commands.push(String::new());
-                    } else if let Some(name) = self
-                        .payload
-                        .strip_prefix(b"633;Command;")
-                        .and_then(|name| std::str::from_utf8(name).ok())
-                    {
-                        if !name.is_empty()
-                            && name.len() <= 256
-                            && name
-                                .chars()
-                                .all(|ch| ch.is_ascii_alphanumeric() || "_.:+-".contains(ch))
-                        {
-                            self.commands.push(name.to_string());
+                    if let Some(metadata) = decoder.and_then(|decode| decode(&self.payload)) {
+                        match metadata {
+                            crate::ShellMetadata::Command(command) => self.commands.push(command),
+                            crate::ShellMetadata::Context(key, value) => {
+                                self.context.push((key, value))
+                            }
                         }
                     }
                     if let Some(event) = self.event() {
@@ -115,43 +88,33 @@ impl PromptScanner {
 mod tests {
     use super::*;
     #[test]
+    fn host_decoder_receives_complete_extensions_across_chunks() {
+        fn decode(payload: &[u8]) -> Option<crate::ShellMetadata> {
+            let value = std::str::from_utf8(payload.strip_prefix(b"999;cwd;")?).ok()?;
+            Some(crate::ShellMetadata::Context("cwd", value.into()))
+        }
+        let mut scanner = PromptScanner::default();
+        scanner.feed(b"\x1b]999;cwd;/some/", Some(decode));
+        assert!(scanner.context().is_empty());
+        assert_eq!(
+            scanner.feed(b"path\x1b\\\x1b]633;B\x07", Some(decode)),
+            [PromptEvent::Input]
+        );
+        assert_eq!(scanner.context(), [("cwd", "/some/path".into())]);
+        scanner.feed(b"\x1b]999;cwd;/ignored\x07", None);
+        assert!(scanner.context().is_empty());
+    }
+    #[test]
     fn fragmented_markers_ignore_other_osc_and_recover_from_oversize() {
         let mut scanner = PromptScanner::default();
-        assert!(scanner.feed(b"\x1b]633;").is_empty());
+        assert!(scanner.feed(b"\x1b]633;", None).is_empty());
         assert_eq!(
-            scanner.feed(b"B\x1b\\\x1b]2;title\x07\x1b]133;C\x07"),
+            scanner.feed(b"B\x1b\\\x1b]2;title\x07\x1b]133;C\x07", None),
             [PromptEvent::Input, PromptEvent::Execute]
         );
         let mut oversized = b"\x1b]633;".to_vec();
         oversized.extend(vec![b'A'; 5000]);
         oversized.extend_from_slice(b"\x07\x1b]633;D;0\x07");
-        assert_eq!(scanner.feed(&oversized), [PromptEvent::Finished]);
-    }
-    #[test]
-    fn working_directory_context_preserves_literal_paths() {
-        let mut scanner = PromptScanner::default();
-        scanner.feed(b"\x1b]633;AlacrtermCwd;/remote/My ");
-        scanner.feed(b"Files;a\x07\x1b]633;AlacrtermShell;posix\x07");
-        assert_eq!(
-            scanner.context(),
-            [
-                ("cwd", "/remote/My Files;a".into()),
-                ("shell", "posix".into())
-            ]
-        );
-        scanner.feed(b"\x1b]633;AlacrtermCwd;/bad\npath\x07\x1b]633;AlacrtermShell;unknown\x07");
-        assert_eq!(scanner.context(), [("cwd", String::new())]);
-    }
-    #[test]
-    fn command_inventory_is_bounded_to_literal_command_names() {
-        let mut scanner = PromptScanner::default();
-        assert!(
-            scanner
-                .feed(b"\x1b]633;CommandReset\x07\x1b]633;Command;remote-")
-                .is_empty()
-        );
-        scanner.feed(b"tool\x07\x1b]633;Command;bad;command\x07\x1b]633;Command;bad name\x07");
-        assert_eq!(scanner.commands(), ["", "remote-tool"]);
-        assert!(scanner.commands().is_empty());
+        assert_eq!(scanner.feed(&oversized, None), [PromptEvent::Finished]);
     }
 }
