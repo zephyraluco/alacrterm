@@ -1117,7 +1117,6 @@ impl TerminalBuilder {
                 directory_scanner: DirectoryScanner::default(),
                 prompt_scanner: Default::default(),
                 resized_once: false,
-                ssh_status_shown: false,
                 // 本地：PTY 建好就算可用；远端：等 `SshEvent::Connected`（见 `is_connected`）。
                 lifecycle: Lifecycle::new(is_remote_terminal),
                 snapshot_dirty: true,
@@ -1281,8 +1280,6 @@ pub struct Terminal {
     prompt_scanner: prompt::PromptScanner,
     /// 是否已经按真实尺寸重排过一次（见 [`Terminal::feed_remote_bytes`]）。
     resized_once: bool,
-    /// 屏幕上是否正摆着一行 SSH 进度（远端一开口就擦掉，见 [`Terminal::process_ssh_event`]）。
-    ssh_status_shown: bool,
     /// 会话运行状态：本地 PTY 创建后运行，远端等待 Connected；退出后统一结束。
     ///
     /// 远端在它变真之前，同一份连接参数还不能拿去做别的连接（那时主机密钥可能还没确认，
@@ -1429,20 +1426,15 @@ impl Terminal {
     /// 本地那条路是「alacritty 事件循环把字节写进 term，只发一条 `Wakeup` 告诉我们重绘」；
     /// SSH 没有那层，所以**字节由本函数亲手写进 term**（顺手补一次重绘）。
     fn process_ssh_event(&mut self, event: SshEvent, cx: &mut Context<Self>) {
+        // Connection progress belongs in logs, not in the remote terminal stream.
+        if let SshEvent::Status(text) = &event {
+            log::debug!("SSH: {text}");
+            return;
+        }
         self.snapshot_dirty = true;
         match event {
-            // 进度（连接中 / 认证中）：写成屏幕上的一行，原地刷新（不堆积）。
-            // 建连可能要几秒，不写用户就只能干等。
-            SshEvent::Status(text) => {
-                self.ssh_status_shown = true;
-                self.feed_remote_bytes(format!("\r\x1b[2K\x1b[2m{text}\x1b[0m").as_bytes());
-            }
+            SshEvent::Status(_) => unreachable!("SSH status was handled above"),
             SshEvent::Data(bytes) => {
-                // 远端开始说话了 ⇒ 擦掉进度行，别让它和真输出混在一起。
-                if self.ssh_status_shown {
-                    self.ssh_status_shown = false;
-                    self.feed_remote_bytes(b"\r\x1b[2K");
-                }
                 self.feed_remote_bytes(&bytes);
             }
             // 连接可用了：文件管理器据此才敢去连远端文件系统（见 [`Self::remote_fs`]）。
@@ -1458,10 +1450,6 @@ impl Terminal {
                 exit_status,
                 reason,
             } => {
-                if self.ssh_status_shown {
-                    self.ssh_status_shown = false;
-                    self.feed_remote_bytes(b"\r\x1b[2K");
-                }
                 if let Some(reason) = reason {
                     // 断开原因必须留在网格里（面板不会关，用户要能回头看）。见
                     // [`TerminalView::handle_terminal_event`] 的 `CloseTerminal` 分支。
@@ -2786,7 +2774,6 @@ impl Terminal {
         self.prompt_scanner = Default::default();
         self.sync_task = Task::ready(());
         self.output_processor = Processor::new();
-        self.ssh_status_shown = false;
         self.child_exited = None;
         self.keyboard_input_sent = false;
         self.feed_remote_bytes(b"\r\n\x1b[0m");
