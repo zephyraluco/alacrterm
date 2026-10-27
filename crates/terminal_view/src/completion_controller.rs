@@ -168,9 +168,19 @@ impl CompletionController {
         self.model.dismiss();
     }
     pub fn accept(&mut self, content: Option<&terminal::Content>) -> Acceptance {
+        self.accept_input(content.and_then(|content| self.tracking.current(content)))
+    }
+    fn accept_input(&mut self, input: Option<(String, usize)>) -> Acceptance {
         self.cancel();
-        if let Some((text, cursor)) = content.and_then(|content| self.tracking.current(content)) {
-            if text != self.model.text || cursor != self.model.cursor {
+        if let Some((text, cursor)) = input {
+            // ZLE can paint an autosuggestion after the logical cursor. At the
+            // tracked end of input, trust the matching echoed prefix rather than
+            // treating that display-only suffix as an edit. Native acceptance
+            // moves the cursor and still takes the synchronization path below.
+            let matching_end = cursor == self.model.cursor
+                && cursor == self.model.text.len()
+                && text.get(..cursor) == Some(self.model.text.as_str());
+            if !matching_end && (text != self.model.text || cursor != self.model.cursor) {
                 self.model.synchronize(text, cursor);
                 return Acceptance::Refresh;
             }
@@ -365,6 +375,41 @@ mod tests {
         assert!(controller.model.is_editing());
         controller.submit();
         assert!(!controller.model.is_editing());
+    }
+
+    #[test]
+    fn shell_ghost_suffix_does_not_consume_the_first_accept_key() {
+        let mut controller = visible_controller();
+        assert!(matches!(
+            controller.accept_input(Some(("cat saved-history.txt".into(), 6))),
+            Acceptance::Insert { ref bytes, retrigger: false } if bytes == "mple.txt"
+        ));
+        assert_eq!(controller.model.text, "cat sample.txt");
+        assert!(!controller.popup_visible);
+    }
+
+    #[test]
+    fn native_acceptance_and_changed_prefix_still_require_refresh() {
+        for (text, cursor) in [("cat saved-history.txt", 21), ("cat xx", 6)] {
+            let mut controller = visible_controller();
+            assert!(matches!(
+                controller.accept_input(Some((text.into(), cursor))),
+                Acceptance::Refresh
+            ));
+            assert_eq!(controller.model.text, text);
+            assert_eq!(controller.model.cursor, cursor);
+        }
+    }
+
+    #[test]
+    fn editing_inside_the_line_does_not_ignore_changed_suffixes() {
+        let mut controller = visible_controller();
+        controller.model.synchronize("cat sa tail".into(), 6);
+        assert!(matches!(
+            controller.accept_input(Some(("cat sa changed".into(), 6))),
+            Acceptance::Refresh
+        ));
+        assert_eq!(controller.model.text, "cat sa changed");
     }
 
     #[test]
