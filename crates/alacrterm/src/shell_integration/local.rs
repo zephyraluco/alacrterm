@@ -52,7 +52,7 @@ pub(crate) fn prepare(
             let rc = dir.path().join("bashrc");
             std::fs::write(
                 &rc,
-                "[[ -r $HOME/.bashrc ]] && source \"$HOME/.bashrc\"\nsource \"$ALACRTERM_INTEGRATION_SCRIPT\"\n",
+                "[ -r \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"\n. \"$ALACRTERM_INTEGRATION_SCRIPT\"\n",
             )?;
             vec![
                 "--rcfile".into(),

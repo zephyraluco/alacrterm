@@ -22,10 +22,21 @@
 通过 OSC 633（兼容 OSC 133）的 A/B/C/D 生命周期标记判断提示符、输入、执行和结束，
 不通过 `$`、`#` 或 `❯` 猜测。未集成的 shell 保留原生行为，不弹应用建议。
 
-默认本地 Bash 4.4+、Zsh 和使用 PSReadLine 的 PowerShell 会加载会话临时集成脚本。
+默认本地 Bash、Zsh 和使用 PSReadLine 的 PowerShell 会加载会话临时集成脚本。
 用户的 Bash rc、Zsh 配置及 PowerShell profile 保留，不修改任何启动文件；临时文件
 随 PTY 生命周期清理。显式配置了自定义 shell 参数时保持原启动方式，不自动注入。
 设置 `ALACRTERM_SHELL_INTEGRATION=0` 可禁止本地自动加载。
+
+`bash.sh` 使用 POSIX sh 语法，不再按 Bash 最低版本拒绝加载。Bash 支持 PS0 时使用 PS0，
+旧版使用 DEBUG 钩子；数组形式的 PROMPT_COMMAND 会转为兼容旧版的调用包装，并保留原有命令顺序和退出状态。
+已有 DEBUG trap 或函数跟踪不会被覆盖；旧 Bash 缺少安全执行前钩子时保守省略 Execute 上报。
+在 dash 等非 Bash Shell 中可手动 source，提供初始命令清单，以及支持 PS1 命令替换时的提示符/目录信息；
+POSIX 没有统一的 preexec 钩子，因此不猜测执行开始。当前自动安装入口仍支持 Bash/Zsh。
+兼容性回归可通过 `ALACRTERM_TEST_BASH=/path/to/bash cargo test -p alacrterm shell_integration::script_tests`
+加入指定版本。本次使用实际 Bash 3.2、4.3、系统 Bash 及 dash 验证；旧版 Bash 的 Readline 补全/
+按键回调不发送 Execute，用户提交命令时才发送。
+
+
 
 SSH 默认读取远端 `/etc/shells`，为已安装且受支持的 Bash/Zsh 安装持久入口，仅在带有 Alacrterm 会话标识时加载。
 服务器不接受会话标识、安装或探测失败时静默保留普通登录。可在设置中关闭新连接的自动集成。
@@ -156,13 +167,13 @@ Bash 在 `.bashrc` 和首个存在的 `.bash_profile`、`.bash_login`、`.profil
 
 一次 exec 内先读取 `/etc/shells`，过滤注释、空行和不存在/不可执行的路径，按 Bash/Zsh 类型去重；
 清单不可读时使用 `$SHELL` 回退。随后读取 `$HOME/.local/share/alacrterm/shell/version`：
-第一行是集成版本（当前 `1.0.0`，独立于应用版本），后续每行是已集成的 Shell 类型。
+第一行是集成版本（当前 `1.0.1`，独立于应用版本），后续每行是已集成的 Shell 类型。
 版本与类型集合完全匹配时立即返回，不检查入口或脚本，不创建目录或锁，也不写回 version；
 类型顺序和重复项不影响比较。此时用户手动删除入口/脚本不会自动修复，删除 version 可触发重装。
 版本文件示例：
 
 ```text
-1.0.0
+1.0.1
 bash
 zsh
 ```

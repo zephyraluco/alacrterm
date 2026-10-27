@@ -6,7 +6,7 @@ use std::sync::Arc;
 use terminal::{LaunchOptions, LocalSessionSetup, PreparedShell};
 
 /// Bump when remote scripts or startup entry semantics change.
-const VERSION: &str = "1.0.0";
+const VERSION: &str = "1.0.1";
 
 #[derive(Clone, Copy)]
 struct Scripts {
@@ -51,6 +51,9 @@ pub(crate) fn launch_options(remote_enabled: bool) -> LaunchOptions {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod script_tests;
 
 #[cfg(test)]
 mod resource_tests {
