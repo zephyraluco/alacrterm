@@ -28,11 +28,20 @@ pub(super) enum Acceptance {
     Refresh,
     Insert { bytes: String, retrigger: bool },
 }
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PopupKey {
+    Terminal,
+    Navigate(isize),
+    Accept,
+    Dismiss,
+}
 pub(super) struct CompletionController {
     pub model: Suggestions,
     pub task: Task<()>,
     tracking: crate::prompt_input::InputTracking,
     generation: u64,
+    pub popup_visible: bool,
+    suppress_recovery_popup: bool,
 }
 impl CompletionController {
     pub fn new(settings: SuggestionSettings) -> Self {
@@ -41,14 +50,31 @@ impl CompletionController {
             task: Task::ready(()),
             tracking: Default::default(),
             generation: 0,
+            popup_visible: false,
+            suppress_recovery_popup: false,
         }
     }
     pub fn cancel(&mut self) {
+        self.popup_visible = false;
         self.task = Task::ready(());
         self.generation = self.generation.wrapping_add(1);
     }
+    /// Only a rendered, current menu owns keys. Shift+Tab always passes through.
+    pub fn popup_key(&self, key: &str, unmodified: bool, allowed: bool) -> PopupKey {
+        if !allowed || !unmodified || !self.popup_visible || !self.model.has_current_candidates() {
+            return PopupKey::Terminal;
+        }
+        match key {
+            "up" => PopupKey::Navigate(-1),
+            "down" => PopupKey::Navigate(1),
+            "tab" | "enter" => PopupKey::Accept,
+            "escape" => PopupKey::Dismiss,
+            _ => PopupKey::Terminal,
+        }
+    }
     pub fn begin(&mut self, manual: bool) -> bool {
         self.cancel();
+        self.suppress_recovery_popup = false;
         if !manual {
             self.model.candidates.clear();
         }
@@ -121,6 +147,9 @@ impl CompletionController {
             return false;
         };
         self.model.synchronize(text, cursor);
+        if self.suppress_recovery_popup {
+            self.model.dismiss();
+        }
         true
     }
     pub fn submit(&mut self) {
@@ -135,9 +164,11 @@ impl CompletionController {
     }
     pub fn dismiss(&mut self) {
         self.cancel();
+        self.suppress_recovery_popup = true;
         self.model.dismiss();
     }
     pub fn accept(&mut self, content: Option<&terminal::Content>) -> Acceptance {
+        self.cancel();
         if let Some((text, cursor)) = content.and_then(|content| self.tracking.current(content)) {
             if text != self.model.text || cursor != self.model.cursor {
                 self.model.synchronize(text, cursor);
@@ -150,6 +181,7 @@ impl CompletionController {
             .get(self.model.selected)
             .is_some_and(|item| item.retrigger);
         let Some(bytes) = self.model.accept() else {
+            self.model.dismiss();
             return Acceptance::None;
         };
         if retrigger {
@@ -182,7 +214,8 @@ impl CompletionController {
     /// One gate for every deferred source, including identical text on a newer prompt.
     pub fn apply(&mut self, response: Response) -> bool {
         let identity = &response.identity;
-        if identity.generation != self.generation
+        if !self.model.can_query()
+            || identity.generation != self.generation
             || identity.revision != self.model.revision
             || self.model.cwd.as_deref().unwrap_or("") != identity.cwd
             || self.model.text != identity.text
@@ -263,6 +296,89 @@ mod tests {
             )],
             identity: request.identity,
         }
+    }
+
+    fn visible_controller() -> CompletionController {
+        let mut controller = controller();
+        let request = controller.request(false, Backend::Local).unwrap();
+        let mut response = result(request);
+        response.data[0].replacement = 4..6;
+        assert!(controller.apply(response));
+        controller.popup_visible = true;
+        controller
+    }
+
+    #[test]
+    fn visible_menu_owns_completion_keys_but_not_shift_tab_or_editing() {
+        let controller = visible_controller();
+        for key in ["tab", "enter"] {
+            assert_eq!(controller.popup_key(key, true, true), PopupKey::Accept);
+        }
+        assert_eq!(
+            controller.popup_key("up", true, true),
+            PopupKey::Navigate(-1)
+        );
+        assert_eq!(
+            controller.popup_key("down", true, true),
+            PopupKey::Navigate(1)
+        );
+        assert_eq!(
+            controller.popup_key("escape", true, true),
+            PopupKey::Dismiss
+        );
+        for key in ["tab", "up", "down", "enter"] {
+            assert_eq!(controller.popup_key(key, false, true), PopupKey::Terminal);
+            assert_eq!(controller.popup_key(key, true, false), PopupKey::Terminal);
+        }
+        for key in ["left", "right", "backspace", "delete", "a"] {
+            assert_eq!(controller.popup_key(key, true, true), PopupKey::Terminal);
+        }
+    }
+
+    #[test]
+    fn hidden_or_stale_candidates_do_not_steal_shell_keys() {
+        let mut controller = visible_controller();
+        controller.popup_visible = false;
+        assert_eq!(controller.popup_key("tab", true, true), PopupKey::Terminal);
+        controller.popup_visible = true;
+        controller.model.input("x");
+        assert_eq!(
+            controller.popup_key("enter", true, true),
+            PopupKey::Terminal
+        );
+    }
+
+    #[test]
+    fn accepting_inserts_without_execution_and_cancels_late_results() {
+        let mut controller = visible_controller();
+        let late = controller.request(false, Backend::Local).unwrap();
+        assert!(
+            matches!(controller.accept(None), Acceptance::Insert { ref bytes, retrigger: false } if !bytes.contains(['\r', '\n']))
+        );
+        assert!(!controller.popup_visible);
+        assert!(!controller.model.has_current_candidates());
+        assert_eq!(
+            controller.popup_key("enter", true, true),
+            PopupKey::Terminal
+        );
+        assert!(!controller.apply(result(late)));
+        assert!(controller.model.is_editing());
+        controller.submit();
+        assert!(!controller.model.is_editing());
+    }
+
+    #[test]
+    fn closing_menu_cancels_requests_and_new_input_can_trigger_again() {
+        let mut controller = visible_controller();
+        let late = controller.request(false, Backend::Local).unwrap();
+        controller.dismiss();
+        assert!(!controller.apply(result(late)));
+        assert_eq!(
+            controller.popup_key("escape", true, true),
+            PopupKey::Terminal
+        );
+        controller.model.input("x");
+        assert!(controller.model.can_query());
     }
 
     #[test]

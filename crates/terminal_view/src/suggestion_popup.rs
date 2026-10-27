@@ -13,10 +13,10 @@ use gpui_kit::{
 use terminal::Modes;
 impl TerminalView {
     pub(crate) fn render_suggestions(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.completion.popup_visible = false;
         if !self.focused
             || self.ime_state.is_some()
-            || !self.completion.model.is_editing()
-            || self.completion.model.candidates.is_empty()
+            || !self.completion.model.has_current_candidates()
         {
             return None;
         }
@@ -50,6 +50,7 @@ impl TerminalView {
         if width < px(120.) || visible_rows == 0 {
             return None;
         }
+        self.completion.popup_visible = true;
         let height = row_height * visible_rows as f32 + px(2.);
         let top = if place_below {
             below

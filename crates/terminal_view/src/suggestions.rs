@@ -71,6 +71,11 @@ impl Suggestions {
     pub fn can_query(&self) -> bool {
         self.is_editing() && !self.menu_dismissed() && self.settings.enabled
     }
+    pub fn has_current_candidates(&self) -> bool {
+        self.can_query()
+            && self.candidate_revision == self.revision
+            && self.selected < self.candidates.len()
+    }
     pub fn merge_candidates(&mut self, candidates: Vec<Candidate>) {
         let selected = self
             .candidates

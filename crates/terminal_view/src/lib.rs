@@ -655,35 +655,45 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        if allowed && !self.completion.model.candidates.is_empty() && plain {
-            match key {
-                "up" | "down" => {
-                    self.completion.model.step(if key == "up" { -1 } else { 1 });
-                    self.suggestion_scroll.scroll_to_item(
-                        self.completion.model.selected,
-                        gpui::ScrollStrategy::Nearest,
-                    );
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                }
-                "tab" if !e.keystroke.modifiers.shift => {
-                    self.accept_suggestion(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                "escape" => {
-                    self.completion.dismiss();
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => {}
+        let control_passthrough =
+            control || e.keystroke.modifiers.alt || e.keystroke.modifiers.platform;
+        if control_passthrough {
+            self.completion.dismiss();
+            cx.notify();
+        }
+        match self.completion.popup_key(
+            key,
+            plain && !e.keystroke.modifiers.shift,
+            allowed && self.focused,
+        ) {
+            completion_controller::PopupKey::Navigate(delta) => {
+                self.completion.model.step(delta);
+                self.suggestion_scroll.scroll_to_item(
+                    self.completion.model.selected,
+                    gpui::ScrollStrategy::Nearest,
+                );
+                cx.notify();
+                cx.stop_propagation();
+                return;
             }
+            completion_controller::PopupKey::Accept => {
+                self.accept_suggestion(cx);
+                cx.stop_propagation();
+                return;
+            }
+            completion_controller::PopupKey::Dismiss => {
+                self.completion.dismiss();
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            completion_controller::PopupKey::Terminal => {}
         }
         let printable =
             plain && (e.keystroke.key_char.is_some() || key.chars().count() == 1 || key == "space");
-        if key == "enter" && plain {
+        if control && matches!(key, "c" | "d") {
+            self.completion.invalidate_input();
+        } else if key == "enter" && plain {
             self.completion.submit();
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
             let refresh_native = self.completion.edit_key(key, control);
@@ -694,7 +704,9 @@ impl TerminalView {
             {
                 self.request_input_recovery(cx);
             }
-            self.schedule_suggestions(false, cx);
+            if !control_passthrough {
+                self.schedule_suggestions(false, cx);
+            }
         }
         if let Some(terminal) = &self.terminal {
             // ⚠️ 复制粘贴 / 滚动 / vi 模式不在这里：那些键由 keymap 绑成应用动作
