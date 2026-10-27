@@ -18,7 +18,7 @@ use gpui::{
 use gpui_kit::{
     base::ResizeHandleContext,
     component::{
-        ActiveTheme as _, IconNamed as _, Placement, Sizable as _, h_flex,
+        ActiveTheme as _, Disableable as _, IconNamed as _, Placement, Sizable as _, h_flex,
         button::{Button, ButtonVariants as _},
         menu::{DropdownMenu as _, PopupMenuItem},
         dock::{
@@ -262,7 +262,17 @@ impl TabGroupRenderer for TerminalTabBar {
                         .border_l_1()
                         .border_color(border)
                         .children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false)))
-                        .child(self.split_button(group, cx)),
+                        .child(self.split_button(group, cx))
+                        .child(
+                            Button::new("zoom-terminal-group")
+                                .xsmall()
+                                .ghost()
+                                .tab_stop(false)
+                                .icon(IconName::Maximize)
+                                .tooltip("缩放停靠组（暂未实现）")
+                                .accessibility_label("缩放停靠组（暂未实现）")
+                                .disabled(true),
+                        ),
                 )
             })
             .into_any_element()
