@@ -88,6 +88,7 @@ pub struct LocalServer {
     suggest_integration: bool,
     integration_home: Option<std::path::PathBuf>,
     integration_enabled: bool,
+    integration_exec_count: usize,
     login_messages_consumed: bool,
 }
 
@@ -102,6 +103,7 @@ impl LocalServer {
             suggest_integration: false,
             integration_home: None,
             integration_enabled: false,
+            integration_exec_count: 0,
             login_messages_consumed: false,
         }
     }
@@ -328,9 +330,11 @@ impl russh::server::Handler for LocalServer {
         value: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.integration_home.is_some() && variable == "LC_ALACRTERM_INTEGRATION" && value == "1"
+        if self.integration_home.is_some()
+            && variable == "LC_ALACRTERM_INTEGRATION"
+            && matches!(value, "0" | "1")
         {
-            self.integration_enabled = true;
+            self.integration_enabled = value == "1";
             session.channel_success(channel)?;
         } else {
             session.channel_failure(channel)?;
@@ -478,6 +482,14 @@ impl russh::server::Handler for LocalServer {
             // Like OpenSSH, exec consumes connection-scoped login messages
             // without displaying them for a non-interactive command.
             self.login_messages_consumed = true;
+            self.integration_exec_count += 1;
+            // Enforce the installer's single-exec contract on each transport.
+            if self.integration_exec_count > 1 {
+                session.exit_status_request(channel, 1)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+                return Ok(());
+            }
             let output = std::process::Command::new("sh")
                 .args(["-c", &command])
                 .env("HOME", home)

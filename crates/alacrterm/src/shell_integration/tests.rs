@@ -158,6 +158,11 @@ async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
                 && !text.contains("loader.sh")
                 && !text.contains("command rm")
         );
+        let manifest =
+            std::fs::read_to_string(home.path().join(".local/share/alacrterm/shell/version"))
+                .unwrap();
+        assert_eq!(manifest.lines().next(), Some(super::VERSION));
+        assert!(manifest.lines().any(|line| line == "bash"));
         let rc = std::fs::read(home.path().join(".bashrc")).unwrap();
         if attempt == 0 {
             first_rc = rc;
@@ -174,6 +179,48 @@ async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
     .await;
     assert!(text.contains(BANNER));
     assert!(!text.contains("633;AlacrtermShell"));
+    session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn failed_install_revokes_activation_and_preserves_native_login() {
+    let home = tempfile::tempdir().unwrap();
+    let original = home.path().join("original-rc");
+    std::fs::write(
+        &original,
+        "[ \"${LC_ALACRTERM_INTEGRATION:-0}\" != 1 ] || printf 'STALE_INTEGRATION_LOADED\\n'\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&original, home.path().join(".bashrc")).unwrap();
+    let port = local_server::serve_with_integration_home(home.path().to_owned())
+        .await
+        .unwrap();
+    let known_hosts = temp_known_hosts("failed-single-exec");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect_with_setup(
+        params,
+        SshSize::cells(80, 24),
+        sender,
+        Some(Arc::new(super::remote::RemoteIntegration)),
+    )
+    .unwrap();
+    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+        text.ends_with(PROMPT)
+    })
+    .await;
+    assert!(text.contains("PAM_MOTD") && text.contains(BANNER), "{text}");
+    assert!(!text.contains("STALE_INTEGRATION_LOADED"), "{text}");
+    assert!(
+        !home
+            .path()
+            .join(".local/share/alacrterm/shell/version")
+            .exists()
+    );
     session.disconnect();
     let _ = std::fs::remove_file(known_hosts);
 }

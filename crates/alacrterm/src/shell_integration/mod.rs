@@ -5,6 +5,9 @@ mod remote;
 use std::sync::Arc;
 use terminal::{LaunchOptions, LocalSessionSetup, PreparedShell};
 
+/// Bump when remote scripts or startup entry semantics change.
+const VERSION: &str = "1.0.0";
+
 #[derive(Clone, Copy)]
 struct Scripts {
     bash: &'static str,
