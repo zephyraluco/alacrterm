@@ -29,7 +29,7 @@ use gpui::{
     AbsoluteLength, App, Bounds, ContentMask, Context, DispatchPhase, Element, ElementId, Entity,
     FocusHandle, Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox,
     Hsla, InputHandler, InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId,
-    Length, ModifiersChangedEvent, MouseButton, MouseMoveEvent, Pixels, Point as GpuiPoint,
+    Length, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint,
     ShapedLine, SharedString, StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle,
     UTF16Selection, UnderlineStyle, WhiteSpace, Window, fill, hsla, point, px, relative, size,
 };
@@ -1040,15 +1040,28 @@ impl TerminalElement {
         mode: Modes,
         hitbox: &Hitbox,
         window: &mut Window,
+        cx: &mut App,
     ) {
         let focus = self.focus.clone();
         let terminal = self.terminal.clone();
+        let drag_button = self.terminal_view.read(cx).drag_button.clone();
+
+        window.on_mouse_event({
+            let drag_button = drag_button.clone();
+            move |_: &MouseDownEvent, phase, _, _| {
+                if phase == DispatchPhase::Capture {
+                    drag_button.set(None);
+                }
+            }
+        });
 
         self.interactivity.on_mouse_down(MouseButton::Left, {
             let terminal = terminal.clone();
             let focus = focus.clone();
+            let drag_button = drag_button.clone();
 
             move |e, window, cx| {
+                drag_button.set(Some(MouseButton::Left));
                 window.focus(&focus, cx);
 
                 terminal.update(cx, |terminal, cx| {
@@ -1062,12 +1075,16 @@ impl TerminalElement {
             let terminal = self.terminal.clone();
             let hitbox = hitbox.clone();
             let focus = focus.clone();
+            let drag_button = drag_button.clone();
             move |e: &MouseMoveEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
 
-                if e.pressed_button.is_some() && !cx.has_active_drag() && focus.is_focused(window) {
+                // 只有从本终端按下的手势才能拖选，不能接管从标题栏进入的拖动。
+                if e.pressed_button.is_some() && drag_button.get() == e.pressed_button
+                    && !cx.has_active_drag() && focus.is_focused(window)
+                {
                     let hovered = hitbox.is_hovered(window);
 
                     terminal.update(cx, |terminal, cx| {
@@ -1086,17 +1103,18 @@ impl TerminalElement {
             }
         });
 
-        self.interactivity.on_mouse_up(
-            MouseButton::Left,
-            TerminalElement::generic_button_handler(
-                terminal.clone(),
-                focus.clone(),
-                false,
-                move |terminal, e, cx| {
-                    terminal.mouse_up(e, cx);
-                },
-            ),
-        );
+        window.on_mouse_event({
+            let drag_button = drag_button.clone();
+            let terminal = terminal.clone();
+            move |e: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture && drag_button.get() == Some(e.button) {
+                    drag_button.set(None);
+                    terminal.update(cx, |terminal, cx| terminal.mouse_up(e, cx));
+                }
+            }
+        });
+        let middle_drag = drag_button.clone();
+        let mouse_mode = mode.intersects(Modes::MOUSE_MODE);
         self.interactivity.on_mouse_down(
             MouseButton::Middle,
             TerminalElement::generic_button_handler(
@@ -1104,6 +1122,9 @@ impl TerminalElement {
                 focus.clone(),
                 true,
                 move |terminal, e, cx| {
+                    if mouse_mode {
+                        middle_drag.set(Some(MouseButton::Middle));
+                    }
                     terminal.mouse_down(e, cx);
                 },
             ),
@@ -1122,6 +1143,7 @@ impl TerminalElement {
         // Mouse mode handlers:
         // All mouse modes need the extra click handlers
         if mode.intersects(Modes::MOUSE_MODE) {
+            let drag_start = drag_button.clone();
             self.interactivity.on_mouse_down(
                 MouseButton::Right,
                 TerminalElement::generic_button_handler(
@@ -1129,29 +1151,8 @@ impl TerminalElement {
                     focus.clone(),
                     true,
                     move |terminal, e, cx| {
+                        drag_start.set(Some(MouseButton::Right));
                         terminal.mouse_down(e, cx);
-                    },
-                ),
-            );
-            self.interactivity.on_mouse_up(
-                MouseButton::Right,
-                TerminalElement::generic_button_handler(
-                    terminal.clone(),
-                    focus.clone(),
-                    false,
-                    move |terminal, e, cx| {
-                        terminal.mouse_up(e, cx);
-                    },
-                ),
-            );
-            self.interactivity.on_mouse_up(
-                MouseButton::Middle,
-                TerminalElement::generic_button_handler(
-                    terminal,
-                    focus,
-                    false,
-                    move |terminal, e, cx| {
-                        terminal.mouse_up(e, cx);
                     },
                 ),
             );
@@ -1524,7 +1525,7 @@ impl Element for TerminalElement {
                 cursor_bounds: layout.ime_cursor_bounds.map(|bounds| bounds + origin),
             };
 
-            self.register_mouse_listeners(layout.mode, &layout.hitbox, window);
+            self.register_mouse_listeners(layout.mode, &layout.hitbox, window, cx);
 
             // 悬停在超链接上时显示手型光标
             let hovered_link = window.modifiers().secondary()

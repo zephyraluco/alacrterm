@@ -1,4 +1,4 @@
-//! 侧边栏面板:顶部标题栏 + 工具栏 + 下方可滚动的内容列表 + 底部状态栏。
+//! 侧边栏面板:顶部标题栏 + 工具栏 + 下方可滚动的内容列表。
 
 use std::rc::Rc;
 
@@ -29,7 +29,6 @@ pub(crate) struct Sidebar<E: SidebarRow> {
     header: Option<AnyElement>,
     /// 标题栏下面那一行工具条（「文件管理器」的图标按钮就摆这儿）。
     toolbar: Option<AnyElement>,
-    status_bar: Option<AnyElement>,
     rows: Vec<E>,
 }
 
@@ -39,7 +38,6 @@ impl<E: SidebarRow> Sidebar<E> {
             id: id.into(),
             header: None,
             toolbar: None,
-            status_bar: None,
             rows: Vec::new(),
         }
     }
@@ -53,12 +51,6 @@ impl<E: SidebarRow> Sidebar<E> {
     /// 标题栏下面那一行工具条（固定、不随内容滚动）。
     pub(crate) fn toolbar(mut self, toolbar: Option<AnyElement>) -> Self {
         self.toolbar = toolbar;
-        self
-    }
-
-    /// 底部状态栏（贴在面板下沿，不随内容滚动）。
-    pub(crate) fn status_bar(mut self, status_bar: impl IntoElement) -> Self {
-        self.status_bar = Some(status_bar.into_any_element());
         self
     }
 
@@ -148,9 +140,5 @@ impl<E: SidebarRow> RenderOnce for Sidebar<E> {
                         ),
                     ),
             )
-            // 底部状态栏：固定高度、贴面板下沿（标题栏在上、内容区自己滚）。
-            .when_some(self.status_bar, |this, status_bar| {
-                this.child(status_bar)
-            })
     }
 }

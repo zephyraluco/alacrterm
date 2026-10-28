@@ -1,5 +1,5 @@
-//! 「文件管理器」视图:只供远端(SSH)会话的目录树,入口 [`FilesState`]。
-//! 树摊平成一行一项交给侧边栏虚拟列表,摊平与行骨架走 [`super::shared`]。
+//! 「文件管理器」视图:只供远端(SSH)会话的目录列表,入口 [`FilesState`]。
+//! 当前目录的条目交给侧边栏虚拟列表，行骨架走 [`super::shared`]。
 //!
 //! ## 七个动作
 //!
@@ -44,7 +44,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::InputState,
     list::ListItem,
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     notification::Notification,
@@ -64,10 +64,14 @@ use crate::preview_cache::PreviewCache;
 use crate::preview_window::{FileKind, PreviewRequest};
 use crate::transfer_manager::{TransferDone, TransferManager, TransferState};
 
+mod path_input;
+
+use path_input::PathCompletion;
+
 /// 路径输入框那一行的高度。
 const PATH_ROW_HEIGHT: Pixels = px(36.);
 
-/// 条目路径:根目录开始的下标链(`[]` = 根)。
+/// 条目索引，沿用侧边栏动作的下标路径表示。
 type FilePath = Vec<usize>;
 
 /// 拼接远端路径。
@@ -133,34 +137,11 @@ fn unique_path(path: PathBuf) -> PathBuf {
     path
 }
 
-/// 在树里找某个远端目录的下标链(只找已经读过的那部分)。
-fn find_dir_in(nodes: &[FileNode], remote: &str) -> Option<FilePath> {
-    for (ix, node) in nodes.iter().enumerate() {
-        if !node.is_dir {
-            continue;
-        }
-        if node.path == remote {
-            return Some(vec![ix]);
-        }
-        if let Some(mut nested) = node
-            .children
-            .as_deref()
-            .and_then(|children| find_dir_in(children, remote))
-        {
-            nested.insert(0, ix);
-            return Some(nested);
-        }
-    }
-    None
-}
-
-
 struct FileNode {
     name: SharedString,
     path: String,
     is_dir: bool,
     size: u64,
-    children: Option<Vec<FileNode>>,
 }
 
 /// 把 SFTP 列出的一层目录转成节点。
@@ -172,18 +153,9 @@ fn nodes_from(parent: &str, entries: Vec<RemoteEntry>) -> Vec<FileNode> {
             name: entry.name.into(),
             is_dir: entry.is_dir,
             size: entry.size,
-            children: None,
         })
         .collect()
 }
-
-/// 后台读取结果的回填目标。
-enum LoadTarget {
-    Root,
-    Navigate(String),
-    Dir(FilePath),
-}
-
 
 #[derive(Clone)]
 struct FileRow {
@@ -191,15 +163,13 @@ struct FileRow {
     label: SharedString,
     /// 远端路径(右键菜单里的「复制远端路径」用)。
     remote: String,
-    depth: usize,
     kind: RowKind,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RowKind {
-    Dir { expanded: bool },
+    Dir,
     File,
-    Loading,
 }
 
 trait TransferDetails {
@@ -244,11 +214,12 @@ pub(crate) struct FilesState {
     root: Option<String>,
     entries: Option<Vec<FileNode>>,
     error: Option<String>,
-    expanded: Vec<FilePath>,
     loading: Vec<String>,
     selected: Option<FilePath>,
     path_input: Entity<InputState>,
     path_input_pending: bool,
+    completion: PathCompletion,
+    navigation_error: Option<String>,
     /// 上一次「跟着终端走」跟着的那个目录（见 [`FilesState::follow_terminal`]）。
     ///
     /// 即「终端上一次报的目录」:shell 每次画提示符都会报一遍同一个目录,靠它去重;
@@ -261,7 +232,7 @@ pub(crate) struct FilesState {
     nav_seq: u64,
     /// 会话代数：换会话 / 重置时自增，旧会话的回包据此丢弃。
     generation: u64,
-    /// 摊平后的可见行缓存（见 [`RowCache`]）。
+    /// 当前目录的可见行缓存（见 [`RowCache`]）。
     rows: RowCache<FileRow>,
     /// 应用级传输管理器（任务与会话生命周期无关，见 [`crate::transfer_manager`]）。
     transfers: Entity<TransferManager>,
@@ -277,7 +248,7 @@ impl FilesState {
     /// 根视图据此决定即使上下文快照没变也要跑一次同步（见
     /// [`crate::AppRoot::sync_active_context`]）。
     pub(crate) fn needs_window_sync(&self) -> bool {
-        self.path_input_pending
+        self.path_input_pending || self.navigation_error.is_some()
     }
 
     pub(crate) fn has_transfers(&self, cx: &App) -> bool {
@@ -308,11 +279,12 @@ impl FilesState {
             root: None,
             entries: None,
             error: None,
-            expanded: Vec::new(),
             loading: Vec::new(),
             selected: None,
             path_input,
             path_input_pending: false,
+            completion: PathCompletion::default(),
+            navigation_error: None,
             followed: None,
             home: None,
             nav_seq: 0,
@@ -327,19 +299,21 @@ impl FilesState {
 
     /// 与当前会话对齐。
     pub(crate) fn sync(&mut self, fs: Option<SshFs>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fs != fs {
+            self.completion = PathCompletion::default();
+            self.navigation_error = None;
+            self.fs = fs;
+            self.root = None;
+            self.followed = None;
+            self.home = None;
+            self.reset(window, cx);
+            return;
+        }
         if self.path_input_pending {
             self.path_input_pending = false;
             self.sync_path_input(window, cx);
         }
-        if self.fs == fs {
-            return;
-        }
-        self.fs = fs;
-        self.root = None;
-        // 换了会话就忘了「上次跟到哪儿」与旧会话的家目录:新会话的目录跟旧会话没关系。
-        self.followed = None;
-        self.home = None;
-        self.reset(window, cx);
+        self.show_navigation_error(window, cx);
     }
 
     /// 跟着终端走：远端 shell 报了个新目录就跳过去。
@@ -363,72 +337,103 @@ impl FilesState {
             return;
         };
         let directory = directory.as_str();
-        if self.fs.is_none()
-            || self.root.as_deref() == Some(directory)
-            || self.followed.as_deref() == Some(directory)
-        {
+        if self.fs.is_none() || self.followed.as_deref() == Some(directory) {
             return;
         }
+        // 先记住终端上报值，手动跳转失败后也不拿旧目录覆盖路径框。
         self.followed = Some(directory.to_string());
+        if self.completion.editing || self.root.as_deref() == Some(directory) {
+            return;
+        }
         self.navigate_to(directory, cx);
     }
 
-    /// 输入框改动 / 回车时跳转。
-    fn on_path_input_event(
-        &mut self,
-        event: &InputEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
-            return;
-        }
-        let text = self.path_input.read(cx).value().trim().to_string();
-        self.navigate_to(&text, cx);
-    }
-
-    /// 跳到 `text` 指的目录,只认最新一次请求。
+    /// 只在确认后导航；直接读目录以保留不存在、非目录、权限等错误。
     fn navigate_to(&mut self, text: &str, cx: &mut Context<Self>) {
-        let Some(fs) = self.fs.clone() else {
+        let Some(fs) = self.fs.clone() else { return };
+        let Some(path) = path_input::resolve_path(
+            text,
+            self.root.as_deref().or(self.completion.base.as_deref()),
+            self.home.as_deref(),
+        ) else {
+            self.navigation_failed(
+                "无法解析路径，请输入绝对路径或等待远端家目录加载".into(),
+                cx,
+            );
             return;
         };
-        let text = text.to_string();
-        if text.is_empty() || self.root.as_deref() == Some(text.as_str()) {
-            return;
-        }
-        let generation = self.generation;
+        self.completion.dismiss();
+        self.path_input_pending = false;
+        self.generation += 1;
         self.nav_seq += 1;
+        self.loading.clear();
+        let generation = self.generation;
         let seq = self.nav_seq;
         let task = cx.background_spawn({
-            let fs = fs.clone();
-            let text = text.clone();
-            async move { fs.is_dir(text).await }
-        });
-        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let mut cx = cx.clone();
+            let path = path.clone();
             async move {
-                let is_dir = task.await.unwrap_or(false);
-                if !is_dir {
+                let metadata = fs.stat(path.clone()).await.map_err(|error| error.to_string())?;
+                if !metadata.is_dir {
+                    return Err("目标路径不是目录".to_string());
+                }
+                fs.list_dir(path).await.map_err(|error| error.to_string())
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation || this.nav_seq != seq {
                     return;
                 }
-                let _ = this.update(&mut cx, |this, cx| {
-                    if this.generation != generation || this.nav_seq != seq {
-                        return;
+                match result {
+                    Ok(entries) => {
+                        this.completion.cache.clear();
+                        this.completion.base = Some(path.clone());
+                        this.root = Some(path.clone());
+                        this.entries = Some(nodes_from(&path, entries));
+                        this.error = None;
+                        this.selected = None;
+                        this.rows.bump();
+                        this.path_input_pending = true;
+                        this.schedule_path_sync(cx);
                     }
-                    this.generation += 1;
-                    this.spawn_load(fs, text.clone(), LoadTarget::Navigate(text), cx);
-                });
-            }
+                    Err(error) => this.navigation_failed(format!("无法打开 {path}：{error}"), cx),
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
 
+    fn navigation_failed(&mut self, message: String, cx: &mut Context<Self>) {
+        self.generation += 1;
+        self.root = None;
+        self.entries = None;
+        self.error = Some(message.clone());
+        self.loading.clear();
+        self.selected = None;
+        self.rows.bump();
+        self.path_input_pending = false;
+        self.completion.dismiss();
+        self.navigation_error = Some(message);
+        self.schedule_path_sync(cx);
+        cx.notify();
+    }
+
+    fn schedule_path_sync(&self, cx: &mut Context<Self>) {
+        let _ = self
+            .app_root
+            .update(cx, |root, cx| root.schedule_context_sync(cx));
+    }
+
     fn sync_path_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.root.clone().unwrap_or_default();
+        self.completion.base = self.root.clone();
         let current = self.path_input.read(cx).value();
         if current.as_ref() == text {
             return;
         }
+        self.completion.value = text.clone();
         self.path_input
             .update(cx, |input, cx| input.set_value(text, window, cx));
     }
@@ -441,16 +446,17 @@ impl FilesState {
 
     /// 重置状态并按需重读根目录。
     fn reset_no_window(&mut self, cx: &mut Context<Self>) {
+        self.completion.dismiss();
+        self.completion.cache.clear();
         self.path_input_pending = true;
         self.generation += 1;
         self.entries = None;
         self.error = None;
-        self.expanded.clear();
         self.loading.clear();
         self.selected = None;
         self.rows.bump();
         match (self.fs.clone(), self.root.clone()) {
-            (Some(fs), Some(root)) => self.spawn_load(fs, root, LoadTarget::Root, cx),
+            (Some(fs), Some(root)) => self.spawn_load(fs, root, cx),
             (Some(fs), None) => self.spawn_home(fs, cx),
             (None, _) => {}
         }
@@ -497,8 +503,10 @@ impl FilesState {
         .detach();
     }
 
-    /// 后台读一个目录,读完按 [`LoadTarget`] 回填。
-    fn spawn_load(&mut self, fs: SshFs, dir: String, target: LoadTarget, cx: &mut Context<Self>) {
+    /// 后台重读当前目录。
+    fn spawn_load(&mut self, fs: SshFs, dir: String, cx: &mut Context<Self>) {
+        self.completion.dismiss();
+        self.completion.cache.clear();
         if self.loading.contains(&dir) {
             return;
         }
@@ -530,27 +538,7 @@ impl FilesState {
                                 Vec::new()
                             }
                         };
-                        match &target {
-                            LoadTarget::Root => this.entries = Some(entries),
-                            LoadTarget::Navigate(root) => {
-                                this.root = Some(root.clone());
-                                this.path_input_pending = true;
-                                this.expanded.clear();
-                                this.entries = Some(entries);
-                                // 路径框要窗口才能刷新：让根视图下一帧再跑一次同步。
-                                let app_root = this.app_root.clone();
-                                if let Some(root) = app_root.upgrade() {
-                                    let _ = root.update(cx, |root, cx| root.schedule_context_sync(cx));
-                                }
-                            }
-                            LoadTarget::Dir(path) => {
-                                if let Some(entries_root) = this.entries.as_mut()
-                                    && let Some(node) = Self::node_mut(entries_root, path)
-                                {
-                                    node.children = Some(entries);
-                                }
-                            }
-                        }
+                        this.entries = Some(entries);
                         cx.notify();
                     });
                 }
@@ -563,60 +551,29 @@ impl FilesState {
         if let Some(rows) = self.rows.cached() {
             return rows;
         }
-        let mut out = Vec::new();
-        let mut path = FilePath::new();
-        Self::flatten(
-            self.entries.as_deref().unwrap_or(&[]),
-            &self.expanded,
-            &mut path,
-            &mut out,
-        );
-        self.rows.store(out)
-    }
-
-    fn flatten(
-        nodes: &[FileNode],
-        expanded: &[FilePath],
-        path: &mut FilePath,
-        out: &mut Vec<FileRow>,
-    ) {
-        for (ix, node) in nodes.iter().enumerate() {
-            path.push(ix);
-            let kind = if node.is_dir {
-                RowKind::Dir {
-                    expanded: expanded.contains(path),
-                }
-            } else {
-                RowKind::File
-            };
-            out.push(FileRow {
-                path: path.clone(),
+        let rows = self
+            .entries
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .enumerate()
+            .map(|(ix, node)| FileRow {
+                path: vec![ix],
                 label: node.name.clone(),
                 remote: node.path.clone(),
-                depth: path.len() - 1,
-                kind,
-            });
-            if let RowKind::Dir { expanded: true } = kind {
-                match &node.children {
-                    Some(children) => Self::flatten(children, expanded, path, out),
-                    None => out.push(FileRow {
-                        path: path.clone(),
-                        label: "加载中…".into(),
-                        remote: node.path.clone(),
-                        depth: path.len(),
-                        kind: RowKind::Loading,
-                    }),
-                }
-            }
-            path.pop();
-        }
+                kind: if node.is_dir {
+                    RowKind::Dir
+                } else {
+                    RowKind::File
+                },
+            })
+            .collect();
+        self.rows.store(rows)
     }
-
     fn row(&self, ix: usize) -> Option<FileRow> {
         self.rows.row(ix)
     }
 
-    /// 按 id 取一条在跑的传输(渲染传输行时用)。
     // --------------------------------------------------------- 打开 / 上传 / 下载
 
     /// 「打开」:先把远端文件下到本地缓存,下完按类型交给预览窗口或系统程序。
@@ -773,7 +730,7 @@ impl FilesState {
     /// 「刷新」:重读当前根目录(远端可能被别处改过)。
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         if let (Some(fs), Some(root)) = (self.fs.clone(), self.root.clone()) {
-            self.spawn_load(fs, root, LoadTarget::Root, cx);
+            self.spawn_load(fs, root, cx);
         }
     }
 
@@ -800,10 +757,7 @@ impl FilesState {
         self.download_as(path, cx);
     }
 
-    /// 选中的是文件就 [`Self::open_file`]，是目录就当作点它一下（切换展开）。
-    ///
-    /// 工具栏上的「编辑」按钮已移除，保留该能力供右键菜单等入口使用。
-    #[allow(dead_code)]
+    /// 打开选中项：文件夹进入该目录，文件沿用预览 / 系统打开流程。
     pub(super) fn open_selected(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.selected.clone() else {
             return;
@@ -812,8 +766,10 @@ impl FilesState {
             return;
         };
         if is_dir {
-            // `activate_row` 对目录是「切换展开」，`expanded` 那个字段它不看。
-            self.activate_row(path, RowKind::Dir { expanded: false }, cx);
+            let directory = self.node(&path).map(|node| node.path.clone());
+            if let Some(directory) = directory {
+                self.navigate_to(&directory, cx);
+            }
         } else {
             self.open_file(path, cx);
         }
@@ -981,24 +937,16 @@ impl FilesState {
         }
     }
 
-    /// 把某个远端目录重读一次(上传 / 下载完成后刷新它;预览窗口写回远端后也走这里)。
+    /// 重读当前显示的远端目录（上传 / 下载完成或预览写回后）。
     pub(crate) fn reload_dir(&mut self, dir: &str, cx: &mut Context<Self>) {
         let Some(fs) = self.fs.clone() else {
             return;
         };
         if self.root.as_deref() == Some(dir) {
-            self.spawn_load(fs, dir.to_string(), LoadTarget::Root, cx);
+            self.spawn_load(fs, dir.to_string(), cx);
             return;
         }
-        // 树里能找到(而且已经读过)的那个目录才刷得动;没展开过的本来就会在读的时候拿新的。
-        let Some(path) = self
-            .entries
-            .as_deref()
-            .and_then(|nodes| find_dir_in(nodes, dir))
-        else {
-            return;
-        };
-        self.spawn_load(fs, dir.to_string(), LoadTarget::Dir(path), cx);
+        // 非当前目录无需缓存；再次进入时会重新读取。
     }
 
     /// 状态栏 / 工具栏那几枚按钮要的判据（见 [`FilesStatus`]）。
@@ -1022,10 +970,7 @@ impl FilesState {
 
         let rows = self.rows();
         let mut items = Vec::with_capacity(rows.len() + transfers.len() + 2);
-        if self.fs.is_some() {
-            items.push(FilesItem::Path(self.path_input.clone()));
-        }
-        // 传输行摆在路径框下面、树上面:有东西在传时它最需要被看到。
+        // 传输行摆在路径框下面、文件列表上面，保持任务进度可见。
         let state = cx.entity().downgrade();
         items.extend(transfers.iter().map(|transfer| FilesItem::Transfer {
             state: state.clone(),
@@ -1058,50 +1003,24 @@ impl FilesState {
         items
     }
 
-    /// 点一行:目录切换展开,文件行记选中。
-    fn activate_row(&mut self, path: FilePath, kind: RowKind, cx: &mut Context<Self>) {
-        self.selected = Some(path.clone());
-        if matches!(kind, RowKind::Dir { .. }) {
-            let was_open = self.expanded.iter().any(|open| open == &path);
-            self.expanded.retain(|open| open != &path);
-            if !was_open {
-                self.expanded.push(path.clone());
-                let pending = self
-                    .node(&path)
-                    .filter(|node| node.is_dir && node.children.is_none())
-                    .map(|node| node.path.clone());
-                if let (Some(dir), Some(fs)) = (pending, self.fs.clone()) {
-                    self.spawn_load(fs, dir, LoadTarget::Dir(path), cx);
-                }
-            }
-            self.rows.bump();
-        }
+    /// 单击只选择条目，不展开或导航。
+    fn activate_row(&mut self, path: FilePath, cx: &mut Context<Self>) {
+        self.selected = Some(path);
         cx.notify();
     }
 
     fn node(&self, path: &[usize]) -> Option<&FileNode> {
-        let mut nodes: &[FileNode] = self.entries.as_deref()?;
-        let (last, parent) = path.split_last()?;
-        for step in parent {
-            nodes = nodes.get(*step)?.children.as_deref()?;
-        }
-        nodes.get(*last)
+        let [ix] = path else {
+            return None;
+        };
+        self.entries.as_ref()?.get(*ix)
     }
 
-    fn node_mut<'a>(nodes: &'a mut Vec<FileNode>, path: &[usize]) -> Option<&'a mut FileNode> {
-        let (ix, rest) = path.split_first()?;
-        if rest.is_empty() {
-            return nodes.get_mut(*ix);
-        }
-        let node = nodes.get_mut(*ix)?;
-        Self::node_mut(node.children.as_mut()?, rest)
-    }
 }
 
 
 #[derive(Clone)]
 pub(super) enum FilesItem {
-    Path(Entity<InputState>),
     /// 一条在跑的传输(上传 / 下载)。
     Transfer {
         state: WeakEntity<FilesState>,
@@ -1123,18 +1042,6 @@ impl FilesItem {
     /// 画这一项。
     pub(super) fn render(self, cx: &mut App) -> AnyElement {
         match self {
-            Self::Path(input) => h_flex()
-                .w_full()
-                .h(PATH_ROW_HEIGHT)
-                .px_2()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(&input)
-                            .cleanable(false)
-                            .aria_label("远端目录路径"),
-                    ),
-                )
-                .into_any_element(),
             Self::Transfer { state, id } => {
                 let Ok(Some(transfer)) = state.read_with(&*cx, |files, cx| files.transfers.read(cx).transfer(id)) else {
                     return div().w_full().into_any_element();
@@ -1160,11 +1067,8 @@ impl FilesItem {
                 let remote = row.remote.clone();
                 let name = row.label.clone();
                 let kind = row.kind;
-                let is_dir = matches!(kind, RowKind::Dir { .. });
+                let is_dir = matches!(kind, RowKind::Dir);
                 let element = row_element(ix, &row, selected, cx);
-                if matches!(kind, RowKind::Loading) {
-                    return div().w_full().child(element).into_any_element();
-                }
                 let click_state = state.clone();
                 let menu_state = state.clone();
                 let open_path = path.clone();
@@ -1174,13 +1078,11 @@ impl FilesItem {
                     .child(
                         element
                             .on_click(move |event, _window, cx| {
-                                if event.click_count() >= 2 && !is_dir {
-                                    let _ = click_state
-                                        .update(cx, |files, cx| files.open_file(open_path.clone(), cx));
-                                    return;
-                                }
                                 let _ = click_state.update(cx, |files, cx| {
-                                    files.activate_row(open_path.clone(), kind, cx)
+                                    files.activate_row(open_path.clone(), cx);
+                                    if event.click_count() == 2 {
+                                        files.open_selected(cx);
+                                    }
                                 });
                             })
                             .context_menu(move |menu, _window, _cx| {
@@ -1284,7 +1186,7 @@ fn transfer_element(
 
 /// 一行的右键菜单。
 ///
-/// 目录与文件的条目不同:目录没得「打开」(只展开),文件没得「下载文件夹」。
+/// 目录与文件的条目不同：文件提供预览打开，目录提供文件夹下载。
 fn row_menu(
     menu: PopupMenu,
     state: &WeakEntity<FilesState>,
@@ -1346,36 +1248,20 @@ fn row_menu(
 }
 
 
-/// 画文件树的一行。
+/// 画当前目录的一行；文件夹和文件对齐，不显示树形展开箭头。
 fn row_element(ix: usize, row: &FileRow, selected: bool, cx: &mut App) -> ListItem {
-    let label = row.label.clone();
-    let item = row_shell(ix, row.depth, selected, cx).cursor(match row.kind {
-        RowKind::Dir { .. } => CursorStyle::PointingHand,
-        _ => CursorStyle::Arrow,
-    });
-    match row.kind {
-        RowKind::Dir { expanded } => item.child(row_content(
-            Some(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            }),
-            if expanded {
-                IconName::FolderOpen
-            } else {
-                IconName::Folder
-            },
-            label,
-        )),
-        RowKind::File => item.child(row_content(None, IconName::File, label)),
-        RowKind::Loading => item.child(ellipsis_label(label)),
-    }
+    let icon = match row.kind {
+        RowKind::Dir => IconName::Folder,
+        RowKind::File => IconName::File,
+    };
+    row_shell(ix, 0, selected, cx)
+        .cursor(CursorStyle::Arrow)
+        .child(row_content(None, icon, row.label.clone()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FileNode, find_dir_in, join_dir, parent_dir};
-    use gpui::SharedString;
+    use super::{join_dir, parent_dir};
 
     #[test]
     fn remote_filesystem_identity_follows_connection_instance() {
@@ -1385,56 +1271,6 @@ mod tests {
         let next_connection = terminal::SshFs::new(params);
         assert_eq!(first.session_id(), same_connection.session_id());
         assert_ne!(first.session_id(), next_connection.session_id());
-    }
-
-    fn dir(name: &str, path: &str, children: Option<Vec<FileNode>>) -> FileNode {
-        FileNode {
-            name: SharedString::from(name),
-            path: path.to_string(),
-            is_dir: true,
-            size: 0,
-            children,
-        }
-    }
-
-    fn file(name: &str, path: &str) -> FileNode {
-        FileNode {
-            name: SharedString::from(name),
-            path: path.to_string(),
-            is_dir: false,
-            size: 3,
-            children: None,
-        }
-    }
-
-    /// 上传 / 下载完要重读「受影响的那个目录」,靠这个函数在树里把它找回来。
-    #[test]
-    fn finds_a_directory_at_any_depth() {
-        let tree = vec![
-            dir(
-                "home",
-                "/home",
-                Some(vec![
-                    dir("me", "/home/me", Some(vec![dir("work", "/home/me/work", None)])),
-                    file("notes.txt", "/home/me/notes.txt"),
-                ]),
-            ),
-            file("readme", "/readme"),
-        ];
-
-        assert_eq!(find_dir_in(&tree, "/home"), Some(vec![0]));
-        assert_eq!(find_dir_in(&tree, "/home/me"), Some(vec![0, 0]));
-        assert_eq!(find_dir_in(&tree, "/home/me/work"), Some(vec![0, 0, 0]));
-    }
-
-    /// 没读过的目录(子节点还没拉)找不到 —— 它展开时会自己读新的,不需要刷。
-    #[test]
-    fn does_not_invent_directories_it_has_not_read() {
-        let tree = vec![dir("home", "/home", None)];
-        assert_eq!(find_dir_in(&tree, "/home/me"), None);
-        // 文件不算命中(即使路径一样)。
-        let with_file = vec![file("home", "/home")];
-        assert_eq!(find_dir_in(&with_file, "/home"), None);
     }
 
     /// 状态栏那枚「上一目录」:根目录 `/` 没有上一级(所以按不了),其余往上一层层切。

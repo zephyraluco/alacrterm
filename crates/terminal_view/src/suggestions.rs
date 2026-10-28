@@ -258,6 +258,18 @@ impl Suggestions {
                 .rem_euclid(self.candidates.len() as isize) as usize;
         }
     }
+    /// Enter can submit an already complete default candidate without inserting
+    /// the optional trailing space or changing the shell's cursor position.
+    pub fn default_candidate_matches_input(&self) -> bool {
+        if !self.has_current_candidates() || self.selected != 0 || self.cursor != self.text.len() {
+            return false;
+        }
+        let item = &self.candidates[0];
+        item.cursor_back == 0
+            && item.replacement.end == self.cursor
+            && self.text.get(item.replacement.clone()) == Some(item.insert_text.as_str())
+    }
+
     pub fn accept(&mut self) -> Option<String> {
         if !self.is_editing() || self.candidate_revision != self.revision {
             return None;

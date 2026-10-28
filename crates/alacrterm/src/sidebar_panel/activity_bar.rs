@@ -1,4 +1,4 @@
-//! 最左侧整列的装配:48px 图标栏 + 右侧侧边栏面板。
+//! 侧边栏面板与全局底部状态栏的装配。
 
 use std::path::PathBuf;
 
@@ -7,51 +7,69 @@ use gpui::{
     IntoElement, ParentElement as _, PathPromptOptions, SharedString, Styled as _, Window, div, px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Placement, Sizable as _,
+    ActiveTheme as _, Disableable as _, Placement, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
-    h_flex,
+    h_flex, v_flex,
     menu::{ContextMenuExt as _, PopupMenuItem},
 };
 
 use super::files::FilesState;
 use super::{Sidebar, SidebarContent, SidebarView};
-use crate::actions::{NewFolder, NewSession, OpenSettings};
+use crate::actions::{NewFolder, NewSession};
 use crate::assets::IconName;
-use crate::components::{ActivityBar, ActivityBarItem, Sidebar as SidebarPanel};
+use crate::components::Sidebar as SidebarPanel;
 use crate::dialog::name::open_name_dialog;
-use crate::status_bar::empty_status_bar;
+use crate::status_bar::{STATUS_BAR_ITEM_HEIGHT, new_status_bar};
 
-/// 整条左列:图标栏 + 侧边栏面板（面板自带底部状态栏）。
-pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
-    let active = if sidebar.visible() {
-        sidebar.active_view(cx)
-    } else {
-        None
-    };
-    let files_enabled = sidebar.files_view_available(cx);
-
-    let bar = SidebarView::ALL
-        .iter()
-        .copied()
+/// 全窗口底栏：紧凑的视图切换按钮，侧边栏折叠时仍可操作。
+pub(super) fn status_bar(sidebar: &Sidebar, right: &Entity<Sidebar>, cx: &mut Context<Sidebar>) -> AnyElement {
+    let files_enabled = right.read(cx).files_view_available(cx);
+    SidebarView::ALL
+        .into_iter()
         .filter(|view| view.visible_with(files_enabled))
-        .fold(ActivityBar::new("activity-bar"), |bar, view| {
-            let state = cx.weak_entity();
-            bar.item(
-                ActivityBarItem::new(view.id(), view.icon(), view.tooltip(), move |_, _, cx| {
-                    let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
-                })
-                .active(active == Some(view)),
-            )
-        })
-        .footer_item(ActivityBarItem::new(
-            "activity-settings",
-            IconName::Settings,
-            "设置",
-            |_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx),
-        ));
+        .fold(
+            new_status_bar(),
+            |bar, view| {
+                let (state, selected) = match view {
+                    SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
+                    SidebarView::Files => (right.downgrade(), right.read(cx).panel_visible(cx)),
+                };
+                let button = Button::new(view.id())
+                    .ghost()
+                    .small()
+                    .h(STATUS_BAR_ITEM_HEIGHT)
+                    .w(STATUS_BAR_ITEM_HEIGHT)
+                    .icon(view.icon())
+                    .tooltip(view.tooltip())
+                    .tooltip_placement(Placement::Top)
+                    .accessibility_label(view.tooltip())
+                    .selected(selected)
+                    .on_click(move |_, _, cx| {
+                        let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
+                    });
+                match view {
+                    SidebarView::Sessions => bar.left(
+                        h_flex()
+                            .items_center()
+                            .child(button)
+                            .child(separator(&cx.theme().border)),
+                    ),
+                    SidebarView::Files => bar.right(
+                        h_flex()
+                            .items_center()
+                            .child(separator(&cx.theme().border))
+                            .child(button),
+                    ),
+                }
+            },
+        )
+        .into_any_element()
+}
 
-    let Some(active) = active else {
-        return bar.into_any_element();
+/// 面板内容不再为竖向图标栏预留空间。
+pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
+    let Some(active) = sidebar.visible().then(|| sidebar.active_view(cx)).flatten() else {
+        return div().into_any_element();
     };
 
     let rows: Vec<SidebarContent> = match active {
@@ -74,15 +92,22 @@ pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> A
         // 工具栏只有「文件管理器」有（「会话」那条没有:它那一栏的动作在右键菜单里）。
         .toolbar(match active {
             SidebarView::Sessions => None,
-            SidebarView::Files if sidebar.files.read(cx).status().ready => {
-                Some(files_toolbar(sidebar.files.clone(), cx))
+            SidebarView::Files => {
+                let files = sidebar.files.read(cx);
+                let ready = files.status().ready;
+                let path_input = files.render_path_input(sidebar.files.clone(), cx);
+                Some(
+                    v_flex()
+                        .w_full()
+                        .flex_none()
+                        .gap_2()
+                        .children(ready.then(|| files_toolbar(sidebar.files.clone(), cx)))
+                        .children(path_input)
+                        .into_any_element(),
+                )
             }
-            SidebarView::Files => None,
         })
-        .children(rows)
-        // 侧边栏底部状态栏(与中间列那条同一个组件 / 同一个高度):空条。
-        // 折叠时不摆:上面那个 `else` 早就 return 了。
-        .status_bar(empty_status_bar());
+        .children(rows);
 
     let panel = match active {
         SidebarView::Sessions => div()
@@ -104,7 +129,11 @@ pub(super) fn left_column(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> A
         SidebarView::Files => files_panel(panel, sidebar.files.clone()),
     };
 
-    bar.sidebar(panel).into_any_element()
+    div()
+        .size_full()
+        .key_context(crate::keymap::SIDEBAR_CONTEXT)
+        .child(panel)
+        .into_any_element()
 }
 
 /// 「文件管理器」顶部那一行工具栏（照 MobaXterm 的摆法：按钮在上、路径框在下）。
@@ -236,7 +265,7 @@ fn tool_button(
         .on_click(move |_, window, cx| on_click(window, cx))
 }
 
-/// 工具栏上两组按钮之间的细竖线。
+/// 工具栏和状态栏中划分按钮区域的细竖线。
 fn separator(color: &Hsla) -> AnyElement {
     div()
         .flex_none()

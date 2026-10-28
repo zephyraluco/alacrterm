@@ -1,19 +1,26 @@
 //! 自绘标签栏（dock 的 `TabGroupRenderer`）：定宽标签 + 图标 + 关闭按钮。
 //! 渲染器不是实体：跨帧状态放 `Cell`，改完回调根视图重绘。
 
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+};
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext as _, Axis, Context, CursorStyle, InteractiveElement as _,
+    AnyElement, AnyView, App, AppContext as _, Axis, Context, CursorStyle, FocusHandle,
+    InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window,
+    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window, WindowControlArea,
     div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_kit::{
     base::ResizeHandleContext,
     component::{
         ActiveTheme as _, IconNamed as _, Sizable as _, h_flex,
-        button::ButtonVariants as _,
+        button::{Button, ButtonVariants as _},
+        TITLE_BAR_HEIGHT,
         dock::{
             BasePanelView, DockArea, DockAreaRenderer, DockContext, DockSkin, DragPanel,
             DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext, TabGroupRenderer,
@@ -24,7 +31,7 @@ use gpui_kit::{
 use crate::AppRoot;
 use crate::assets::IconName;
 
-const TAB_BAR_HEIGHT: Pixels = px(32.);
+const TAB_BAR_HEIGHT: Pixels = TITLE_BAR_HEIGHT;
 const TAB_WIDTH: Pixels = px(200.);
 const TAB_PADDING_X: Pixels = px(8.);
 const TAB_GAP: Pixels = px(6.);
@@ -111,6 +118,7 @@ struct TabBarState {
     hovered: Cell<Option<usize>>,
     /// 应用根视图。
     root: WeakEntity<AppRoot>,
+    group_focus: RefCell<HashMap<NodeId, FocusHandle>>,
 }
 
 impl TabBarState {
@@ -120,7 +128,16 @@ impl TabBarState {
             last_active: Cell::new(None),
             hovered: Cell::new(None),
             root,
+            group_focus: RefCell::new(HashMap::new()),
         }
+    }
+
+    fn group_focus(&self, node: NodeId, cx: &mut App) -> FocusHandle {
+        self.group_focus
+            .borrow_mut()
+            .entry(node)
+            .or_insert_with(|| cx.focus_handle())
+            .clone()
     }
 
     /// 通知根视图重绘。
@@ -136,92 +153,36 @@ impl TabBarState {
     }
 }
 
-struct TerminalTabBar {
+pub(crate) struct TerminalTabBar {
     state: Rc<TabBarState>,
 }
 
 impl TabGroupRenderer for TerminalTabBar {
+    fn frame(&self, group: &TabGroupContext, _: &mut Window, cx: &mut App) -> Stateful<gpui::Div> {
+        let focus = group.active_panel().map(|panel| panel.focus_handle(cx));
+        let group_focus = self.state.group_focus(group.node(), cx);
+        div().id("terminal-tab-group").on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            // 组内工具按钮不能冒泡到应用背景并清掉整组焦点。
+            if let Some(focus) = &focus
+                && !focus.contains_focused(window, cx)
+                && !group_focus.contains_focused(window, cx)
+            {
+                window.focus(focus, cx);
+            }
+            cx.stop_propagation();
+        })
+    }
+
     fn render_tab_bar(
         &self,
         group: &TabGroupContext,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let active_ix = group.active_ix();
-        let visible: Vec<usize> = group
-            .panels()
-            .iter()
-            .enumerate()
-            .filter(|(_, panel)| panel.visible(cx))
-            .map(|(ix, _)| ix)
-            .collect();
-
-        // 活动标签滚入可视区。
-        if self.state.last_active.replace(Some(active_ix)) != Some(active_ix)
-            && let Some(visible_ix) = visible.iter().position(|ix| *ix == active_ix)
-        {
-            self.state.scroll.scroll_to_item(visible_ix);
+        if group.is_zoomed() {
+            return div().into_any_element();
         }
-
-        let tabs: Vec<AnyElement> = visible
-            .iter()
-            .map(|ix| self.render_tab(group, *ix, active_ix, window, cx))
-            .collect();
-
-        // 右端固定区：工具栏按钮。
-        let toolbar = group
-            .active_panel()
-            .and_then(|panel| PanelHandle::of(panel))
-            .and_then(|handle| handle.toolbar_buttons(window, cx));
-
-        let (bar_bg, border) = (cx.theme().tab_bar, cx.theme().border);
-
-        h_flex()
-            .w_full()
-            .h(TAB_BAR_HEIGHT)
-            .bg(bar_bg)
-            // 焦点落在标签栏/工具按钮上时的 key context（默认 keymap 未使用，留给用户）。
-            .key_context(crate::keymap::DOCK_CONTEXT)
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .overflow_hidden()
-                    // 栏底线。
-                    .child(
-                        div()
-                            .absolute()
-                            .bottom_0()
-                            .left_0()
-                            .w_full()
-                            .h(px(1.))
-                            .bg(border),
-                    )
-                    .child(
-                        h_flex()
-                            .id("terminal-tab-strip")
-                            .w_full()
-                            .h_full()
-                            .overflow_x_scroll()
-                            .track_scroll(&self.state.scroll)
-                            .children(tabs),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h_full()
-                    .px_1()
-                    .gap_1()
-                    .border_l_1()
-                    .border_color(border)
-                    .when_some(toolbar, |this, buttons| {
-                        this.children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false)))
-                    }),
-            )
-            .into_any_element()
+        self.render_title_bar(group, window, cx)
     }
 
     /// 内容区：缓存 + 铺满。
@@ -263,6 +224,132 @@ impl TabGroupRenderer for TerminalTabBar {
 }
 
 impl TerminalTabBar {
+    pub(crate) fn new(root: WeakEntity<AppRoot>) -> Self {
+        Self { state: Rc::new(TabBarState::new(root)) }
+    }
+
+    pub(crate) fn render_title_bar(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let active_ix = group.active_ix();
+        let visible: Vec<usize> = group
+            .panels()
+            .iter()
+            .enumerate()
+            .filter(|(_, panel)| panel.visible(cx))
+            .map(|(ix, _)| ix)
+            .collect();
+
+        // 活动标签滚入可视区。
+        if self.state.last_active.replace(Some(active_ix)) != Some(active_ix)
+            && let Some(visible_ix) = visible.iter().position(|ix| *ix == active_ix)
+        {
+            self.state.scroll.scroll_to_item(visible_ix);
+        }
+
+        let tabs: Vec<AnyElement> = visible
+            .iter()
+            .map(|ix| self.render_tab(group, *ix, active_ix, window, cx))
+            .collect();
+
+        let group_focus = self.state.group_focus(group.node(), cx);
+        // 终端与工具栏共同组成停靠组的焦点范围。
+        let toolbar = group
+            .active_panel()
+            .filter(|panel| {
+                group.is_zoomed() || panel.focus_handle(cx).contains_focused(window, cx)
+                    || group_focus.contains_focused(window, cx)
+            })
+            .and_then(|panel| PanelHandle::of(panel))
+            .and_then(|handle| handle.toolbar_buttons(window, cx));
+
+        let (bar_bg, border) = (cx.theme().tab_bar, cx.theme().border);
+
+        let zoom_group = group.clone();
+        let bar = h_flex()
+            .w_full()
+            .h(TAB_BAR_HEIGHT)
+            .when(group.is_zoomed(), |bar| bar.h_full())
+            .bg(bar_bg)
+            // 焦点落在标签栏/工具按钮上时的 key context（默认 keymap 未使用，留给用户）。
+            .key_context(crate::keymap::DOCK_CONTEXT)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    // Zoom 的整行底线由根标题栏统一绘制。
+                    .when(!group.is_zoomed(), |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .w_full()
+                                .h(px(1.))
+                                .bg(border),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .size_full()
+                            .child(
+                                h_flex()
+                                    .id("terminal-tab-strip")
+                                    .w(TAB_WIDTH * visible.len() as f32)
+                                    .max_w_full()
+                                    .h_full()
+                                    .overflow_x_scroll()
+                                    .track_scroll(&self.state.scroll)
+                                    .children(tabs),
+                            )
+                            .child(
+                                div()
+                                    .id("terminal-title-drag-area")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .when(group.is_zoomed(), |this| {
+                                        this.window_control_area(WindowControlArea::Drag)
+                                    }),
+                            ),
+                    ),
+            )
+            .when_some(toolbar, |this, buttons| {
+                this.child(
+                    h_flex()
+                        .id("terminal-toolbar")
+                        .occlude()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .track_focus(&group_focus)
+                        .flex_none()
+                        .h_full()
+                        .px_1()
+                        .gap_1()
+                        .border_l_1()
+                        .border_color(border)
+                        .children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false)))
+                        .child(
+                            Button::new("zoom-terminal-group")
+                                .xsmall()
+                                .ghost()
+                                .tab_stop(false)
+                                .icon(if group.is_zoomed() { IconName::Minimize } else { IconName::Maximize })
+                                .tooltip(if group.is_zoomed() { "还原终端布局" } else { "放大终端组" })
+                                .accessibility_label(if group.is_zoomed() { "还原终端布局" } else { "放大终端组" })
+                                .on_click(move |_, window, cx| zoom_group.toggle_zoom(window, cx)),
+                        ),
+                )
+            });
+        bar.into_any_element()
+    }
+
+
     fn render_tab(
         &self,
         group: &TabGroupContext,
@@ -280,6 +367,7 @@ impl TerminalTabBar {
         let drag_border = cx.theme().drag_border;
 
         let panel = &group.panels()[ix];
+        let focus_handle = panel.focus_handle(cx);
         let selected = ix == active_ix;
         let hovered = self.state.hovered.get() == Some(ix);
         // 关闭按钮：选中常驻，否则悬停。
@@ -295,7 +383,7 @@ impl TerminalTabBar {
         let draw_left = ix > 0 && ix <= active_ix;
         let draw_right = ix >= active_ix;
 
-        let drag = if group.is_draggable() {
+        let drag = if group.is_draggable() || group.is_zoomed() {
             group.drag_panel(ix, cx)
         } else {
             None
@@ -330,6 +418,8 @@ impl TerminalTabBar {
 
         h_flex()
             .id(("terminal-tab", tab_id))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .flex_none()
             .w(TAB_WIDTH)
             .h_full()
@@ -350,7 +440,11 @@ impl TerminalTabBar {
             })
             .on_click({
                 let group = group.clone();
-                move |_, window, cx| group.select_tab(ix, window, cx)
+                move |_, window, cx| {
+                    group.select_tab(ix, window, cx);
+                    // 已选中的标签仍需把焦点从其他停靠组移回来。
+                    window.focus(&focus_handle, cx);
+                }
             })
             .on_mouse_up(MouseButton::Middle, {
                 let root = self.state.root.clone();
@@ -371,11 +465,13 @@ impl TerminalTabBar {
                     }
                 })
             })
-            .when(group.is_droppable(), {
+            .when(group.is_droppable() || group.is_zoomed(), {
                 let on_drop_panel = {
                     let group = group.clone();
                     move |drag: &DragPanel, window: &mut Window, cx: &mut App| {
-                        group.drop_panel(drag.clone(), Some(ix), true, window, cx)
+                        if !group.is_zoomed() || drag.source() == group.node() {
+                            group.drop_panel(drag.clone(), Some(ix), true, window, cx);
+                        }
                     }
                 };
                 move |this| {

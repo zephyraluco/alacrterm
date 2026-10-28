@@ -24,6 +24,8 @@ pub(super) struct Response {
     data: Vec<Candidate>,
 }
 pub(super) enum Acceptance {
+    /// Pass the original Enter event to the terminal.
+    Submit,
     None,
     Refresh,
     Insert { bytes: String, retrigger: bool },
@@ -170,7 +172,13 @@ impl CompletionController {
     pub fn accept(&mut self, content: Option<&terminal::Content>) -> Acceptance {
         self.accept_input(content.and_then(|content| self.tracking.current(content)))
     }
+    pub fn accept_enter(&mut self, content: Option<&terminal::Content>) -> Acceptance {
+        self.accept_with_input(content.and_then(|content| self.tracking.current(content)), true)
+    }
     fn accept_input(&mut self, input: Option<(String, usize)>) -> Acceptance {
+        self.accept_with_input(input, false)
+    }
+    fn accept_with_input(&mut self, input: Option<(String, usize)>, enter: bool) -> Acceptance {
         self.cancel();
         if let Some((text, cursor)) = input {
             // ZLE can paint an autosuggestion after the logical cursor. At the
@@ -184,6 +192,9 @@ impl CompletionController {
                 self.model.synchronize(text, cursor);
                 return Acceptance::Refresh;
             }
+        }
+        if enter && self.model.default_candidate_matches_input() {
+            return Acceptance::Submit;
         }
         let retrigger = self
             .model
@@ -316,6 +327,68 @@ mod tests {
         assert!(controller.apply(response));
         controller.popup_visible = true;
         controller
+    }
+
+    fn exact_command_controller() -> CompletionController {
+        let mut controller = controller();
+        controller.model.synchronize("ls".into(), 2);
+        controller.model.refresh(false);
+        controller.model.settings.insert_trailing_space = true;
+        controller.model.candidates = vec![Candidate::new(
+            "ls".into(), 2, crate::completion::Kind::Command,
+            crate::completion::Source::Shell, 1,
+        )];
+        controller.popup_visible = true;
+        controller
+    }
+
+    #[test]
+    fn enter_submits_an_exact_default_command_without_editing() {
+        let mut controller = exact_command_controller();
+        assert!(matches!(controller.accept_enter(None), Acceptance::Submit));
+        assert_eq!(controller.model.text, "ls");
+        assert!(!controller.popup_visible);
+        controller.submit();
+        assert!(!controller.model.is_editing());
+    }
+
+    #[test]
+    fn tab_still_completes_instead_of_submitting_an_exact_command() {
+        let mut controller = exact_command_controller();
+        assert!(matches!(controller.accept(None), Acceptance::Insert { ref bytes, .. } if bytes == " "));
+        assert!(controller.model.is_editing());
+    }
+
+    #[test]
+    fn enter_completes_partial_or_manually_selected_commands_without_submitting() {
+        let mut controller = exact_command_controller();
+        controller.model.candidates[0].insert_text = "lsblk".into();
+        // Display labels are not the text sent to the shell.
+        assert!(matches!(controller.accept_enter(None), Acceptance::Insert { ref bytes, .. } if bytes == "blk "));
+        let mut controller = exact_command_controller();
+        controller.model.candidates.push(controller.model.candidates[0].clone());
+        controller.model.selected = 1;
+        assert!(matches!(controller.accept_enter(None), Acceptance::Insert { ref bytes, .. } if bytes == " "));
+    }
+
+    #[test]
+    fn enter_does_not_submit_when_completion_would_move_the_cursor() {
+        let mut controller = exact_command_controller();
+        controller.model.candidates[0].cursor_back = 1;
+        assert!(matches!(controller.accept_enter(None), Acceptance::Insert { .. }));
+        let mut controller = exact_command_controller();
+        controller.model.cursor = 1;
+        assert!(matches!(controller.accept_enter(None), Acceptance::Insert { .. }));
+    }
+
+    #[test]
+    fn enter_rechecks_echoed_input_and_rejects_stale_matches() {
+        let mut controller = exact_command_controller();
+        assert!(matches!(controller.accept_with_input(Some(("ls --help".into(), 9)), true), Acceptance::Refresh));
+        assert_eq!(controller.model.text, "ls --help");
+        let mut controller = exact_command_controller();
+        controller.model.input("x");
+        assert!(matches!(controller.accept_enter(None), Acceptance::None));
     }
 
     #[test]

@@ -739,8 +739,7 @@ impl BasePanel for TabPane {
     }
 
     fn zoomable(&self, _: &App) -> bool {
-        // 页内分屏之后，dock 级的「撑满标签组」已经没有意义。
-        false
+        true
     }
 
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, _: &mut Context<Self>) {

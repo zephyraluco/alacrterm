@@ -1,6 +1,4 @@
-//! 程序入口与根视图 [`AppRoot`]：标题栏 + 主体（最左整列 | 中间终端区）。
-//! 状态栏**每列一条**（见 [`status_bar`]）：中间列的在终端区下方（没有终端就不摆），
-//! 最左整列里的那条归侧边栏面板（`components::Sidebar::status_bar`，折叠时不摆）。
+//! 程序入口与根视图 [`AppRoot`]：标题栏、侧边栏与终端主体、全局底部状态栏。
 //! 外壳分模块（`components` / `sidebar_panel` / `terminal_panel` 等），终端核心在 `crates/terminal`。
 
 mod actions;
@@ -26,7 +24,6 @@ mod welcome;
 mod wayx_control;
 mod x11;
 
-use components::ACTIVITY_BAR_WIDTH;
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Styled as _,
@@ -48,8 +45,8 @@ use gpui_kit::{
 };
 use sidebar_panel::files::FilesState;
 use sidebar_panel::sessions::SessionsState;
-use sidebar_panel::Sidebar;
-use tab_bar::TerminalDockSkin;
+use sidebar_panel::{Sidebar, SidebarView};
+use tab_bar::{TerminalDockSkin, TerminalTabBar};
 use terminal_panel::TabPane;
 use transfer_manager::{TransferDone, TransferManager};
 
@@ -176,6 +173,9 @@ struct AppRoot {
     active: usize,
     /// 侧边栏。
     sidebar: Entity<Sidebar>,
+    _sidebar_sub: Subscription,
+    right_sidebar: Entity<Sidebar>,
+    _right_sidebar_sub: Subscription,
     /// 「会话」视图状态。
     sessions: Entity<SessionsState>,
     /// 「文件管理器」视图状态。
@@ -186,6 +186,8 @@ struct AppRoot {
     close_when_transfers_finish: bool,
     /// 终端会话的 dock。
     dock: Entity<DockArea>,
+    _dock_sub: Subscription,
+    zoom_tab_bar: TerminalTabBar,
     /// dock 布局变化订阅。
     dock_layout_sub: Option<Subscription>,
     /// 下一个新建会话的标签组（用一次即清空）。
@@ -342,6 +344,7 @@ impl AppRoot {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock = Self::build_dock(window, cx);
+        let dock_sub = cx.observe(&dock, |_, _, cx| cx.notify());
         let palette_watch = cx.observe_global::<config::ColorSchemeRegistry>(|root, cx| {
             if let Some(render) = config::refresh_color_scheme(cx) {
                 root.apply_render_settings(render, cx);
@@ -375,7 +378,10 @@ impl AppRoot {
             ));
         });
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
-        let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
+        let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Sessions, cx));
+        let right_sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Files, cx));
+        let right_sidebar_sub = cx.observe(&right_sidebar, |_, _, cx| cx.notify());
+        let sidebar_sub = cx.observe(&sidebar, |_, _, cx| cx.notify());
 
         platform::start_wayx();
         let wayx_watch = cx.spawn(async move |root, cx| {
@@ -391,6 +397,9 @@ impl AppRoot {
             tabs: Vec::new(),
             active: 0,
             sidebar,
+            _sidebar_sub: sidebar_sub,
+            right_sidebar,
+            _right_sidebar_sub: right_sidebar_sub,
             sessions,
             files,
             _transfers: transfers,
@@ -398,6 +407,8 @@ impl AppRoot {
             _transfer_completion_sub: transfer_completion_sub,
             close_when_transfers_finish: false,
             dock,
+            _dock_sub: dock_sub,
+            zoom_tab_bar: TerminalTabBar::new(cx.weak_entity()),
             dock_layout_sub: None,
             pending_session_group: None,
             settings_window: None,
@@ -557,13 +568,39 @@ impl AppRoot {
             // 远端终端在哪儿，文件管理器就在哪儿（用户手动跳走、shell 没动时不动）。
             files.follow_terminal(snapshot.directory.as_deref(), cx);
         });
-        self.sidebar
+        self.right_sidebar
             .update(cx, |sidebar, cx| sidebar.set_files_enabled(snapshot.remote, cx));
     }
 }
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(node) = self.dock.read(cx).zoomed_group() {
+            let group = self.tabs.iter()
+                .filter_map(|tab| tab.read(cx).group())
+                .filter_map(|group| group.upgrade())
+                .find(|group| group.read(cx).node() == node);
+            if let Some(group) = group {
+                let context = group.read(cx).context(cx);
+                let tabs = self.zoom_tab_bar.render_title_bar(&context, window, cx);
+                return v_flex()
+                    .id("app-root-zoomed")
+                    .size_full()
+                    .bg(cx.theme().background)
+                    .child(
+                        TitleBar::new()
+                            .bg(cx.theme().tab_bar)
+                            .when(!cfg!(target_os = "macos"), |bar| bar.pl_0())
+                            .child(tabs),
+                    )
+                    .child(
+                        div().flex_1().min_h_0().w_full().overflow_hidden()
+                            .child(self.dock.clone()),
+                    )
+                    .into_any_element();
+            }
+        }
+
         // 主体：侧边栏 | 中间列。
         //
         // ⚠️ 这里**不做**业务同步（当前标签页 / 窗口标题 / 文件管理器 / 侧栏可用性都由
@@ -573,9 +610,10 @@ impl Render for AppRoot {
         // 侧边栏宽度每帧钉回用户拖拽值。
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
+        self.right_sidebar
+            .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
 
-        // 中间列：终端区（dock 或欢迎页）+ 它下面的状态栏。
-        // 状态栏只跟着终端走：没有标签页（欢迎页）时整条不摆。
+        // 中间列：终端区或欢迎页。
         let has_tabs = !self.tabs.is_empty();
         let terminal_area = if has_tabs {
             self.dock.clone().into_any_element()
@@ -594,11 +632,10 @@ impl Render for AppRoot {
                     .overflow_hidden()
                     .child(terminal_area),
             )
-            .when(has_tabs, |this| this.child(status_bar::empty_status_bar()))
             .into_any_element();
 
         // 分栏组：最左整列 | 中间列。
-        let visible = self.sidebar.read(cx).visible();
+        let visible = self.sidebar.read(cx).panel_visible(cx);
         let width = self.sidebar.read(cx).width();
         let resize = self.sidebar.read(cx).resize_state().clone();
         let sidebar_state = self.sidebar.downgrade();
@@ -615,30 +652,45 @@ impl Render for AppRoot {
                 })
                 .child(
                     resizable_panel()
-                        .size(ACTIVITY_BAR_WIDTH + width)
-                        // 下界是图标栏，上界不限。
-                        .size_range(ACTIVITY_BAR_WIDTH..Pixels::MAX)
+                        .size(width)
+                        // 可以拖到左沿以折叠面板。
+                        .size_range(px(0.)..Pixels::MAX)
                         .flex_none()
                         .child(panel),
                 )
                 .child(resizable_panel().child(mid_column))
                 .into_any_element()
         } else {
-            // 折叠态：中间列铺满剩余宽度。
-            h_flex()
-                .h_full()
-                .w_full()
-                .child(panel)
+            mid_column
+        };
+
+        let right = self.right_sidebar.read(cx);
+        let right_visible = right.panel_visible(cx);
+        let right_width = right.width();
+        let right_resize = right.resize_state().clone();
+        let right_state = self.right_sidebar.downgrade();
+        let body = if right_visible {
+            h_resizable("right-sidebar-split")
+                .with_state(&right_resize)
+                .on_resize(move |state, _, cx| {
+                    if let Some(width) = state.read(cx).sizes().get(1).copied() {
+                        let _ = right_state.update(cx, |sidebar, cx| sidebar.set_panel_width(width, cx));
+                    }
+                })
+                .child(resizable_panel().child(body))
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .overflow_hidden()
-                        .child(mid_column),
+                    resizable_panel().size(right_width)
+                        .size_range(px(0.)..Pixels::MAX).flex_none()
+                        .child(self.right_sidebar.clone()),
                 )
                 .into_any_element()
+        } else {
+            body
         };
+
+        let status_bar = self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.render_status_bar(&self.right_sidebar, cx)
+        });
 
         v_flex()
             .id("app-root")
@@ -661,7 +713,23 @@ impl Render for AppRoot {
                                 .text_color(cx.theme().secondary_foreground)
                                 .child("Alacrterm"),
                         )
-                        .child(self.wayx_button(cx)),
+                        .child(self.wayx_button(cx))
+                        .child(
+                            div()
+                                .id("settings-control-area")
+                                .occlude()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    Button::new("settings-control")
+                                        .ghost()
+                                        .icon(assets::IconName::Settings)
+                                        .tooltip("设置")
+                                        .accessibility_label("设置")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(Box::new(actions::OpenSettings), cx);
+                                        }),
+                                ),
+                        ),
                 ),
             )
             .child(
@@ -672,7 +740,8 @@ impl Render for AppRoot {
                     .overflow_hidden()
                     .child(body),
             )
-            // 状态栏不在这里：每列各有一条（中间列的在终端区下方，侧边栏的在面板下沿）。
+            .child(status_bar)
             // 覆盖层由 gpui-kit 的 `Root` 渲染。
+            .into_any_element()
     }
 }
