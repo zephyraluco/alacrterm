@@ -22,7 +22,7 @@ pub use suggestions::Suggestions as SuggestionModel;
 pub use settings::SuggestionSettings;
 pub mod terminal_element;
 
-use std::{ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
+use std::{cell::Cell, rc::Rc, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
     App, AppContext as _, AsyncApp, Entity, FocusHandle, InteractiveElement, IntoElement,
@@ -74,6 +74,7 @@ const TERMINAL_KEY_CONTEXT: &str = "Terminal";
 /// 终端视图。
 pub struct TerminalView {
     focus_handle: FocusHandle,
+    drag_button: Rc<Cell<Option<MouseButton>>>,
     terminal: Option<Entity<Terminal>>,
     subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -210,6 +211,7 @@ impl TerminalView {
 
         Self {
             focus_handle,
+            drag_button: Rc::new(Cell::new(None)),
             terminal: None,
             subscription: None,
             _subscriptions: vec![focus_in, focus_out],
