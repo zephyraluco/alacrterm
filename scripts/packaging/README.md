@@ -1,6 +1,6 @@
 # CI and installers
 
-- `test`: every branch push and pull request; locked application and terminal-view tests. The terminal core's full test suite is not included (existing path/hyperlink failures).
+- `test`: every branch push and pull request. Rustfmt and strict Clippy run first; Linux, Windows, and macOS then run the existing locked application and terminal-view tests in parallel.
 - `package`: every branch push and pull request; Linux x64 deb (Ubuntu 24.04 or compatible), Windows x64 per-user Inno Setup installer, and macOS ARM64 dmg. Installer artifacts and SHA-256 files are retained for seven days.
 - `release`: every tag push; calls the same packaging workflow at the tagged commit, then publishes its installers and checksums to GitHub Releases with generated release notes. Tags do not trigger the standalone test workflow.
 

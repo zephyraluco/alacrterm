@@ -6,13 +6,33 @@ on:
 permissions:
   contents: read
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2.9.3
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libvulkan-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libasound2-dev
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+  test:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, windows-2022, macos-14]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.3
       - name: Install native dependencies
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake clang libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libvulkan-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libasound2-dev
       - name: Test application and terminal UI
         run: cargo test --locked -p alacrterm -p terminal_view
