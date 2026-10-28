@@ -17,7 +17,8 @@ def run(*args):
 
 def main():
     os.chdir(ROOT)
-    version = tomllib.loads((ROOT / 'crates/alacrterm/Cargo.toml').read_text())['package']['version']
+    with (ROOT / 'crates/alacrterm/Cargo.toml').open('rb') as manifest:
+        version = tomllib.load(manifest)['package']['version']
     system = platform.system()
     key = {'Linux': 'linux-x64', 'Darwin': 'macos-arm64', 'Windows': 'windows-x64'}[system]
     expected = 'arm64' if system == 'Darwin' else 'amd64'
@@ -45,13 +46,13 @@ def main():
     if system == 'Linux':
         control = work / 'DEBIAN'
         control.mkdir()
-        (control / 'control').write_text(f'Package: alacrterm\nVersion: {version}\nArchitecture: amd64\nMaintainer: Alacrterm contributors\nDepends: libfontconfig1, libfreetype6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libegl1, libvulkan1, libxcb1, libxcb-shape0, libxcb-xfixes0, libasound2t64, libssl3t64\nDescription: Terminal and SSH client\n')
+        (control / 'control').write_text(f'Package: alacrterm\nVersion: {version}\nArchitecture: amd64\nMaintainer: Alacrterm contributors\nDepends: libfontconfig1, libfreetype6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libegl1, libvulkan1, libxcb1, libxcb-shape0, libxcb-xfixes0, libasound2t64, libssl3t64\nDescription: Terminal and SSH client\n', encoding='utf-8')
         launch = work / 'usr/bin'
         launch.mkdir(parents=True)
         (launch / 'alacrterm').symlink_to('../lib/alacrterm/alacrterm')
         desktop = work / 'usr/share/applications'
         desktop.mkdir(parents=True)
-        (desktop / 'alacrterm.desktop').write_text('[Desktop Entry]\nType=Application\nName=Alacrterm\nExec=alacrterm\nTerminal=false\nCategories=System;TerminalEmulator;\n')
+        (desktop / 'alacrterm.desktop').write_text('[Desktop Entry]\nType=Application\nName=Alacrterm\nExec=alacrterm\nTerminal=false\nCategories=System;TerminalEmulator;\n', encoding='utf-8')
         for directory in [work, *[path for path in work.rglob('*') if path.is_dir()]]:
             directory.chmod(0o755)
         run('dpkg-deb', '--root-owner-group', '--build', work, dist / f'{name}.deb')
@@ -70,7 +71,7 @@ def main():
     for file in dist.iterdir():
         if file.suffix in {'.deb', '.dmg', '.exe'}:
             digest = hashlib.file_digest(file.open('rb'), 'sha256').hexdigest()
-            file.with_name(file.name + '.sha256').write_text(f'{digest}  {file.name}\n')
+            file.with_name(file.name + '.sha256').write_text(f'{digest}  {file.name}\n', encoding='utf-8')
 
 
 if __name__ == '__main__':

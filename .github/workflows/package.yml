@@ -20,9 +20,9 @@ jobs:
             platform: macos-arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake clang libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libvulkan-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libasound2-dev
@@ -30,7 +30,7 @@ jobs:
         run: cargo build --release --locked -p alacrterm
       - name: Create installer
         run: python packaging/package.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: installer-${{ matrix.platform }}
           path: dist/*
