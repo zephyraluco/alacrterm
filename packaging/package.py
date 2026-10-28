@@ -41,6 +41,7 @@ def main():
     payload.mkdir(parents=True)
     binary = 'alacrterm.exe' if system == 'Windows' else 'alacrterm'
     shutil.copy2(ROOT / 'target/release' / binary, payload / binary)
+    shutil.copytree(ROOT / 'themes', payload / 'themes')
     runtime = {'Linux': 'linux/wayx-linux-x64', 'Darwin': 'macos/wayx-macos-arm64', 'Windows': 'windows/wayx-windows-x64'}[system]
     shutil.copytree(ROOT / 'platform' / runtime, payload / 'platform' / runtime)
     if system == 'Linux':
