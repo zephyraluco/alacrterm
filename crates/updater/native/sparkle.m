@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <Sparkle/Sparkle.h>
 #include <stdbool.h>
+#include "sparkle_state.h"
 #import <dispatch/dispatch.h>
 
 static SPUStandardUpdaterController *controller;
@@ -23,7 +24,7 @@ static void updateStatus(NSString *text, int state) {
     return NO;
 }
 - (BOOL)updater:(SPUUpdater *)updater mayPerformUpdateCheck:(SPUUpdateCheck)check error:(NSError *__autoreleasing *)error {
-    updateStatus(@"正在检查更新…", 1);
+    if (pendingInstallation == nil) { updateStatus(@"正在检查更新…", 1); }
     return YES;
 }
 - (void)updater:(SPUUpdater *)updater didFindValidUpdate:(SUAppcastItem *)item {
@@ -44,14 +45,42 @@ static void updateStatus(NSString *text, int state) {
     updateStatus(@"更新已就绪，等待确认关闭终端与传输任务", 4);
     return YES;
 }
+- (void)updater:(SPUUpdater *)updater userDidMakeChoice:(SPUUserUpdateChoice)choice forUpdate:(SUAppcastItem *)item state:(SPUUserUpdateState *)state {
+    if (choice == SPUUserUpdateChoiceInstall) { return; }
+    int next = alacrterm_choice_state(choice == SPUUserUpdateChoiceSkip, state.stage != SPUUserUpdateStageNotDownloaded);
+    if (next == AlacrtermDeferred) {
+        updateStatus(@"更新已保留，将稍后安装", next);
+        return;
+    }
+    pendingInstallation = nil;
+    restartRequested = false;
+    updateStatus(choice == SPUUserUpdateChoiceSkip ? @"已跳过此版本" : @"已暂缓此次更新", 0);
+}
 - (void)updater:(SPUUpdater *)updater didAbortWithError:(NSError *)error {
     pendingInstallation = nil;
     restartRequested = false;
-    updateStatus(error.localizedDescription, 5);
+    if (error.code == SUNoUpdateError) {
+        updateStatus(@"已是最新版本", 0);
+    } else if (error.code == SUInstallationCanceledError) {
+        updateStatus(@"安装已取消", 0);
+    } else {
+        updateStatus(error.localizedDescription, 5);
+    }
+}
+- (void)updater:(SPUUpdater *)updater didFinishUpdateCycleForUpdateCheck:(SPUUpdateCheck)check error:(NSError *)error {
+    if (error != nil) {
+        [self updater:updater didAbortWithError:error];
+    } else {
+        int next = alacrterm_cycle_end_state(updateState, pendingInstallation != nil);
+        if (next != updateState) { updateStatus(@"更新检查已结束", next); }
+    }
 }
 - (void)userDidCancelDownload:(SPUUpdater *)updater {
+    pendingInstallation = nil;
+    restartRequested = false;
     updateStatus(@"下载已取消", 0);
 }
+
 @end
 static AlacrtermUpdateDelegate *delegate;
 

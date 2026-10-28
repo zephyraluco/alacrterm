@@ -2,6 +2,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(sparkle)");
     println!("cargo:rerun-if-env-changed=SPARKLE_FRAMEWORK_DIR");
     println!("cargo:rerun-if-changed=native/sparkle.m");
+    println!("cargo:rerun-if-changed=native/sparkle_state.h");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
