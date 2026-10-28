@@ -1,6 +1,8 @@
 //! Signed release metadata and downloads, independent of application windows.
 pub mod download;
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod manifest;
 pub mod windows;
 

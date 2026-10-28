@@ -12,7 +12,9 @@ use std::{
     },
     time::Duration,
 };
-use updater::manifest::{Offer, Release};
+#[cfg(not(target_os = "macos"))]
+use updater::manifest::Offer;
+use updater::manifest::Release;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -27,6 +29,7 @@ pub(crate) enum Phase {
 }
 
 enum Event {
+    #[cfg(not(target_os = "macos"))]
     Checked(Result<(Offer, Vec<u8>), String>),
     Progress(u8),
     Downloaded(Result<PathBuf, String>),
@@ -66,7 +69,7 @@ pub(crate) fn install(cx: &mut App) {
             loop {
                 if this
                     .update(cx, |this, cx| {
-                        if this.automatic {
+                        if this.automatic && !cfg!(target_os = "macos") {
                             this.check(cx);
                         }
                     })
@@ -79,6 +82,7 @@ pub(crate) fn install(cx: &mut App) {
                     .await;
             }
         });
+        #[cfg(not(target_os = "macos"))]
         let enabled = !cfg!(debug_assertions)
             && updater::platform_key().is_some()
             && !updater::trusted_keys().is_empty();
@@ -105,6 +109,21 @@ pub(crate) fn install(cx: &mut App) {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        let enabled = if cfg!(debug_assertions) {
+            false
+        } else {
+            match updater::macos::start(automatic) {
+                Ok(()) => {
+                    notice.clear();
+                    true
+                }
+                Err(error) => {
+                    notice = error.to_string();
+                    false
+                }
+            }
+        };
         Updates {
             phase: if enabled {
                 Phase::Idle
@@ -132,6 +151,10 @@ impl Updates {
     }
 
     pub(crate) fn status(&self) -> String {
+        #[cfg(target_os = "macos")]
+        if !matches!(self.phase, Phase::Disabled) {
+            return updater::macos::status();
+        }
         match &self.phase {
             Phase::Disabled => self.notice.clone(),
             Phase::Idle => "尚未检查更新".into(),
@@ -153,13 +176,31 @@ impl Updates {
             "automatic".into(),
             serde_json::json!(enabled),
         )])) {
-            Ok(()) => self.automatic = enabled,
+            Ok(()) => {
+                self.automatic = enabled;
+                #[cfg(target_os = "macos")]
+                updater::macos::set_automatic(enabled);
+            }
             Err(error) => self.notice = format!("保存更新设置失败：{error:#}"),
         }
         cx.notify();
     }
 
     pub(crate) fn check(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            if !matches!(self.phase, Phase::Disabled) {
+                updater::macos::check();
+                cx.notify();
+            }
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        self.check_feed(cx);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn check_feed(&mut self, cx: &mut Context<Self>) {
         if self.busy() || matches!(self.phase, Phase::Disabled | Phase::Ready) {
             return;
         }
@@ -268,6 +309,7 @@ impl Updates {
         loop {
             let event = self.events.as_ref().map(|events| events.try_recv());
             match event {
+                #[cfg(not(target_os = "macos"))]
                 Some(Ok(Event::Checked(result))) => {
                     self.events = None;
                     match result {
@@ -401,4 +443,73 @@ impl gpui::Render for Updates {
             )
         })
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn attach_sparkle_guard(
+    root: gpui::WeakEntity<crate::AppRoot>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) {
+    cx.spawn_in(window, async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let result = root.update_in(cx, |root, window, cx| {
+                let update = model(cx);
+                if updater::macos::changed() {
+                    update.update(cx, |update, cx| {
+                        update.phase = match updater::macos::state() {
+                            1 => Phase::Checking,
+                            2..=4 => Phase::Available,
+                            5 => Phase::Failed(updater::macos::status()),
+                            _ => Phase::Idle,
+                        };
+                        cx.notify();
+                    });
+                }
+                if !updater::macos::take_restart_request() {
+                    return;
+                }
+                use gpui_kit::component::{WindowExt as _, notification::Notification};
+                if root._transfers.read(cx).active_count() > 0
+                    || crate::AppRoot::preview_has_pending_changes(root.preview_window, cx)
+                {
+                    window.push_notification(
+                        Notification::warning("请先完成传输并保存预览改动，再从更新页面继续重启"),
+                        cx,
+                    );
+                    return;
+                }
+                let prompt = window.prompt(
+                    gpui::PromptLevel::Warning,
+                    "重启并更新",
+                    Some("更新将关闭所有终端连接和 X11 会话，本地终端进程无法恢复。是否继续？"),
+                    &["重启更新", "稍后"],
+                    cx,
+                );
+                cx.spawn(async move |this, cx| {
+                    if prompt.await.ok() != Some(0) {
+                        return;
+                    }
+                    if let Err(error) = this.update(cx, |root, cx| {
+                        if root._transfers.read(cx).active_count() == 0
+                            && !crate::AppRoot::preview_has_pending_changes(root.preview_window, cx)
+                        {
+                            platform::shutdown_wayx();
+                            updater::macos::allow_restart();
+                        }
+                    }) {
+                        log::warn!("更新重启窗口已关闭：{error}");
+                    }
+                })
+                .detach();
+            });
+            if result.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
 }

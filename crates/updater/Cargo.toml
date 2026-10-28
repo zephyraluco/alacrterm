@@ -21,3 +21,6 @@ sysinfo.workspace = true
 [dev-dependencies]
 minisign = "0.7"
 tempfile = "3"
+
+[build-dependencies]
+cc = "1"

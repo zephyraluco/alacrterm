@@ -163,6 +163,8 @@ fn main() {
                 },
                 |window, cx| {
                     let root = cx.new(|cx| AppRoot::new(window, cx));
+                    #[cfg(target_os = "macos")]
+                    updates::attach_sparkle_guard(root.downgrade(), window, cx);
                     root.update(cx, |root, cx| root.sync_active_context(window, cx));
                     let close_guard = root.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {

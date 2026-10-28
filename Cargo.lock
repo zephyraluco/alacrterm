@@ -8356,6 +8356,7 @@ name = "updater"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "dirs 7.0.0",
  "minisign",
  "minisign-verify",

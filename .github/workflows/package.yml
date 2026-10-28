@@ -26,6 +26,11 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake clang libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libvulkan-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libasound2-dev
+      - name: Prepare Sparkle
+        if: runner.os == 'macOS'
+        run: |
+          python3 scripts/packaging/fetch_sparkle.py
+          echo "SPARKLE_FRAMEWORK_DIR=$GITHUB_WORKSPACE/target/sparkle" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --locked -p alacrterm -p alacrterm-update-helper
       - name: Create installer
