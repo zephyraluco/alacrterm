@@ -66,7 +66,7 @@ impl PathCompletion {
     }
 }
 
-/// 远端路径统一使用 POSIX 语义，不使用宿主操作系统的 PathBuf。
+/// 只展开路径前缀；`.` / `..` 必须交给远端解析，避免改变符号链接后的路径语义。
 pub(super) fn resolve_path(text: &str, root: Option<&str>, home: Option<&str>) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -81,17 +81,7 @@ pub(super) fn resolve_path(text: &str, root: Option<&str>, home: Option<&str>) -
     } else {
         join_dir(root.or(home)?, text)
     };
-    let mut parts = Vec::new();
-    for part in absolute.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            _ => parts.push(part),
-        }
-    }
-    Some(format!("/{}", parts.join("/")))
+    Some(absolute)
 }
 
 fn query_parts(text: &str, root: Option<&str>, home: Option<&str>) -> Option<(String, String)> {
@@ -444,7 +434,7 @@ mod tests {
     fn resolves_absolute_home_and_relative_posix_paths() {
         assert_eq!(
             resolve_path("/usr/../var/", None, None).as_deref(),
-            Some("/var")
+            Some("/usr/../var/")
         );
         assert_eq!(
             resolve_path("~/code", None, Some("/home/me")).as_deref(),
@@ -452,10 +442,56 @@ mod tests {
         );
         assert_eq!(
             resolve_path("../logs", Some("/srv/app"), None).as_deref(),
-            Some("/srv/logs")
+            Some("/srv/app/../logs")
         );
         assert_eq!(resolve_path("~", None, None), None);
         assert_eq!(resolve_path("", Some("/tmp"), None), None);
+    }
+
+    #[test]
+    fn preserves_symlink_parent_components_for_navigation_and_completion() {
+        assert_eq!(
+            resolve_path("/home/me/link/..", None, None).as_deref(),
+            Some("/home/me/link/..")
+        );
+        assert_eq!(
+            resolve_path("~/link/..", None, Some("/home/me")).as_deref(),
+            Some("/home/me/link/..")
+        );
+        assert_eq!(
+            resolve_path("link/../logs", Some("/home/me"), None).as_deref(),
+            Some("/home/me/link/../logs")
+        );
+        assert_eq!(
+            query_parts("/home/me/link/../proj", None, None),
+            Some(("/home/me/link/..".into(), "proj".into()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_after_symlink_resolves_to_the_target_parent() {
+        let dir = tempfile::tempdir().expect("temporary filesystem");
+        let home = dir.path().join("home/me");
+        let server = dir.path().join("srv");
+        let project = server.join("project");
+        std::fs::create_dir_all(&home).expect("home directory");
+        std::fs::create_dir_all(&project).expect("target directory");
+        let expected = std::fs::canonicalize(&server).expect("canonical target parent");
+        std::os::unix::fs::symlink(&project, home.join("link")).expect("remote symlink fixture");
+        let input = format!("{}/link/..", home.display());
+        let path = resolve_path(&input, None, None).expect("absolute path");
+        assert_eq!(
+            std::fs::canonicalize(path).expect("server resolves path"),
+            expected
+        );
+        let (parent, prefix) =
+            query_parts(&format!("{input}/proj"), None, None).expect("completion path");
+        assert_eq!(
+            std::fs::canonicalize(parent).expect("server resolves query"),
+            expected
+        );
+        assert_eq!(prefix, "proj");
     }
 
     #[test]
@@ -466,15 +502,15 @@ mod tests {
         );
         assert_eq!(
             query_parts("/usr/", None, None),
-            Some(("/usr".into(), "".into()))
+            Some(("/usr/".into(), "".into()))
         );
         assert_eq!(
             query_parts("./", Some("/srv"), None),
-            Some(("/srv".into(), "".into()))
+            Some(("/srv/./".into(), "".into()))
         );
         assert_eq!(
             query_parts("~/", None, Some("/home/me")),
-            Some(("/home/me".into(), "".into()))
+            Some(("/home/me/".into(), "".into()))
         );
     }
 
