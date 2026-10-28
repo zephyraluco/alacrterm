@@ -75,7 +75,6 @@ use gpui_kit::component::{
         Replace, Rope, RopeExt as _, Search, Undo,
     },
     notification::Notification,
-    status_bar::StatusBar,
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -89,7 +88,7 @@ use crate::actions::{
 use crate::assets::IconName;
 use crate::format;
 use crate::keymap::PREVIEW_CONTEXT;
-use crate::status_bar::STATUS_BAR_HEIGHT;
+use crate::status_bar::{STATUS_BAR_ITEM_HEIGHT, new_status_bar};
 /// 窗口初始尺寸(宽, 高)。
 const WINDOW_SIZE: (f32, f32) = (860., 620.);
 /// 窗口最小尺寸(宽, 高)。
@@ -1316,21 +1315,19 @@ impl PreviewWindow {
     /// 底部状态栏:左边是「主机:远端路径」(+ 大小 + 写回状态),右边是语言 / 编码 /
     /// 光标位置 / 行数字符数(照普通文本编辑器的摆法)。都是**当前标签**的。
     ///
-    /// 用 gpui-kit 的 [`StatusBar`] 画 —— 主窗口那条状态栏也是它(底色 / 上边框 / 字号都由组件
-    /// 给),两块看着才一样。⚠️ 右边那几个数是**每帧现读**编辑器状态的:光标一动编辑器就
+    /// 与主窗口共用状态栏布局和组件样式。右侧信息每帧从编辑器读取，光标移动时编辑器会
     /// `cx.notify()`(订阅见 [`PreviewWindow::show_text`]),所以它们跟着光标走。
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(tab) = self.active() else {
-            return StatusBar::new()
-                .h(STATUS_BAR_HEIGHT)
-                .w_full()
-                .flex_none()
+            return new_status_bar()
+                .child(div().h(STATUS_BAR_ITEM_HEIGHT))
                 .into_any_element();
         };
         // 主机名来自建会话时的参数(见 [`PreviewRequest::host`])——远端那份到底是哪台机器上的,
         // 只有这一处说。大小与写回状态都挨着它摆(⚠️ `StatusBar` 的 `left` / `right` 是两端
         // 各自一条,`child` 才是中间那段;放在中间那段的元素才有地方省略,所以整簇走 `child`)。
         let mut left = h_flex()
+            .min_h(STATUS_BAR_ITEM_HEIGHT)
             .flex_1()
             .min_w_0()
             .gap_2()
@@ -1368,11 +1365,7 @@ impl PreviewWindow {
             }
         }
 
-        let mut bar = StatusBar::new()
-            .h(STATUS_BAR_HEIGHT)
-            .w_full()
-            .flex_none()
-            .child(left);
+        let mut bar = new_status_bar().child(left);
 
         match &tab.body {
             Body::Text(text) => {

@@ -11,7 +11,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
     menu::{ContextMenuExt as _, PopupMenuItem},
-    status_bar::StatusBar,
 };
 
 use super::files::FilesState;
@@ -20,7 +19,7 @@ use crate::actions::{NewFolder, NewSession};
 use crate::assets::IconName;
 use crate::components::Sidebar as SidebarPanel;
 use crate::dialog::name::open_name_dialog;
-use crate::status_bar::STATUS_BAR_HEIGHT;
+use crate::status_bar::{STATUS_BAR_ITEM_HEIGHT, new_status_bar};
 
 /// 全窗口底栏：紧凑的视图切换按钮，侧边栏折叠时仍可操作。
 pub(super) fn status_bar(sidebar: &Sidebar, right: &Entity<Sidebar>, cx: &mut Context<Sidebar>) -> AnyElement {
@@ -29,11 +28,7 @@ pub(super) fn status_bar(sidebar: &Sidebar, right: &Entity<Sidebar>, cx: &mut Co
         .into_iter()
         .filter(|view| view.visible_with(files_enabled))
         .fold(
-            StatusBar::new()
-                .h(STATUS_BAR_HEIGHT)
-                .w_full()
-                .flex_none()
-                .py_0(),
+            new_status_bar(),
             |bar, view| {
                 let (state, selected) = match view {
                     SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
@@ -41,7 +36,9 @@ pub(super) fn status_bar(sidebar: &Sidebar, right: &Entity<Sidebar>, cx: &mut Co
                 };
                 let button = Button::new(view.id())
                     .ghost()
-                    .xsmall()
+                    .small()
+                    .h(STATUS_BAR_ITEM_HEIGHT)
+                    .w(STATUS_BAR_ITEM_HEIGHT)
                     .icon(view.icon())
                     .tooltip(view.tooltip())
                     .tooltip_placement(Placement::Top)
