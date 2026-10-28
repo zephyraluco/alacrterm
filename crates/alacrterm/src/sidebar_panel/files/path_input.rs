@@ -15,6 +15,7 @@ use gpui_kit::component::{
     button::Button,
     dialog::{DialogAction, DialogFooter},
     input::{Escape, IndentInline, Input, InputEvent, MoveDown, MoveUp},
+    list::ListItem,
     v_flex,
 };
 use terminal::RemoteEntry;
@@ -44,6 +45,18 @@ pub(super) struct PathCompletion {
 }
 
 impl PathCompletion {
+    fn set_candidates(&mut self, candidates: Vec<String>) {
+        self.selected = (!candidates.is_empty()).then_some(0);
+        self.candidates = candidates;
+    }
+
+    fn selected_path(&self) -> Option<&str> {
+        if !self.open || self.loading {
+            return None;
+        }
+        self.candidates.get(self.selected?).map(String::as_str)
+    }
+
     pub(super) fn dismiss(&mut self) {
         self.seq += 1;
         self.open = false;
@@ -132,13 +145,11 @@ impl FilesState {
                 self.nav_seq += 1;
                 self.query_candidates(cx);
             }
-            InputEvent::PressEnter { .. } => {
-                let text = self
-                    .completion
-                    .selected
-                    .and_then(|ix| self.completion.candidates.get(ix).cloned())
-                    .unwrap_or_else(|| self.path_input.read(cx).value().to_string());
-                self.set_path_text(text.clone(), window, cx);
+            InputEvent::PressEnter { secondary, shift } => {
+                if !secondary && !shift && self.path_command("enter", window, cx) {
+                    return;
+                }
+                let text = self.path_input.read(cx).value().to_string();
                 self.navigate_to(&text, cx);
             }
             InputEvent::Focus => self.completion.editing = true,
@@ -154,6 +165,14 @@ impl FilesState {
         self.completion.value = text.clone();
         self.path_input
             .update(cx, |input, cx| input.set_value(text, window, cx));
+    }
+
+    fn complete_path(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.completion.editing = true;
+        self.path_input_pending = false;
+        self.nav_seq += 1;
+        self.set_path_text(path, window, cx);
+        self.query_candidates(cx);
     }
 
     fn query_candidates(&mut self, cx: &mut Context<Self>) {
@@ -180,7 +199,8 @@ impl FilesState {
             .iter()
             .find(|(path, time, _)| *path == dir && time.elapsed() < CACHE_TTL)
         {
-            self.completion.candidates = directory_candidates(&dir, &prefix, entries);
+            let candidates = directory_candidates(&dir, &prefix, entries);
+            self.completion.set_candidates(candidates);
             cx.notify();
             return;
         }
@@ -205,7 +225,8 @@ impl FilesState {
                 this.completion.loading = false;
                 match result {
                     Ok(entries) => {
-                        this.completion.candidates = directory_candidates(&dir, &prefix, &entries);
+                        this.completion
+                            .set_candidates(directory_candidates(&dir, &prefix, &entries));
                         this.completion.cache.retain(|(path, _, _)| path != &dir);
                         this.completion
                             .cache
@@ -231,7 +252,7 @@ impl FilesState {
         }
         match key {
             "escape" => self.completion.dismiss(),
-            "up" | "down" if !self.completion.candidates.is_empty() => {
+            "up" | "down" if self.completion.selected_path().is_some() => {
                 let count = self.completion.candidates.len();
                 let ix = match (self.completion.selected, key) {
                     (Some(ix), "up") => (ix + count - 1) % count,
@@ -242,11 +263,11 @@ impl FilesState {
                 self.completion.selected = Some(ix);
                 self.completion.scroll.scroll_to_item(ix);
             }
-            "tab" if !self.completion.candidates.is_empty() => {
-                let ix = self.completion.selected.unwrap_or(0);
-                let path = self.completion.candidates[ix].clone();
-                self.set_path_text(path, window, cx);
-                self.query_candidates(cx);
+            "tab" | "enter" => {
+                let Some(path) = self.completion.selected_path().map(str::to_owned) else {
+                    return false;
+                };
+                self.complete_path(path, window, cx);
             }
             _ => return false,
         }
@@ -262,28 +283,20 @@ impl FilesState {
         cx: &App,
     ) -> Option<AnyElement> {
         self.fs.as_ref()?;
-        let popup = self.completion.open.then(|| {
+        let popup = (self.completion.open && !self.completion.loading).then(|| {
             let mut rows = Vec::new();
             for (ix, path) in self.completion.candidates.iter().enumerate() {
                 let selected = self.completion.selected == Some(ix);
                 let state = state.clone();
                 let path = path.clone();
                 rows.push(
-                    div()
-                        .id(ix)
+                    ListItem::new(("path-candidate", ix))
                         .h(px(ROW_HEIGHT))
                         .flex_none()
+                        .py_0()
                         .px_2()
-                        .flex()
-                        .items_center()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .bg(if selected {
-                            cx.theme().secondary
-                        } else {
-                            cx.theme().popover
-                        })
-                        .hover(|style| style.bg(cx.theme().secondary))
+                        .w_full()
+                        .selected(selected)
                         .child(format!(
                             "{}/",
                             path.trim_end_matches('/').rsplit('/').next().unwrap_or("")
@@ -294,16 +307,18 @@ impl FilesState {
                         })
                         .on_click(move |_, window, cx| {
                             state.update(cx, |this, cx| {
-                                this.set_path_text(path.clone(), window, cx);
-                                this.navigate_to(&path, cx);
+                                if this.completion.open
+                                    && !this.completion.loading
+                                    && this.completion.candidates.contains(&path)
+                                {
+                                    this.complete_path(path.clone(), window, cx);
+                                }
                             })
                         })
                         .into_any_element(),
                 );
             }
-            let message = if self.completion.loading {
-                Some("查询中…".to_string())
-            } else if self.completion.message.is_some() {
+            let message = if self.completion.message.is_some() {
                 self.completion.message.clone()
             } else if rows.is_empty() {
                 Some("没有匹配的目录".to_string())
@@ -398,6 +413,32 @@ fn completion_action<A: gpui::Action>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_results_select_first_directory_and_reset_old_selection() {
+        let mut completion = PathCompletion::default();
+        completion.open = true;
+        completion.set_candidates(vec!["/alpha/".into(), "/beta/".into()]);
+        assert_eq!(completion.selected_path(), Some("/alpha/"));
+        completion.selected = Some(1);
+        completion.set_candidates(vec!["/other/".into()]);
+        assert_eq!(completion.selected_path(), Some("/other/"));
+        completion.set_candidates(Vec::new());
+        assert_eq!(completion.selected_path(), None);
+    }
+
+    #[test]
+    fn pending_or_dismissed_candidates_cannot_be_accepted() {
+        let mut completion = PathCompletion::default();
+        completion.open = true;
+        completion.set_candidates(vec!["/old/".into()]);
+        completion.loading = true;
+        assert_eq!(completion.selected_path(), None);
+        completion.loading = false;
+        assert_eq!(completion.selected_path(), Some("/old/"));
+        completion.dismiss();
+        assert_eq!(completion.selected_path(), None);
+    }
 
     #[test]
     fn resolves_absolute_home_and_relative_posix_paths() {

@@ -103,6 +103,7 @@ pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElem
                     v_flex()
                         .w_full()
                         .flex_none()
+                        .gap_2()
                         .children(ready.then(|| files_toolbar(sidebar.files.clone(), cx)))
                         .children(path_input)
                         .into_any_element(),
