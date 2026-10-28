@@ -173,6 +173,9 @@ impl AppRoot {
         let handle = panel_handle(pane.clone());
         let panel = handle.panel_id(cx);
         self.dock.update(cx, |area, cx| {
+            if area.is_zoomed() {
+                area.set_zoomed_out(window, cx);
+            }
             area.add_panel_view(handle, DockPlacement::Center, None, window, cx);
             area.move_panel(
                 panel,
@@ -781,8 +784,7 @@ impl BasePanel for TabPane {
     }
 
     fn zoomable(&self, _: &App) -> bool {
-        // 页内分屏之后，dock 级的「撑满标签组」已经没有意义。
-        false
+        true
     }
 
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, _: &mut Context<Self>) {

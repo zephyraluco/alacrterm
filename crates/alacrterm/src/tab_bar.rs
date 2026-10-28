@@ -18,7 +18,7 @@ use gpui::{
 use gpui_kit::{
     base::ResizeHandleContext,
     component::{
-        ActiveTheme as _, Disableable as _, IconNamed as _, Placement, Sizable as _, h_flex,
+        ActiveTheme as _, IconNamed as _, Placement, Sizable as _, TitleBar, h_flex,
         button::{Button, ButtonVariants as _},
         menu::{DropdownMenu as _, PopupMenuItem},
         dock::{
@@ -207,7 +207,7 @@ impl TabGroupRenderer for TerminalTabBar {
         let toolbar = group
             .active_panel()
             .filter(|panel| {
-                panel.focus_handle(cx).contains_focused(window, cx)
+                group.is_zoomed() || panel.focus_handle(cx).contains_focused(window, cx)
                     || group_focus.contains_focused(window, cx)
                     || self.state.menu_focus.borrow().as_ref().is_some_and(|(node, focus)| {
                         *node == group.node() && focus.contains_focused(window, cx)
@@ -218,7 +218,8 @@ impl TabGroupRenderer for TerminalTabBar {
 
         let (bar_bg, border) = (cx.theme().tab_bar, cx.theme().border);
 
-        h_flex()
+        let zoom_group = group.clone();
+        let bar = h_flex()
             .w_full()
             .h(TAB_BAR_HEIGHT)
             .bg(bar_bg)
@@ -254,6 +255,9 @@ impl TabGroupRenderer for TerminalTabBar {
             .when_some(toolbar, |this, buttons| {
                 this.child(
                     h_flex()
+                        .id("terminal-toolbar")
+                        .occlude()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .track_focus(&group_focus)
                         .flex_none()
                         .h_full()
@@ -268,14 +272,18 @@ impl TabGroupRenderer for TerminalTabBar {
                                 .xsmall()
                                 .ghost()
                                 .tab_stop(false)
-                                .icon(IconName::Maximize)
-                                .tooltip("缩放停靠组（暂未实现）")
-                                .accessibility_label("缩放停靠组（暂未实现）")
-                                .disabled(true),
+                                .icon(if group.is_zoomed() { IconName::Minimize } else { IconName::Maximize })
+                                .tooltip(if group.is_zoomed() { "还原终端布局" } else { "放大终端组" })
+                                .accessibility_label(if group.is_zoomed() { "还原终端布局" } else { "放大终端组" })
+                                .on_click(move |_, window, cx| zoom_group.toggle_zoom(window, cx)),
                         ),
                 )
-            })
-            .into_any_element()
+            });
+        if group.is_zoomed() {
+            TitleBar::new().child(bar).into_any_element()
+        } else {
+            bar.into_any_element()
+        }
     }
 
     /// 内容区：缓存 + 铺满。
@@ -435,6 +443,7 @@ impl TerminalTabBar {
 
         h_flex()
             .id(("terminal-tab", tab_id))
+            .occlude()
             .flex_none()
             .w(TAB_WIDTH)
             .h_full()

@@ -184,6 +184,7 @@ struct AppRoot {
     close_when_transfers_finish: bool,
     /// 终端会话的 dock。
     dock: Entity<DockArea>,
+    _dock_sub: Subscription,
     /// dock 布局变化订阅。
     dock_layout_sub: Option<Subscription>,
     /// 下一个新建会话的标签组（用一次即清空）。
@@ -340,6 +341,7 @@ impl AppRoot {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock = Self::build_dock(window, cx);
+        let dock_sub = cx.observe(&dock, |_, _, cx| cx.notify());
         let palette_watch = cx.observe_global::<config::ColorSchemeRegistry>(|root, cx| {
             if let Some(render) = config::refresh_color_scheme(cx) {
                 root.apply_render_settings(render, cx);
@@ -398,6 +400,7 @@ impl AppRoot {
             _transfer_completion_sub: transfer_completion_sub,
             close_when_transfers_finish: false,
             dock,
+            _dock_sub: dock_sub,
             dock_layout_sub: None,
             pending_session_group: None,
             settings_window: None,
@@ -564,6 +567,15 @@ impl AppRoot {
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.dock.read(cx).is_zoomed() {
+            return div()
+                .id("app-root-zoomed")
+                .size_full()
+                .bg(cx.theme().background)
+                .child(self.dock.clone())
+                .into_any_element();
+        }
+
         // 主体：侧边栏 | 中间列。
         //
         // ⚠️ 这里**不做**业务同步（当前标签页 / 窗口标题 / 文件管理器 / 侧栏可用性都由
@@ -679,5 +691,6 @@ impl Render for AppRoot {
             )
             .child(status_bar)
             // 覆盖层由 gpui-kit 的 `Root` 渲染。
+            .into_any_element()
     }
 }
