@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <Sparkle/Sparkle.h>
 #include <stdbool.h>
+#import <dispatch/dispatch.h>
 
 static SPUStandardUpdaterController *controller;
 static NSString *statusText = @"尚未检查更新";
@@ -88,6 +89,6 @@ void alacrterm_sparkle_allow_restart(void) {
     if (pendingInstallation != nil) {
         void (^handler)(void) = pendingInstallation;
         pendingInstallation = nil;
-        handler();
+        dispatch_async(dispatch_get_main_queue(), handler);
     }
 }

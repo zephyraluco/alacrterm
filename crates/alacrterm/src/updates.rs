@@ -94,6 +94,15 @@ pub(crate) fn install(cx: &mut App) {
             String::new()
         };
         if let Ok(folder) = updater::data_dir() {
+            let error_path = folder.join("helper-error.log");
+            if let Ok(error) = std::fs::read_to_string(&error_path) {
+                notice = format!("上次更新助手失败：{error}");
+                if let Err(error) =
+                    std::fs::rename(&error_path, folder.join("last-helper-error.log"))
+                {
+                    log::warn!("保留更新错误日志：{error}");
+                }
+            }
             let result_path = folder.join("result.json");
             if let Ok(bytes) = std::fs::read(&result_path)
                 && let Ok(result) =
@@ -335,13 +344,13 @@ impl Updates {
                 Some(Ok(Event::Downloaded(result))) => {
                     self.events = None;
                     match result {
+                        _ if self.cancel.load(Ordering::Relaxed) => {
+                            self.phase = Phase::Available;
+                            self.notice.clear();
+                        }
                         Ok(path) => {
                             self.package = Some(path);
                             self.phase = Phase::Ready;
-                        }
-                        Err(_) if self.cancel.load(Ordering::Relaxed) => {
-                            self.phase = Phase::Available;
-                            self.notice.clear();
                         }
                         Err(error) => self.phase = Phase::Failed(error),
                     }
@@ -418,6 +427,18 @@ pub(crate) fn finish_handoff() {
         if let Some(plan) = handoff.take() {
             if let Err(error) = updater::windows::start(&plan) {
                 log::error!("启动更新助手失败：{error:#}");
+                let saved = (|| {
+                    let folder = updater::data_dir()?;
+                    std::fs::create_dir_all(&folder)?;
+                    std::fs::write(
+                        folder.join("helper-error.log"),
+                        format!("启动更新助手失败：{error:#}"),
+                    )?;
+                    anyhow::Ok(())
+                })();
+                if let Err(error) = saved {
+                    log::error!("无法保存更新错误：{error:#}");
+                }
             }
         }
     }
@@ -458,6 +479,9 @@ pub(crate) fn attach_sparkle_guard(
                 .await;
             let result = root.update_in(cx, |root, window, cx| {
                 let update = model(cx);
+                if matches!(update.read(cx).phase, Phase::Disabled) {
+                    return;
+                }
                 if updater::macos::changed() {
                     update.update(cx, |update, cx| {
                         update.phase = match updater::macos::state() {

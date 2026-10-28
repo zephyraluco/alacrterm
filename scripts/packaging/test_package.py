@@ -44,7 +44,7 @@ class PackagingTests(unittest.TestCase):
                 framework.mkdir(parents=True)
                 (framework / 'fixture').write_bytes(b'framework')
                 try:
-                    with patch.object(package.platform, 'system', return_value=system), patch.object(package.platform, 'machine', return_value=machine), patch.object(package, 'run') as commands, patch.dict(os.environ, {'SPARKLE_FRAMEWORK_DIR': str(framework.parent), 'SPARKLE_PUBLIC_KEY': 'public-test-key', 'APPLE_SIGNING_IDENTITY': '-'}, clear=True):
+                    with patch.object(package.platform, 'system', return_value=system), patch.object(package.platform, 'machine', return_value=machine), patch.object(package, 'run') as commands, patch.object(Path, 'symlink_to'), patch.dict(os.environ, {'SPARKLE_FRAMEWORK_DIR': str(framework.parent), 'SPARKLE_PUBLIC_KEY': 'public-test-key', 'APPLE_SIGNING_IDENTITY': '-'}, clear=True):
                         package.main()
                     payload = root / 'target/package' / key / subfolder
                     self.assertTrue((payload / 'plugins' / runtime / 'bin').is_dir())

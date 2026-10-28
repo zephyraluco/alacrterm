@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -37,7 +38,9 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             dist = Path(temporary)
             release = self.fixture(dist)
-            self.assertEqual(release.version_for_tag('v0.1.0'), '0.1.0')
+            with (release.ROOT / 'crates/alacrterm/Cargo.toml').open('rb') as source:
+                current = tomllib.load(source)['package']['version']
+            self.assertEqual(release.version_for_tag(f'v{current}'), current)
             for tag in ['0.1.0', 'v9.9.9', 'v0.1.0-beta.1']:
                 with self.assertRaises(ValueError):
                     release.version_for_tag(tag)

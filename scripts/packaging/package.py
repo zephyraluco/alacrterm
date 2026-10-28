@@ -15,6 +15,16 @@ def run(*args):
     subprocess.run([str(arg) for arg in args], check=True)
 
 
+def normalize_permissions(root):
+    for path in [root, *root.rglob('*')]:
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            path.chmod(0o755)
+        elif path.is_file():
+            path.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
+
+
 def main():
     os.chdir(ROOT)
     with (ROOT / 'crates/alacrterm/Cargo.toml').open('rb') as manifest:
@@ -54,8 +64,7 @@ def main():
         desktop = work / 'usr/share/applications'
         desktop.mkdir(parents=True)
         (desktop / 'alacrterm.desktop').write_text('[Desktop Entry]\nType=Application\nName=Alacrterm\nExec=alacrterm\nTerminal=false\nCategories=System;TerminalEmulator;\n', encoding='utf-8')
-        for directory in [work, *[path for path in work.rglob('*') if path.is_dir()]]:
-            directory.chmod(0o755)
+        normalize_permissions(work)
         run('dpkg-deb', '--root-owner-group', '--build', work, dist / f'{name}.deb')
     elif system == 'Darwin':
         framework_dir = Path(os.environ['SPARKLE_FRAMEWORK_DIR'])
@@ -68,6 +77,7 @@ def main():
             info['SUPublicEDKey'] = public_key
         with (app / 'Contents/Info.plist').open('wb') as file:
             plistlib.dump(info, file)
+        normalize_permissions(app)
         identity = os.environ.get('APPLE_SIGNING_IDENTITY', '-')
         if identity == '-':
             run('codesign', '--force', '--deep', '--sign', '-', app)

@@ -58,7 +58,7 @@ impl SettingsWindow {
     fn theme_page(&self, cx: &App) -> SettingPage {
         SettingPage::new("主题")
             .icon(Icon::new(IconName::Moon))
-            .default_open(true)
+            .default_open(!matches!(crate::updates::model(cx).read(cx).phase, crate::updates::Phase::Available | crate::updates::Phase::Ready | crate::updates::Phase::Downloading(_)))
             .group(
                 SettingGroup::new()
                     .item(
@@ -469,9 +469,19 @@ impl Render for SettingsWindow {
                     Settings::new("app-settings")
                         .page(self.theme_page(cx))
                         .page(self.terminal_page(cx))
-                        .page(SettingPage::new("更新").group(SettingGroup::new().item(
-                            SettingItem::new("在线更新", update_field(self.app_root.clone())),
-                        ))),
+                        .page(
+                            SettingPage::new("更新")
+                                .default_open(matches!(
+                                    crate::updates::model(cx).read(cx).phase,
+                                    crate::updates::Phase::Available
+                                        | crate::updates::Phase::Ready
+                                        | crate::updates::Phase::Downloading(_)
+                                ))
+                                .group(SettingGroup::new().item(SettingItem::new(
+                                    "在线更新",
+                                    update_field(self.app_root.clone()),
+                                ))),
+                        ),
                 ),
             )
         // 覆盖层由 gpui-kit `Root` 渲染。
@@ -528,6 +538,14 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
     let cancelling = entity.clone();
     let automatic = entity.clone();
     let installing = entity.clone();
+    let install_command = if cfg!(target_os = "linux") {
+        update
+            .package
+            .as_ref()
+            .map(|path| updater::linux::manual_command(path))
+    } else {
+        None
+    };
     let is_download = matches!(update.phase, Phase::Available | Phase::Failed(_))
         && update.release.is_some()
         && !update.manual;
@@ -550,8 +568,14 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
             }
             let prompt = window.prompt(gpui::PromptLevel::Warning, "安装更新", Some("更新需要重新启动应用。所有终端连接与 X11 会话将中断，本地终端进程无法恢复。是否继续？"), &["继续", "取消"], cx);
             let installing = installing.clone();
+            let root = root.clone();
             cx.spawn(async move |cx| {
                 if prompt.await.ok() != Some(0) { return; }
+                let allowed = root.update(cx, |root, cx| root._transfers.read(cx).active_count() == 0 && !AppRoot::preview_has_pending_changes(root.preview_window, cx)).unwrap_or(false);
+                if !allowed {
+                    installing.update(cx, |update, cx| { update.notice = "任务状态已改变，请完成传输并保存改动后重试".into(); cx.notify(); });
+                    return;
+                }
                 installing.update(cx, |update, cx| match update.install_package(cx) {
                     Ok(true) => cx.quit(),
                     Ok(false) => {},
@@ -559,5 +583,6 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
                 });
             }).detach();
         })))
+        .when_some(install_command, |view, command| view.child(Button::new("copy-update-install-command").label("复制安装命令").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone())))))
         .when_some(update.release.as_ref(), |view, release| view.child(div().text_sm().child(release.notes.clone())))
 }

@@ -99,6 +99,24 @@ pub fn start(plan: &Path) -> Result<std::process::Child> {
     .spawn()?)
 }
 
+#[cfg(any(windows, test))]
+fn installation_process(path: &Path, executable: &Path) -> bool {
+    fn normalized(path: &Path) -> String {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        canonical
+            .to_string_lossy()
+            .replace('/', "\\")
+            .trim_start_matches("\\\\?\\")
+            .to_ascii_lowercase()
+    }
+    let path = normalized(path);
+    let executable = normalized(executable);
+    path == executable
+        || executable
+            .rsplit_once('\\')
+            .is_some_and(|(directory, _)| path.starts_with(&format!("{directory}\\plugins\\")))
+}
+
 #[cfg(windows)]
 pub fn run(plan: &Path) -> Result<()> {
     use std::{
@@ -123,14 +141,9 @@ pub fn run(plan: &Path) -> Result<()> {
             ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
         );
         let active = system.processes().values().any(|process| {
-            process.exe().is_some_and(|path| {
-                path.file_name().is_some_and(|name| {
-                    name.to_string_lossy().eq_ignore_ascii_case("alacrterm.exe")
-                }) && path
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&request.executable.to_string_lossy())
-                    || path.starts_with(directory.join("plugins"))
-            })
+            process
+                .exe()
+                .is_some_and(|path| installation_process(path, &request.executable))
         });
         if !active {
             break;
@@ -183,6 +196,27 @@ pub fn run(plan: &Path) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn process_waiting_matches_case_and_extended_paths_without_matching_other_installs() {
+        let executable = Path::new("C:/Users/Alice/Alacrterm/alacrterm.exe");
+        assert!(installation_process(
+            Path::new(r"\\?\C:\Users\Alice\Alacrterm\ALACRTERM.EXE"),
+            executable
+        ));
+        assert!(installation_process(
+            Path::new("C:/Users/Alice/Alacrterm/plugins/windows/bin/wayx.exe"),
+            executable
+        ));
+        assert!(!installation_process(
+            Path::new("C:/Users/Bob/Alacrterm/alacrterm.exe"),
+            executable
+        ));
+        assert!(!installation_process(
+            Path::new("C:/Users/Alice/Alacrterm/plugins-other/wayx.exe"),
+            executable
+        ));
+    }
+
+    #[test]
     fn installer_paths_remain_separate_arguments_without_shell_quoting() {
         let directory = Path::new("C:/Users/Alice Smith/Programs/Alacrterm");
         let log = Path::new("C:/Users/Alice Smith/update.log");
@@ -193,6 +227,51 @@ mod tests {
         assert!(args.contains(&OsString::from("/LOG=C:/Users/Alice Smith/update.log")));
         assert!(args.contains(&OsString::from("/NORESTART")));
     }
+    #[test]
+    fn helper_revalidates_signed_metadata_and_package_at_install_time() {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Cursor;
+        let folder = tempfile::tempdir().unwrap();
+        let package = folder.path().join("setup.exe");
+        std::fs::write(&package, b"installer").unwrap();
+        let manifest = serde_json::json!({
+            "schema": 1, "channel": "stable", "version": "0.2.0", "notes": "test",
+            "assets": { "windows-x64": { "url": "https://example.com/setup.exe", "size": 9,
+                "sha256": format!("{:x}", Sha256::digest(b"installer")), "kind": "exe" } }
+        })
+        .to_string();
+        let key = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let signature = minisign::sign(
+            Some(&key.pk),
+            &key.sk,
+            Cursor::new(manifest.as_bytes()),
+            Some("alacrterm-manifest stable 0.2.0"),
+            None,
+        )
+        .unwrap()
+        .into_string();
+        let mut request = InstallRequest {
+            envelope: serde_json::to_vec(&manifest::Envelope {
+                manifest,
+                signature,
+            })
+            .unwrap(),
+            package: package.clone(),
+            executable: folder.path().join("install/alacrterm.exe"),
+            from: Version::new(0, 1, 0),
+        };
+        let keys = vec![key.pk.to_base64()];
+        assert_eq!(
+            request.verified_release(&keys).unwrap().version,
+            Version::new(0, 2, 0)
+        );
+        request.from = Version::new(0, 2, 0);
+        assert!(request.verified_release(&keys).is_err());
+        request.from = Version::new(0, 1, 0);
+        std::fs::write(package, b"tampered!").unwrap();
+        assert!(request.verified_release(&keys).is_err());
+    }
+
     #[test]
     fn helper_rejects_unsigned_install_requests() {
         let request = InstallRequest {
