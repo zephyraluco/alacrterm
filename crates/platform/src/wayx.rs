@@ -330,12 +330,12 @@ fn runtime_dir() -> Result<PathBuf> {
         .chain(cwd.ancestors())
         .chain(Path::new(env!("CARGO_MANIFEST_DIR")).ancestors())
     {
-        let path = base.join("platform").join(name);
+        let path = base.join("plugins").join(name);
         if path.join("bin").is_dir() {
             return Ok(path);
         }
     }
-    bail!("找不到 platform/{name}；请随应用分发 platform 目录或设置 WAYX_RUNTIME_DIR")
+    bail!("找不到 plugins/{name}；请随应用分发 plugins 目录或设置 WAYX_RUNTIME_DIR")
 }
 
 impl Wayx {

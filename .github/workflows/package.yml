@@ -29,7 +29,7 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p alacrterm
       - name: Create installer
-        run: python packaging/package.py
+        run: python scripts/packaging/package.py
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: installer-${{ matrix.platform }}

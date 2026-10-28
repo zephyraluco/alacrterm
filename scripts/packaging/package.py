@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tomllib
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def run(*args):
@@ -43,7 +43,7 @@ def main():
     shutil.copy2(ROOT / 'target/release' / binary, payload / binary)
     shutil.copytree(ROOT / 'themes', payload / 'themes')
     runtime = {'Linux': 'linux/wayx-linux-x64', 'Darwin': 'macos/wayx-macos-arm64', 'Windows': 'windows/wayx-windows-x64'}[system]
-    shutil.copytree(ROOT / 'platform' / runtime, payload / 'platform' / runtime)
+    shutil.copytree(ROOT / 'plugins' / runtime, payload / 'plugins' / runtime)
     if system == 'Linux':
         control = work / 'DEBIAN'
         control.mkdir()
@@ -68,7 +68,7 @@ def main():
             if file.is_file():
                 shutil.copy2(file, payload / file.name)
         compiler = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Inno Setup 6/ISCC.exe'
-        run(compiler, f'/DAppVersion={version}', f'/DSourceDir={payload}', f'/DOutputDir={dist}', f'/DOutputName={name}-setup', ROOT / 'packaging/windows.iss')
+        run(compiler, f'/DAppVersion={version}', f'/DSourceDir={payload}', f'/DOutputDir={dist}', f'/DOutputName={name}-setup', ROOT / 'scripts/packaging/windows.iss')
     for file in dist.iterdir():
         if file.suffix in {'.deb', '.dmg', '.exe'}:
             digest = hashlib.file_digest(file.open('rb'), 'sha256').hexdigest()
