@@ -1,6 +1,8 @@
 //! 程序入口与根视图 [`AppRoot`]：标题栏、侧边栏与终端主体、全局底部状态栏。
 //! 外壳分模块（`components` / `sidebar_panel` / `terminal_panel` 等），终端核心在 `crates/terminal`。
 
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod actions;
 mod assets;
 mod components;
