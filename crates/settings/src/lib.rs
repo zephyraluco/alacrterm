@@ -16,10 +16,13 @@ const APP_CONFIG_RELATIVE_PATH: &str = "config/app.json";
 
 const SESSIONS_CONFIG_RELATIVE_PATH: &str = "config/sessions.json";
 
-/// 用户配置仅使用系统用户配置目录；主题资源仍从可执行文件旁加载。
+/// 开发构建使用未跟踪的源码 config；发布构建使用系统用户配置目录。
 pub fn candidates(relative: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if Path::new(relative).starts_with("config") {
+        #[cfg(debug_assertions)]
+        return vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(relative)];
+        #[cfg(not(debug_assertions))]
         return user_config_path(relative).into_iter().collect();
     }
     if let Some(dir) = std::env::current_exe()
@@ -44,17 +47,19 @@ pub fn read_config_file(relative: &str) -> Option<(PathBuf, String)> {
         .find_map(|path| std::fs::read_to_string(&path).ok().map(|text| (path, text)))
 }
 
+#[cfg(not(debug_assertions))]
 fn user_config_path(relative: &str) -> Option<PathBuf> {
     configuration_path(&dirs::config_dir()?, relative)
 }
 
+#[cfg(any(not(debug_assertions), test))]
 fn configuration_path(base: &Path, relative: &str) -> Option<PathBuf> {
     let filename = Path::new(relative).strip_prefix("config").ok()?;
     let application = if cfg!(target_os = "linux") { "alacrterm" } else { "Alacrterm" };
     Some(base.join(application).join(filename))
 }
 
-/// 用户配置仅写入系统用户目录，不回退到安装目录或源码目录。
+/// 配置写入当前构建模式的专属目录，不在开发配置和用户配置之间回退。
 pub fn write_target(relative: &str) -> PathBuf {
     select_write_target(&candidates(relative))
 }
@@ -235,11 +240,21 @@ impl TerminalFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(debug_assertions))]
     #[test]
     fn configuration_has_only_the_user_directory_candidate() {
         for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
             let relative = format!("config/{name}");
             assert_eq!(candidates(&relative), vec![configuration_path(&dirs::config_dir().unwrap(), &relative).unwrap()]);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn development_configuration_stays_in_the_source_directory() {
+        for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
+            let relative = format!("config/{name}");
+            assert_eq!(candidates(&relative), vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(relative)]);
         }
     }
 

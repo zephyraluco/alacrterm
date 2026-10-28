@@ -8,10 +8,10 @@ The package version comes from `crates/alacrterm/Cargo.toml`; update it before t
 
 macOS packages are ad-hoc signed, not Developer ID signed or notarized. Windows installers are not Authenticode signed. Publishing does not imply platform trust certification. Release publishing waits for all three packages to succeed.
 
-User configuration (`app.json`, `terminal.json`, `sessions.json`, optional `keymap.json`) is stored exclusively in the system user configuration directory:
+Release-build user configuration (`app.json`, `terminal.json`, `sessions.json`, optional `keymap.json`) is stored exclusively in the system user configuration directory:
 
 - Windows: `%APPDATA%\Alacrterm` (Roaming).
 - Linux: `$XDG_CONFIG_HOME/alacrterm`, default `~/.config/alacrterm`.
 - macOS: `~/Library/Application Support/Alacrterm`.
 
-Configuration directories are created on first save. Installation/source directories are not read for user configuration, and old files are not migrated. Bundled themes stay beside the executable.
+Debug/development builds instead read and write the repository-root `config/` directory, which is git-ignored and not packaged. There is no fallback between development and release configuration. Configuration directories are created on first save. Installation/source directories are not read for user configuration, and old files are not migrated. Bundled themes stay beside the executable.

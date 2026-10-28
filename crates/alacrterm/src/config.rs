@@ -1,5 +1,5 @@
 //! 应用配置：终端渲染参数（`config/terminal.json`）与界面主题（`themes/global/*.json` + `config/app.json`）。
-//! 运行期状态在 [`Settings`] 全局，查找顺序「exe 同级」→「仓库根」，缺失项回退默认值。
+//! 运行期状态在 [`Settings`] 全局，开发配置从源码 config 读取，发布配置从系统用户目录读取，缺失项回退默认值。
 
 use settings::color_schemes::ColorScheme;
 use std::{

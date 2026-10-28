@@ -3,7 +3,7 @@
 //! 数据来源两层，后者覆盖前者：
 //!
 //! 1. 内嵌资产 `assets/keymaps/default-{windows,macos,linux}.json`（随二进制发布）；
-//! 2. 用户文件 `config/keymap.json`（候选路径见 [`config::candidates`]：exe 同级 → 仓库根）。
+//! 2. 当前构建模式配置目录中的 `keymap.json`（路径见 [`config::candidates`]）。
 //!
 //! 语法与 Zed 一致：顶层数组，每项一节
 //! `{ "context"?, "bindings": { 键位: action | [action, 参数] | "null" } }`；
