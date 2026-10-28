@@ -1,5 +1,6 @@
 //! One update model shared by settings and every application window.
 use gpui::{App, AppContext as _, Context, Entity, Global, Task};
+#[cfg(not(target_os = "macos"))]
 use semver::Version;
 #[cfg(windows)]
 use std::sync::Mutex;
@@ -466,74 +467,89 @@ impl gpui::Render for Updates {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn attach_sparkle_guard(
     root: gpui::WeakEntity<crate::AppRoot>,
     window: &mut gpui::Window,
     cx: &mut App,
 ) {
-    cx.spawn_in(window, async move |cx| {
-        loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(500))
-                .await;
-            let result = root.update_in(cx, |root, window, cx| {
-                let update = model(cx);
-                if matches!(update.read(cx).phase, Phase::Disabled) {
-                    return;
-                }
-                if updater::macos::changed() {
-                    update.update(cx, |update, cx| {
-                        update.phase = match updater::macos::state() {
-                            1 => Phase::Checking,
-                            2..=4 => Phase::Available,
-                            5 => Phase::Failed(updater::macos::status()),
-                            _ => Phase::Idle,
-                        };
-                        cx.notify();
-                    });
-                }
-                if !updater::macos::take_restart_request() {
-                    return;
-                }
-                use gpui_kit::component::{WindowExt as _, notification::Notification};
-                if root._transfers.read(cx).active_count() > 0
-                    || crate::AppRoot::preview_has_pending_changes(root.preview_window, cx)
-                {
-                    window.push_notification(
-                        Notification::warning("请先完成传输并保存预览改动，再从更新页面继续重启"),
-                        cx,
-                    );
-                    return;
-                }
-                let prompt = window.prompt(
-                    gpui::PromptLevel::Warning,
-                    "重启并更新",
-                    Some("更新将关闭所有终端连接和 X11 会话，本地终端进程无法恢复。是否继续？"),
-                    &["重启更新", "稍后"],
-                    cx,
-                );
-                cx.spawn(async move |this, cx| {
-                    if prompt.await.ok() != Some(0) {
+    window
+        .spawn(cx, async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let result = root.update_in(cx, |root, window, cx| {
+                    let update = model(cx);
+                    if matches!(update.read(cx).phase, Phase::Disabled) {
                         return;
                     }
-                    if let Err(error) = this.update(cx, |root, cx| {
-                        if root._transfers.read(cx).active_count() == 0
-                            && !crate::AppRoot::preview_has_pending_changes(root.preview_window, cx)
-                        {
-                            platform::shutdown_wayx();
-                            updater::macos::allow_restart();
-                        }
-                    }) {
-                        log::warn!("更新重启窗口已关闭：{error}");
+                    if updater::macos::changed() {
+                        update.update(cx, |update, cx| {
+                            update.phase = match updater::macos::state() {
+                                1 => Phase::Checking,
+                                2..=4 => Phase::Available,
+                                5 => Phase::Failed(updater::macos::status()),
+                                _ => Phase::Idle,
+                            };
+                            cx.notify();
+                        });
                     }
-                })
-                .detach();
-            });
-            if result.is_err() {
-                break;
+                    if !updater::macos::take_restart_request() {
+                        return;
+                    }
+                    use gpui_kit::component::{WindowExt as _, notification::Notification};
+                    if root._transfers.read(cx).active_count() > 0
+                        || crate::AppRoot::preview_has_pending_changes(root.preview_window, cx)
+                    {
+                        window.push_notification(
+                            Notification::warning(
+                                "请先完成传输并保存预览改动，再从更新页面继续重启",
+                            ),
+                            cx,
+                        );
+                        return;
+                    }
+                    let prompt = window.prompt(
+                        gpui::PromptLevel::Warning,
+                        "重启并更新",
+                        Some("更新将关闭所有终端连接和 X11 会话，本地终端进程无法恢复。是否继续？"),
+                        &["重启更新", "稍后"],
+                        cx,
+                    );
+                    cx.spawn(async move |this, cx| {
+                        if prompt.await.ok() != Some(0) {
+                            return;
+                        }
+                        if let Err(error) = this.update(cx, |root, cx| {
+                            if root._transfers.read(cx).active_count() == 0
+                                && !crate::AppRoot::preview_has_pending_changes(
+                                    root.preview_window,
+                                    cx,
+                                )
+                            {
+                                platform::shutdown_wayx();
+                                updater::macos::allow_restart();
+                            }
+                        }) {
+                            log::warn!("更新重启窗口已关闭：{error}");
+                        }
+                    })
+                    .detach();
+                });
+                if result.is_err() {
+                    break;
+                }
             }
-        }
-    })
-    .detach();
+        })
+        .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sparkle_guard_uses_the_window_async_context_on_every_test_platform() {
+        let _: fn(gpui::WeakEntity<crate::AppRoot>, &mut gpui::Window, &mut gpui::App) =
+            super::attach_sparkle_guard;
+    }
 }
