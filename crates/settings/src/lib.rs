@@ -16,15 +16,19 @@ const APP_CONFIG_RELATIVE_PATH: &str = "config/app.json";
 
 const SESSIONS_CONFIG_RELATIVE_PATH: &str = "config/sessions.json";
 
-/// 候选路径：可执行文件同级 → 仓库根。
+/// 用户配置仅使用系统用户配置目录；主题资源仍从可执行文件旁加载。
 pub fn candidates(relative: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    if Path::new(relative).starts_with("config") {
+        return user_config_path(relative).into_iter().collect();
+    }
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(PathBuf::from))
     {
         paths.push(dir.join(relative));
     }
+    #[cfg(any(not(target_os = "windows"), debug_assertions))]
     paths.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -40,16 +44,29 @@ pub fn read_config_file(relative: &str) -> Option<(PathBuf, String)> {
         .find_map(|path| std::fs::read_to_string(&path).ok().map(|text| (path, text)))
 }
 
-/// 写回目标：优先已存在的那份。
+fn user_config_path(relative: &str) -> Option<PathBuf> {
+    configuration_path(&dirs::config_dir()?, relative)
+}
+
+fn configuration_path(base: &Path, relative: &str) -> Option<PathBuf> {
+    let filename = Path::new(relative).strip_prefix("config").ok()?;
+    let application = if cfg!(target_os = "linux") { "alacrterm" } else { "Alacrterm" };
+    Some(base.join(application).join(filename))
+}
+
+/// 用户配置仅写入系统用户目录，不回退到安装目录或源码目录。
 pub fn write_target(relative: &str) -> PathBuf {
-    let paths = candidates(relative);
+    select_write_target(&candidates(relative))
+}
+
+fn select_write_target(paths: &[PathBuf]) -> PathBuf {
     if let Some(existing) = paths.iter().find(|path| path.exists()) {
         return existing.clone();
     }
     paths
         .iter()
         .find(|path| path.parent().is_some_and(Path::is_dir))
-        .or_else(|| paths.last())
+        .or_else(|| paths.first())
         .cloned()
         .expect("candidates() 至少给一条路径")
 }
@@ -219,6 +236,40 @@ impl TerminalFile {
 mod tests {
     use super::*;
     #[test]
+    fn configuration_has_only_the_user_directory_candidate() {
+        for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
+            let relative = format!("config/{name}");
+            assert_eq!(candidates(&relative), vec![configuration_path(&dirs::config_dir().unwrap(), &relative).unwrap()]);
+        }
+    }
+
+    #[test]
+    fn user_paths_separate_configuration_from_bundled_resources() {
+        let base = Path::new("AppData/Roaming");
+        for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
+            assert_eq!(configuration_path(base, &format!("config/{name}")), Some(base.join(if cfg!(target_os = "linux") { "alacrterm" } else { "Alacrterm" }).join(name)));
+        }
+        assert_eq!(configuration_path(base, "themes/global"), None);
+        assert_eq!(configuration_path(base, "themes/terminal"), None);
+    }
+
+    #[test]
+    fn first_save_creates_user_configuration_directory() {
+        let root = std::env::temp_dir().join(format!("alacrterm-first-config-{}", std::process::id()));
+        let cache = util::file_cache::FileCache::new(&root);
+        let lease = cache.allocate("installation");
+        let installed = configuration_path(lease.path(), "config/app.json").unwrap();
+        let build_machine = lease.path().join("build-machine/config/app.json");
+        let target = select_write_target(&[installed.clone(), build_machine.clone()]);
+        assert_eq!(target, installed);
+        SettingsStore::new(target.clone()).update(serde_json::Map::from_iter([
+            ("dark_theme".into(), json!("Nord")),
+        ])).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(target).unwrap()).unwrap()["dark_theme"], "Nord");
+        assert!(!build_machine.exists());
+        std::fs::remove_dir_all(lease.path()).unwrap();
+    }
+    #[test]
     fn corrupt_configuration_is_not_overwritten() {
         let root =
             std::env::temp_dir().join(format!("alacrterm-corrupt-settings-{}", std::process::id()));
@@ -278,17 +329,8 @@ mod tests {
         assert_eq!(file.colors["terminal_background"], "#000000");
     }
     #[test]
-    fn repository_fallback_keeps_existing_configuration_root() {
-        assert_eq!(
-            candidates("config/app.json")
-                .last()
-                .unwrap()
-                .canonicalize()
-                .unwrap(),
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../config/app.json")
-                .canonicalize()
-                .unwrap()
-        );
+    fn bundled_resources_keep_executable_relative_candidates() {
+        let executable = std::env::current_exe().unwrap();
+        assert_eq!(candidates("themes/global")[0], executable.parent().unwrap().join("themes/global"));
     }
 }
