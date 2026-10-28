@@ -1013,6 +1013,26 @@ impl FilesState {
         }
     }
 
+    /// 固定在列表上方的路径框，不参与虚拟列表滚动。
+    pub(super) fn render_path_input(&self) -> Option<AnyElement> {
+        self.fs.as_ref()?;
+        Some(
+            h_flex()
+                .w_full()
+                .h(PATH_ROW_HEIGHT)
+                .flex_none()
+                .px_2()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(&self.path_input)
+                            .cleanable(false)
+                            .aria_label("远端目录路径"),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// 侧边栏虚拟列表的全部内容项。
     pub(super) fn sidebar_items(&mut self, cx: &mut Context<Self>) -> Vec<FilesItem> {
         let transfers = self.transfers.read(cx).transfers().to_vec();
@@ -1022,9 +1042,6 @@ impl FilesState {
 
         let rows = self.rows();
         let mut items = Vec::with_capacity(rows.len() + transfers.len() + 2);
-        if self.fs.is_some() {
-            items.push(FilesItem::Path(self.path_input.clone()));
-        }
         // 传输行摆在路径框下面、树上面:有东西在传时它最需要被看到。
         let state = cx.entity().downgrade();
         items.extend(transfers.iter().map(|transfer| FilesItem::Transfer {
@@ -1101,7 +1118,6 @@ impl FilesState {
 
 #[derive(Clone)]
 pub(super) enum FilesItem {
-    Path(Entity<InputState>),
     /// 一条在跑的传输(上传 / 下载)。
     Transfer {
         state: WeakEntity<FilesState>,
@@ -1123,18 +1139,6 @@ impl FilesItem {
     /// 画这一项。
     pub(super) fn render(self, cx: &mut App) -> AnyElement {
         match self {
-            Self::Path(input) => h_flex()
-                .w_full()
-                .h(PATH_ROW_HEIGHT)
-                .px_2()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(&input)
-                            .cleanable(false)
-                            .aria_label("远端目录路径"),
-                    ),
-                )
-                .into_any_element(),
             Self::Transfer { state, id } => {
                 let Ok(Some(transfer)) = state.read_with(&*cx, |files, cx| files.transfers.read(cx).transfer(id)) else {
                     return div().w_full().into_any_element();

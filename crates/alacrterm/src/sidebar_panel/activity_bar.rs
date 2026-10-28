@@ -9,7 +9,7 @@ use gpui::{
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Placement, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
-    h_flex,
+    h_flex, v_flex,
     menu::{ContextMenuExt as _, PopupMenuItem},
     status_bar::StatusBar,
 };
@@ -95,10 +95,19 @@ pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElem
         // 工具栏只有「文件管理器」有（「会话」那条没有:它那一栏的动作在右键菜单里）。
         .toolbar(match active {
             SidebarView::Sessions => None,
-            SidebarView::Files if sidebar.files.read(cx).status().ready => {
-                Some(files_toolbar(sidebar.files.clone(), cx))
+            SidebarView::Files => {
+                let files = sidebar.files.read(cx);
+                let ready = files.status().ready;
+                let path_input = files.render_path_input();
+                Some(
+                    v_flex()
+                        .w_full()
+                        .flex_none()
+                        .children(ready.then(|| files_toolbar(sidebar.files.clone(), cx)))
+                        .children(path_input)
+                        .into_any_element(),
+                )
             }
-            SidebarView::Files => None,
         })
         .children(rows);
 
