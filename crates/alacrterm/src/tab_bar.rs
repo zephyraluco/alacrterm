@@ -12,7 +12,7 @@ use gpui::{
     Anchor, AnyElement, AnyView, App, AppContext as _, Axis, Context, CursorStyle, FocusHandle,
     Focusable as _, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window,
+    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window, WindowControlArea,
     div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_kit::{
@@ -244,12 +244,27 @@ impl TabGroupRenderer for TerminalTabBar {
                     )
                     .child(
                         h_flex()
-                            .id("terminal-tab-strip")
-                            .w_full()
-                            .h_full()
-                            .overflow_x_scroll()
-                            .track_scroll(&self.state.scroll)
-                            .children(tabs),
+                            .size_full()
+                            .child(
+                                h_flex()
+                                    .id("terminal-tab-strip")
+                                    .w(TAB_WIDTH * visible.len() as f32)
+                                    .max_w_full()
+                                    .h_full()
+                                    .overflow_x_scroll()
+                                    .track_scroll(&self.state.scroll)
+                                    .children(tabs),
+                            )
+                            .child(
+                                div()
+                                    .id("terminal-title-drag-area")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .when(group.is_zoomed(), |this| {
+                                        this.window_control_area(WindowControlArea::Drag)
+                                    }),
+                            ),
                     ),
             )
             .when_some(toolbar, |this, buttons| {
