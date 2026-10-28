@@ -1,5 +1,5 @@
-use gpui::Rgba;
 use alacritty_terminal::vte::ansi::Rgb as VteRgb;
+use gpui::Rgba;
 
 pub(crate) fn to_vte_rgb(color: impl Into<Rgba>) -> VteRgb {
     let color = color.into();

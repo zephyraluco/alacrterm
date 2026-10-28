@@ -6,15 +6,15 @@ mod launch;
 pub use launch::{
     LaunchOptions, LocalSessionSetup, OscDecoder, PreparedShell, SessionResources, ShellMetadata,
 };
+mod lifecycle;
 mod observed_pty;
 mod prompt;
-mod lifecycle;
 pub use lifecycle::ConnectionState;
 use lifecycle::Lifecycle;
 pub use prompt::PromptEvent;
+mod directory;
 mod parser_events;
 mod pty_info;
-mod directory;
 
 use alacritty_terminal::grid::Dimensions as _;
 use anyhow::{Context as _, Result, bail};
@@ -78,9 +78,9 @@ use crate::alacritty::{
     toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
     update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
+use crate::directory::{DirectoryScanner, Report};
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
-use crate::directory::{DirectoryScanner, Report};
 
 /// Cooperative yield to the async executor so other tasks (e.g. rendering)
 /// can make progress. Replaces `futures_lite::future::yield_now`.
@@ -957,7 +957,10 @@ impl TerminalBuilder {
                 TerminalTarget::Ssh(params) => {
                     let (ssh_tx, ssh_events) = unbounded::<SshEvent>();
                     let session = SshSession::connect_with_options(
-                        params.clone(), INITIAL_PTY_SIZE, ssh_tx, options.ssh_options(),
+                        params.clone(),
+                        INITIAL_PTY_SIZE,
+                        ssh_tx,
+                        options.ssh_options(),
                     )
                     .with_context(|| format!("无法启动 SSH 会话（{}）", params.endpoint()))?;
                     log::debug!("SSH 会话已启动:{}", params.endpoint());
@@ -1024,7 +1027,8 @@ impl TerminalBuilder {
                     // the compilation target. This is fine right now due to the restricted
                     // way we use the return value, but would become incorrect if we
                     // supported remoting into windows.
-                    let shell_kind = shell.shell_kind(cfg!(windows));
+                    #[cfg(windows)]
+                    let shell_kind = shell.shell_kind(true);
 
                     let mut alacritty_shell = shell_params.as_ref().map(|params| {
                         (
@@ -1135,7 +1139,7 @@ impl TerminalBuilder {
                 scroll_px: px(0.),
                 next_link_id: 0,
                 selection_phase: SelectionPhase::Ended,
-                hyperlink_regex_searches: RegexSearches::new(&Vec::<String>::new(), 5_000),
+                hyperlink_regex_searches: RegexSearches::new(Vec::<String>::new(), 5_000),
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
@@ -1144,7 +1148,11 @@ impl TerminalBuilder {
                 mouse_down_position: None,
                 #[cfg(windows)]
                 shell_program,
-                template: CopyTemplate { target, env, options },
+                template: CopyTemplate {
+                    target,
+                    env,
+                    options,
+                },
                 child_exited: None,
                 keyboard_input_sent: false,
                 event_loop_task: Task::ready(Ok(())),
@@ -1368,7 +1376,9 @@ impl Terminal {
                     batch.push(event);
                 }
                 let current = terminal.update(cx, |terminal, cx| {
-                    if !terminal.lifecycle.is_current(epoch) { return false; }
+                    if !terminal.lifecycle.is_current(epoch) {
+                        return false;
+                    }
                     for event in batch {
                         terminal.process_ssh_event(event, cx);
                     }
@@ -1377,7 +1387,9 @@ impl Terminal {
                     cx.notify();
                     true
                 })?;
-                if !current { break; }
+                if !current {
+                    break;
+                }
                 yield_now().await;
             }
             anyhow::Ok(())
@@ -1481,7 +1493,10 @@ impl Terminal {
     /// （[`crate::directory`] 里解释了为什么模拟器那条路不行）。
     /// 攒着不写的那一段同样要扫 —— 远端第一条上报往往就在里面。
     fn feed_remote_bytes(&mut self, bytes: &[u8]) {
-        for event in self.prompt_scanner.feed(bytes, self.template.options.osc_decoder) {
+        for event in self
+            .prompt_scanner
+            .feed(bytes, self.template.options.osc_decoder)
+        {
             let _ = self
                 .parser_events_sender
                 .unbounded_send(TerminalBackendEvent::Prompt(event));
@@ -1648,11 +1663,11 @@ impl Terminal {
                 // 第一次拿到真实尺寸：把之前攒下的远端输出补写进去（见 `feed_remote_bytes`）。
                 // 放在 `resize` 之后，这样它们是写进**已重排过**的网格里，不会被顶掉。
                 self.resized_once = true;
-                if let Some(pending) = self.ssh_pending.take() {
-                    if !pending.is_empty() {
-                        self.output_processor.advance(term, &pending);
-                        cx.emit(Event::Wakeup);
-                    }
+                if let Some(pending) = self.ssh_pending.take()
+                    && !pending.is_empty()
+                {
+                    self.output_processor.advance(term, &pending);
+                    cx.emit(Event::Wakeup);
                 }
 
                 // If there are matches we need to emit a wake up event to
@@ -2259,20 +2274,9 @@ impl Terminal {
     }
 
     fn mouse_changed(&mut self, point: Point, side: SelectionSide) -> bool {
-        match self.last_mouse {
-            Some((old_point, old_side)) => {
-                if old_point == point && old_side == side {
-                    false
-                } else {
-                    self.last_mouse = Some((point, side));
-                    true
-                }
-            }
-            None => {
-                self.last_mouse = Some((point, side));
-                true
-            }
-        }
+        let changed = self.last_mouse != Some((point, side));
+        self.last_mouse = Some((point, side));
+        changed
     }
 
     pub fn mouse_mode(&self, shift: bool) -> bool {
@@ -2317,17 +2321,14 @@ impl Terminal {
 
         // Throttle hyperlink searches to avoid excessive processing
         let now = Instant::now();
-        if self
-            .last_hyperlink_search_position
-            .map_or(true, |last_pos| {
-                // Only search if mouse moved significantly or enough time passed
-                let distance_moved = ((position.x - last_pos.x).abs()
-                    + (position.y - last_pos.y).abs())
-                    > FIND_HYPERLINK_THROTTLE_PX;
-                let time_elapsed = now.duration_since(self.last_mouse_move_time).as_millis() > 100;
-                distance_moved || time_elapsed
-            })
-        {
+        if self.last_hyperlink_search_position.is_none_or(|last_pos| {
+            // Only search if mouse moved significantly or enough time passed
+            let distance_moved = ((position.x - last_pos.x).abs()
+                + (position.y - last_pos.y).abs())
+                > FIND_HYPERLINK_THROTTLE_PX;
+            let time_elapsed = now.duration_since(self.last_mouse_move_time).as_millis() > 100;
+            distance_moved || time_elapsed
+        }) {
             self.last_mouse_move_time = now;
             self.last_hyperlink_search_position = Some(position);
             self.events.push_back(InternalEvent::FindHyperlink(
@@ -2544,15 +2545,15 @@ impl Terminal {
                     self.last_content.display_offset,
                 );
 
-                if let Some(mouse_up_hyperlink) = self.find_hyperlink_at_point(point) {
-                    if mouse_down_hyperlink == mouse_up_hyperlink {
-                        self.events
-                            .push_back(InternalEvent::ProcessHyperlink(mouse_up_hyperlink, true));
-                        self.selection_phase = SelectionPhase::Ended;
-                        self.last_mouse = None;
-                        self.mouse_down_position = None;
-                        return;
-                    }
+                if let Some(mouse_up_hyperlink) = self.find_hyperlink_at_point(point)
+                    && mouse_down_hyperlink == mouse_up_hyperlink
+                {
+                    self.events
+                        .push_back(InternalEvent::ProcessHyperlink(mouse_up_hyperlink, true));
+                    self.selection_phase = SelectionPhase::Ended;
+                    self.last_mouse = None;
+                    self.mouse_down_position = None;
+                    return;
                 }
             }
 
@@ -2752,7 +2753,9 @@ impl Terminal {
 
     /// Reconnect a finished SSH session while retaining its terminal grid and history.
     pub fn reconnect(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.lifecycle.state() != ConnectionState::Exited { return false; }
+        if self.lifecycle.state() != ConnectionState::Exited {
+            return false;
+        }
         let TerminalTarget::Ssh(params) = &self.template.target else {
             return false;
         };
@@ -2828,7 +2831,7 @@ impl Terminal {
     }
 
     pub fn clone_builder(&self, cx: &App, cwd: Option<PathBuf>) -> Task<Result<TerminalBuilder>> {
-        let working_directory = self.working_directory().or_else(|| cwd);
+        let working_directory = self.working_directory().or(cwd);
         TerminalBuilder::new_with_options(
             working_directory,
             self.template.target.clone(),

@@ -406,8 +406,10 @@ mod tests {
 
     #[test]
     fn new_results_select_first_directory_and_reset_old_selection() {
-        let mut completion = PathCompletion::default();
-        completion.open = true;
+        let mut completion = PathCompletion {
+            open: true,
+            ..Default::default()
+        };
         completion.set_candidates(vec!["/alpha/".into(), "/beta/".into()]);
         assert_eq!(completion.selected_path(), Some("/alpha/"));
         completion.selected = Some(1);
@@ -419,8 +421,10 @@ mod tests {
 
     #[test]
     fn pending_or_dismissed_candidates_cannot_be_accepted() {
-        let mut completion = PathCompletion::default();
-        completion.open = true;
+        let mut completion = PathCompletion {
+            open: true,
+            ..Default::default()
+        };
         completion.set_candidates(vec!["/old/".into()]);
         completion.loading = true;
         assert_eq!(completion.selected_path(), None);

@@ -624,7 +624,7 @@ impl russh_sftp::server::Handler for FsSession {
         if write && pflags.contains(OpenFlags::CREATE) && pflags.contains(OpenFlags::EXCLUDE) {
             let exists = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
             if exists {
-                return Err(StatusCode::Failure.into());
+                return Err(StatusCode::Failure);
             }
         }
         let mut options = std::fs::OpenOptions::new();

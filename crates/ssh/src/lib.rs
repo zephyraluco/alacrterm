@@ -50,7 +50,7 @@ mod handler;
 mod params;
 mod session;
 mod setup;
-pub use setup::{SessionContext, SessionSetup, SshCommandConnection, CommandOutput};
+pub use setup::{CommandOutput, SessionContext, SessionSetup, SshCommandConnection};
 mod x11;
 mod x11_target;
 pub use x11_target::{SessionOptions, X11Lease, X11Stream, X11Target};
@@ -62,4 +62,4 @@ pub use fs::{
 };
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
 pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize};
-pub use session::{SshOutput, SshEvent, SshSession};
+pub use session::{SshEvent, SshOutput, SshSession};

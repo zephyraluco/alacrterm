@@ -1,9 +1,8 @@
+use crate::local_server;
 use futures::StreamExt as _;
+use local_server::{EXIT_CODE, PASSWORD};
 use ssh::{HostKeyDecision, HostKeyPolicy, SshEvent, SshParams, SshSession, SshSize};
 use std::{path::PathBuf, time::Duration};
-#[path = "../../../ssh/examples/local_server.rs"]
-mod local_server;
-use local_server::{EXIT_CODE, PASSWORD};
 fn options() -> ssh::SessionOptions {
     ssh::SessionOptions {
         x11: Some(std::sync::Arc::new(super::WayxTarget)),

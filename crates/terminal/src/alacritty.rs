@@ -6,6 +6,7 @@ use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
 
 mod hyperlinks;
 
+use alacritty_terminal::vte::ansi::Handler;
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener, Notify, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
@@ -23,22 +24,18 @@ use alacritty_terminal::{
     },
     tty,
     vi_mode::{ViModeCursor, ViMotion as AlacViMotion},
-    vte::ansi::{
-        ClearMode, CursorShape as AlacCursorShape, CursorStyle as AlacCursorStyle,
-    },
+    vte::ansi::{ClearMode, CursorShape as AlacCursorShape, CursorStyle as AlacCursorStyle},
 };
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use util::paths::PathStyle;
-use alacritty_terminal::vte::ansi::Handler;
 #[cfg(target_os = "windows")]
 use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 
 use crate::{
     Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, Modes, Point,
-    Range, RenderableCells, Scroll, Search, Selection, SelectionRange, SelectionSide, SelectionType,
-    TerminalBackendEvent, TerminalBounds, ViMotion,
-    pty_info::ProcessIdGetter,
+    Range, RenderableCells, Scroll, Search, Selection, SelectionRange, SelectionSide,
+    SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion, pty_info::ProcessIdGetter,
 };
 
 pub(super) use hyperlinks::{HyperlinkMatch, RegexSearches};
@@ -434,11 +431,6 @@ impl Cell {
     #[inline]
     pub fn character(&self) -> char {
         self.cell.c
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_character(&mut self, character: char) {
-        self.cell.c = character;
     }
 
     #[inline]
@@ -1130,5 +1122,4 @@ mod tests {
         parser.advance(&mut *term, b"\x1b[?1049h");
         assert!(history_scroll(&term, 0).is_none());
     }
-
 }

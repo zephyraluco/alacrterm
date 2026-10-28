@@ -40,7 +40,9 @@ impl AppRoot {
 
             let footer = DialogFooter::new()
                 .child(DialogClose::new().child(Button::new("reject").label("不信任")))
-                .child(DialogAction::new().child(Button::new("accept").label("信任并继续").primary()));
+                .child(
+                    DialogAction::new().child(Button::new("accept").label("信任并继续").primary()),
+                );
 
             dialog
                 .title("未知主机密钥")

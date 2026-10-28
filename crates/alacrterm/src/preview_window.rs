@@ -59,10 +59,10 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt as _;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render,
-    SharedString, Styled as _, StyledImage as _, Subscription, WeakEntity, Window, WindowBounds,
-    WindowKind, WindowOptions, div, img, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
+    Styled as _, StyledImage as _, Subscription, WeakEntity, Window, WindowBounds, WindowKind,
+    WindowOptions, div, img, px, size,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Root, Selectable as _, Sizable as _, TitleBar,
@@ -81,10 +81,7 @@ use gpui_kit::component::{
 use terminal::{SshFs, TransferEvent};
 
 use crate::AppRoot;
-use crate::actions::{
-    ClosePreviewWindow, GotoPreviewLine, SavePreviewFile,
-    TogglePreviewWordWrap,
-};
+use crate::actions::{ClosePreviewWindow, GotoPreviewLine, SavePreviewFile, TogglePreviewWordWrap};
 use crate::assets::IconName;
 use crate::format;
 use crate::keymap::PREVIEW_CONTEXT;
@@ -166,8 +163,18 @@ impl FileKind {
             }
             if matches!(
                 extension,
-                "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "flv" | "m4v" | "mpg" | "mpeg"
-                    | "ts" | "3gp"
+                "mp4"
+                    | "mkv"
+                    | "webm"
+                    | "avi"
+                    | "mov"
+                    | "wmv"
+                    | "flv"
+                    | "m4v"
+                    | "mpg"
+                    | "mpeg"
+                    | "ts"
+                    | "3gp"
             ) {
                 return Self::Video;
             }
@@ -212,11 +219,68 @@ impl FileKind {
 /// 「这个文件算不算文本」的扩展名(决定 [`FileKind::Text`],与具体染哪种颜色无关 ——
 /// 那件事归 [`Language`])。宽一点没关系:多认一种文本只是多一个能看的文件。
 const TEXT_EXTENSIONS: [&str; 62] = [
-    "txt", "text", "md", "markdown", "rst", "log", "csv", "tsv", "json", "jsonc", "json5", "toml",
-    "yaml", "yml", "ini", "cfg", "conf", "properties", "env", "xml", "html", "htm", "css", "scss",
-    "less", "js", "mjs", "cjs", "ts", "tsx", "jsx", "vue", "svelte", "rs", "py", "pyi", "rb", "go",
-    "c", "h", "cc", "cpp", "cxx", "hpp", "hxx", "java", "kt", "kts", "swift", "php", "pl", "lua",
-    "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "sql", "diff", "patch",
+    "txt",
+    "text",
+    "md",
+    "markdown",
+    "rst",
+    "log",
+    "csv",
+    "tsv",
+    "json",
+    "jsonc",
+    "json5",
+    "toml",
+    "yaml",
+    "yml",
+    "ini",
+    "cfg",
+    "conf",
+    "properties",
+    "env",
+    "xml",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "less",
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "tsx",
+    "jsx",
+    "vue",
+    "svelte",
+    "rs",
+    "py",
+    "pyi",
+    "rb",
+    "go",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "cxx",
+    "hpp",
+    "hxx",
+    "java",
+    "kt",
+    "kts",
+    "swift",
+    "php",
+    "pl",
+    "lua",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "ps1",
+    "bat",
+    "cmd",
+    "sql",
+    "diff",
+    "patch",
 ];
 
 /// 预览编辑器认得的语言。
@@ -316,11 +380,7 @@ struct Loaded {
 impl Loaded {
     /// 状态栏上的编码名。
     fn encoding(&self) -> &'static str {
-        if self.bom {
-            "UTF-8 with BOM"
-        } else {
-            "UTF-8"
-        }
+        if self.bom { "UTF-8 with BOM" } else { "UTF-8" }
     }
 }
 
@@ -342,7 +402,6 @@ fn caret(text: &Rope, offset: usize) -> (usize, usize, usize) {
 fn counts(text: &Rope) -> (usize, usize) {
     (text.lines_len(), text.len_chars())
 }
-
 
 /// 正文现在是什么。
 enum Body {
@@ -445,11 +504,14 @@ struct SaveOperationId(u64);
 impl SaveOperationId {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        Self(NEXT.fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |value| value.checked_add(1),
-        ).expect("save operation identity exhausted"))
+        Self(
+            NEXT.try_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |value| value.checked_add(1),
+            )
+            .expect("save operation identity exhausted"),
+        )
     }
 }
 
@@ -496,11 +558,14 @@ struct PreviewId(u64);
 impl PreviewId {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        Self(NEXT.fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |value| value.checked_add(1),
-        ).expect("preview identity exhausted"))
+        Self(
+            NEXT.try_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |value| value.checked_add(1),
+            )
+            .expect("preview identity exhausted"),
+        )
     }
 }
 
@@ -624,13 +689,9 @@ impl PreviewWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ix) = self
-            .tabs
-            .iter()
-            .position(|tab| {
-                tab.request.session == request.session && tab.request.remote_path == request.remote_path
-            })
-        {
+        if let Some(ix) = self.tabs.iter().position(|tab| {
+            tab.request.session == request.session && tab.request.remote_path == request.remote_path
+        }) {
             // 同一个远端文件已经开着:切过去就行(内容可能已变，但用户看得见标签就在那儿)。
             // 重复请求那份新缓存随 `request` 析构，租约释放时自动删。
             self.active = ix;
@@ -740,7 +801,10 @@ impl PreviewWindow {
     fn close_gate(weak: &WeakEntity<Self>, window: &mut Window, cx: &mut App) -> bool {
         // 视图已经没了(窗口在收尾)⇒ 没什么可拦的。
         let Ok((saving, dirty_count)) = weak.read_with(cx, |this, _| {
-            let saving = this.tabs.iter().any(|tab| close_ask(tab) == CloseAsk::Saving);
+            let saving = this
+                .tabs
+                .iter()
+                .any(|tab| close_ask(tab) == CloseAsk::Saving);
             let dirty = this
                 .tabs
                 .iter()
@@ -813,11 +877,7 @@ impl PreviewWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(ix) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == preview_id)
-        else {
+        let Some(ix) = self.tabs.iter().position(|tab| tab.id == preview_id) else {
             // 标签在读的中途被关了 ⇒ 正文就别摆了。
             return;
         };
@@ -914,7 +974,14 @@ impl PreviewWindow {
                             let (done, total) = (progress.bytes_done, progress.bytes_total);
                             // 视图已经没了也把这次写回读完:半截的远端文件比多等一会儿糟。
                             let _ = this.update_in(cx, |this, window, cx| {
-                                this.on_save_progress(preview_id, operation_id, done, total, window, cx)
+                                this.on_save_progress(
+                                    preview_id,
+                                    operation_id,
+                                    done,
+                                    total,
+                                    window,
+                                    cx,
+                                )
                             });
                         }
                         TransferEvent::Done(result) => {
@@ -951,11 +1018,7 @@ impl PreviewWindow {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == preview_id)
-        else {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == preview_id) else {
             return;
         };
         let Body::Text(text) = &mut tab.body else {
@@ -985,11 +1048,7 @@ impl PreviewWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(ix) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == preview_id)
-        else {
+        let Some(ix) = self.tabs.iter().position(|tab| tab.id == preview_id) else {
             return;
         };
         let outcome = {
@@ -1162,11 +1221,31 @@ impl PreviewWindow {
                         ),
                 )
                 .child(toolbar_separator(cx))
-                .child(action_button("preview-undo", IconName::Undo2, "撤销 (Ctrl+Z)", Undo))
-                .child(action_button("preview-redo", IconName::Redo2, "重做 (Ctrl+Y)", Redo))
+                .child(action_button(
+                    "preview-undo",
+                    IconName::Undo2,
+                    "撤销 (Ctrl+Z)",
+                    Undo,
+                ))
+                .child(action_button(
+                    "preview-redo",
+                    IconName::Redo2,
+                    "重做 (Ctrl+Y)",
+                    Redo,
+                ))
                 .child(toolbar_separator(cx))
-                .child(action_button("preview-cut", IconName::Scissors, "剪切 (Ctrl+X)", Cut))
-                .child(action_button("preview-copy", IconName::Copy, "复制 (Ctrl+C)", Copy))
+                .child(action_button(
+                    "preview-cut",
+                    IconName::Scissors,
+                    "剪切 (Ctrl+X)",
+                    Cut,
+                ))
+                .child(action_button(
+                    "preview-copy",
+                    IconName::Copy,
+                    "复制 (Ctrl+C)",
+                    Copy,
+                ))
                 .child(action_button(
                     "preview-paste",
                     IconName::ClipboardPaste,
@@ -1243,15 +1322,17 @@ impl PreviewWindow {
                 cx.stop_propagation();
                 this.request_close_tab(ix, window, cx)
             });
-            tabs.push(built.suffix(
-                Button::new(("preview-tab-close", ix))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::WindowClose)
-                    .tooltip("关闭标签 (Ctrl+W)")
-                    .occlude()
-                    .on_click(close),
-            ));
+            tabs.push(
+                built.suffix(
+                    Button::new(("preview-tab-close", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::WindowClose)
+                        .tooltip("关闭标签 (Ctrl+W)")
+                        .occlude()
+                        .on_click(close),
+                ),
+            );
         }
 
         h_flex()
@@ -1406,14 +1487,14 @@ impl Render for PreviewWindow {
             .key_context(PREVIEW_CONTEXT)
             .track_focus(&self.root_focus)
             .on_action(cx.listener(|this, _: &SavePreviewFile, window, cx| this.save(window, cx)))
+            .on_action(cx.listener(|this, _: &ClosePreviewWindow, window, cx| {
+                this.request_close_self(window, cx)
+            }))
             .on_action(
-                cx.listener(|this, _: &ClosePreviewWindow, window, cx| {
-                    this.request_close_self(window, cx)
+                cx.listener(|this, _: &GotoPreviewLine, window, cx| {
+                    this.open_goto_line(window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &GotoPreviewLine, window, cx| {
-                this.open_goto_line(window, cx)
-            }))
             .on_action(cx.listener(|this, _: &TogglePreviewWordWrap, window, cx| {
                 this.toggle_soft_wrap(window, cx)
             }))
@@ -1431,7 +1512,7 @@ impl Render for PreviewWindow {
                     .child(self.render_body(cx)),
             )
             .child(self.render_status_bar(cx))
-            // 覆盖层由 gpui-kit `Root` 渲染。
+        // 覆盖层由 gpui-kit `Root` 渲染。
     }
 }
 
@@ -1592,11 +1673,14 @@ fn refresh_parent_dir(tab: &PreviewTab, cx: &mut App) {
         return;
     };
     let dir = dir.to_string();
-    root.update(cx, |root, cx| root.reload_files_dir(tab.request.session, &dir, cx));
+    root.update(cx, |root, cx| {
+        root.reload_files_dir(tab.request.session, &dir, cx)
+    });
 }
 
 /// 工具条上两组动作之间的分隔线。
-fn toolbar_separator(cx: &App) -> impl IntoElement {    div()
+fn toolbar_separator(cx: &App) -> impl IntoElement {
+    div()
         .flex_none()
         .w(px(1.))
         .h(px(16.))
@@ -1766,7 +1850,10 @@ impl AppRoot {
                         .clone()
                         .downcast::<PreviewWindow>()
                         .is_ok_and(|view| {
-                            view.read(cx).tabs.iter().any(|tab| close_ask(tab) != CloseAsk::Allow)
+                            view.read(cx)
+                                .tabs
+                                .iter()
+                                .any(|tab| close_ask(tab) != CloseAsk::Allow)
                         })
                 })
                 .unwrap_or(false)
@@ -1869,7 +1956,14 @@ mod tests {
     /// 分类错了会走错界面(拿图片当文本读 / 把音频当成能在应用里看),所以这里逐类钉一遍。
     #[test]
     fn kinds_follow_the_extension() {
-        for name in ["a.txt", "README", "Makefile", "notes.md", "data.json", "s.sh"] {
+        for name in [
+            "a.txt",
+            "README",
+            "Makefile",
+            "notes.md",
+            "data.json",
+            "s.sh",
+        ] {
             assert_eq!(FileKind::of(name), FileKind::Text, "{name} 应当是文本");
         }
         // 图片那一类的清单直接用 gpui 图片元素自己的(`Img::extensions`),所以这里只抽查
@@ -1905,7 +1999,13 @@ mod tests {
                 "{name} 应当交给系统默认程序打开"
             );
         }
-        for name in ["notes.md", "photo.png", "a.bin", "no-extension", "archive.tar.gz"] {
+        for name in [
+            "notes.md",
+            "photo.png",
+            "a.bin",
+            "no-extension",
+            "archive.tar.gz",
+        ] {
             assert!(
                 !FileKind::of(name).handed_to_system(),
                 "{name} 不该走系统程序(应用里有得看)"
@@ -1998,7 +2098,11 @@ mod tests {
             );
         }
         // 纯文本本来就没有语法,它应当是「注册了但没有语法树」的那一条。
-        assert!(registered.iter().any(|name| name.as_ref() == Language::Plain.id()));
+        assert!(
+            registered
+                .iter()
+                .any(|name| name.as_ref() == Language::Plain.id())
+        );
     }
 
     /// 状态栏那三个数都**从 1 起**;列与位置按**字符**算(一个汉字算一个)。

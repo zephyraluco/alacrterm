@@ -107,10 +107,14 @@ impl SettingsWindow {
                                     step: 1.0,
                                 },
                                 |cx: &App| {
-                                    config::as_number(config::settings(cx).render.font_size.as_f32())
+                                    config::as_number(
+                                        config::settings(cx).render.font_size.as_f32(),
+                                    )
                                 },
                                 move |value: f64, cx: &mut App| {
-                                    update_render(&root, cx, |render| render.font_size = px(value as f32));
+                                    update_render(&root, cx, |render| {
+                                        render.font_size = px(value as f32)
+                                    });
                                 },
                             )
                         },
@@ -149,7 +153,9 @@ impl SettingsWindow {
                                     step: 0.05,
                                 },
                                 |cx: &App| {
-                                    config::as_number(config::settings(cx).render.line_height_multiplier)
+                                    config::as_number(
+                                        config::settings(cx).render.line_height_multiplier,
+                                    )
                                 },
                                 move |value: f64, cx: &mut App| {
                                     update_render(&root, cx, |render| {
@@ -189,8 +195,10 @@ impl SettingsWindow {
                             SettingField::dropdown(
                                 cursor_shape_options(),
                                 |cx: &App| {
-                                    config::cursor_shape_name(config::settings(cx).render.cursor_shape)
-                                        .into()
+                                    config::cursor_shape_name(
+                                        config::settings(cx).render.cursor_shape,
+                                    )
+                                    .into()
                                 },
                                 move |value: SharedString, cx: &mut App| {
                                     let Some(shape) = config::parse_cursor_shape(&value) else {
@@ -214,7 +222,8 @@ impl SettingsWindow {
                             )
                         },
                     )),
-            ).group(suggestion_group(self.app_root.clone()))
+            )
+            .group(suggestion_group(self.app_root.clone()))
     }
 }
 
@@ -222,24 +231,80 @@ fn suggestion_group(root: WeakEntity<AppRoot>) -> SettingGroup {
     type Read = fn(&terminal_view::SuggestionSettings) -> bool;
     type Write = fn(&mut terminal_view::SuggestionSettings, bool);
     let fields: &[(&str, &str, Read, Write)] = &[
-        ("命令建议", "显示终端补全候选列表。", |s| s.enabled, |s,v| s.enabled=v),
-        ("自动显示建议", "关闭后使用 Ctrl+Space 手动查询。", |s| s.automatic, |s,v| s.automatic=v),
-        ("历史候选", "仅保存当前分屏内存中的历史；关闭时清除。", |s| s.history, |s,v| s.history=v),
-        ("Shell 命令候选", "使用当前 shell 的命令、别名和函数。", |s| s.commands, |s,v| s.commands=v),
-        ("路径候选", "补全当前会话的文件和目录。", |s| s.paths, |s,v| s.paths=v),
-        ("子命令和选项", "显示内置命令规格与说明。", |s| s.specifications, |s,v| s.specifications=v),
-        ("项目参数", "从当前项目提供脚本和分支等候选。", |s| s.dynamic, |s,v| s.dynamic=v),
-        ("模糊匹配", "命令名允许子序列匹配，前缀匹配优先。", |s| s.fuzzy, |s,v| s.fuzzy=v),
-        ("接受后补空格", "文件和命令接受后追加空格；目录和历史除外。", |s| s.insert_trailing_space, |s,v| s.insert_trailing_space=v),
-        ("SSH 自动集成", "为 Bash/Zsh 安装或复用启动入口，仅对 Alacrterm 会话启用。", |s| s.remote_integration, |s,v| s.remote_integration=v),
+        (
+            "命令建议",
+            "显示终端补全候选列表。",
+            |s| s.enabled,
+            |s, v| s.enabled = v,
+        ),
+        (
+            "自动显示建议",
+            "关闭后使用 Ctrl+Space 手动查询。",
+            |s| s.automatic,
+            |s, v| s.automatic = v,
+        ),
+        (
+            "历史候选",
+            "仅保存当前分屏内存中的历史；关闭时清除。",
+            |s| s.history,
+            |s, v| s.history = v,
+        ),
+        (
+            "Shell 命令候选",
+            "使用当前 shell 的命令、别名和函数。",
+            |s| s.commands,
+            |s, v| s.commands = v,
+        ),
+        (
+            "路径候选",
+            "补全当前会话的文件和目录。",
+            |s| s.paths,
+            |s, v| s.paths = v,
+        ),
+        (
+            "子命令和选项",
+            "显示内置命令规格与说明。",
+            |s| s.specifications,
+            |s, v| s.specifications = v,
+        ),
+        (
+            "项目参数",
+            "从当前项目提供脚本和分支等候选。",
+            |s| s.dynamic,
+            |s, v| s.dynamic = v,
+        ),
+        (
+            "模糊匹配",
+            "命令名允许子序列匹配，前缀匹配优先。",
+            |s| s.fuzzy,
+            |s, v| s.fuzzy = v,
+        ),
+        (
+            "接受后补空格",
+            "文件和命令接受后追加空格；目录和历史除外。",
+            |s| s.insert_trailing_space,
+            |s, v| s.insert_trailing_space = v,
+        ),
+        (
+            "SSH 自动集成",
+            "为 Bash/Zsh 安装或复用启动入口，仅对 Alacrterm 会话启用。",
+            |s| s.remote_integration,
+            |s, v| s.remote_integration = v,
+        ),
     ];
     let mut group = SettingGroup::new();
     for &(title, description, read, write) in fields {
         let root = root.clone();
-        group = group.item(render_item(title, description, SettingField::switch(
-            move |cx: &App| read(&config::settings(cx).render.suggestions),
-            move |value, cx: &mut App| update_render(&root, cx, |render| write(&mut render.suggestions, value)),
-        )));
+        group = group.item(render_item(
+            title,
+            description,
+            SettingField::switch(
+                move |cx: &App| read(&config::settings(cx).render.suggestions),
+                move |value, cx: &mut App| {
+                    update_render(&root, cx, |render| write(&mut render.suggestions, value))
+                },
+            ),
+        ));
     }
     group
 }
@@ -287,14 +352,30 @@ fn theme_dropdown(cx: &App, mode: ThemeMode) -> SettingField<SharedString> {
 
 fn terminal_color_dropdown(root: WeakEntity<AppRoot>, cx: &App) -> SettingField<SharedString> {
     let mut options = vec![(SharedString::default(), "默认／自定义".into())];
-    let mut entries: Vec<_> = config::ColorSchemeRegistry::global(cx).entries().iter()
-        .map(|(id, scheme)| (SharedString::from(id.clone()), SharedString::from(scheme.name.clone())))
+    let mut entries: Vec<_> = config::ColorSchemeRegistry::global(cx)
+        .entries()
+        .iter()
+        .map(|(id, scheme)| {
+            (
+                SharedString::from(id.clone()),
+                SharedString::from(scheme.name.clone()),
+            )
+        })
         .collect();
-    entries.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then(a.0.cmp(&b.0)));
+    entries.sort_by(|a, b| {
+        a.1.to_lowercase()
+            .cmp(&b.1.to_lowercase())
+            .then(a.0.cmp(&b.0))
+    });
     options.extend(entries);
     SettingField::scrollable_dropdown(
         options,
-        |cx: &App| config::settings(cx).color_scheme.clone().unwrap_or_default(),
+        |cx: &App| {
+            config::settings(cx)
+                .color_scheme
+                .clone()
+                .unwrap_or_default()
+        },
         move |value: SharedString, cx: &mut App| {
             let id = (!value.is_empty()).then_some(value);
             let palette = config::palette_settings(id.as_deref(), cx);
@@ -342,7 +423,9 @@ pub(crate) fn update_render(
 ) {
     let mut settings = config::settings(cx).render.clone();
     change(&mut settings);
-    if let Err(error) = config::save_render_settings(&settings, config::settings(cx).color_scheme.as_deref()) {
+    if let Err(error) =
+        config::save_render_settings(&settings, config::settings(cx).color_scheme.as_deref())
+    {
         eprintln!("[config] 保存终端设置失败，保持原设置：{error:#}");
         return;
     }
@@ -376,29 +459,25 @@ impl Render for SettingsWindow {
                 ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        Settings::new("app-settings")
-                            .page(self.theme_page(cx))
-                            .page(self.terminal_page(cx)),
-                    ),
+                div().flex_1().min_h_0().child(
+                    Settings::new("app-settings")
+                        .page(self.theme_page(cx))
+                        .page(self.terminal_page(cx)),
+                ),
             )
-            // 覆盖层由 gpui-kit `Root` 渲染。
+        // 覆盖层由 gpui-kit `Root` 渲染。
     }
 }
 
 impl AppRoot {
     /// 打开或激活设置窗口。
     pub(crate) fn open_settings_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(handle) = self.settings_window {
-            if handle
+        if let Some(handle) = self.settings_window
+            && handle
                 .update(cx, |_, window, _| window.activate_window())
                 .is_ok()
-            {
-                return;
-            }
+        {
+            return;
         }
 
         let main_window = window.window_handle();

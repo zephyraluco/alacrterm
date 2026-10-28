@@ -150,10 +150,10 @@ mod tests {
 
             let mut names = Vec::new();
             for section in &sections {
-                if let Some(context) = section.context.as_deref() {
-                    if let Err(error) = KeyBindingContextPredicate::parse(context) {
-                        panic!("{asset} 的 context `{context}` 非法：{error}");
-                    }
+                if let Some(context) = section.context.as_deref()
+                    && let Err(error) = KeyBindingContextPredicate::parse(context)
+                {
+                    panic!("{asset} 的 context `{context}` 非法：{error}");
                 }
                 for (keystrokes, action) in &section.bindings {
                     for part in keystrokes.split_whitespace() {

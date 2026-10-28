@@ -79,7 +79,10 @@ impl SessionRecord {
         SessionRequest {
             name: Some(self.name.clone()),
             target: SessionTarget::Ssh {
-                host: self.host.clone(), port: self.port, user: self.user.clone(), password: self.password.clone(),
+                host: self.host.clone(),
+                port: self.port,
+                user: self.user.clone(),
+                password: self.password.clone(),
             },
         }
     }
@@ -259,7 +262,9 @@ impl SessionTree {
     pub fn persist(entries: &[SessionEntry], expanded: &[u64]) -> std::io::Result<()> {
         let path = settings::sessions_config_path();
         match std::fs::read_to_string(&path) {
-            Ok(text) => { serde_json::from_str::<PersistedSessions>(&text).map_err(std::io::Error::other)?; }
+            Ok(text) => {
+                serde_json::from_str::<PersistedSessions>(&text).map_err(std::io::Error::other)?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }

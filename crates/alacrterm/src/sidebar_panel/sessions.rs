@@ -319,7 +319,7 @@ fn session_row_element(
         (true, false) => IconName::Folder,
         (false, _) => IconName::Globe,
     };
-    let caret = (row.is_folder && row.has_children).then(|| {
+    let caret = (row.is_folder && row.has_children).then_some({
         if row.expanded {
             IconName::ChevronDown
         } else {

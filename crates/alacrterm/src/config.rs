@@ -92,7 +92,10 @@ pub(crate) fn palette_settings(id: Option<&str>, cx: &App) -> RenderSettings {
 }
 
 /// 把终端渲染参数写回 `config/terminal.json`（只覆盖设置窗口管的键）。
-pub(crate) fn save_render_settings(settings: &RenderSettings, color_scheme: Option<&str>) -> anyhow::Result<()> {
+pub(crate) fn save_render_settings(
+    settings: &RenderSettings,
+    color_scheme: Option<&str>,
+) -> anyhow::Result<()> {
     let mut map = serde_json::Map::new();
     map.insert("color_scheme".into(), json!(color_scheme));
     map.insert("font_family".into(), json!(settings.font_family));
@@ -381,7 +384,9 @@ pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut Ap
     if let Err(error) = save_theme_choice(
         settings.dark_theme.as_deref(),
         settings.light_theme.as_deref(),
-    ) { log::error!("Save theme preferences: {error:#}"); }
+    ) {
+        log::error!("Save theme preferences: {error:#}");
+    }
 
     let mode = Theme::global(cx).mode;
     change_theme(mode, cx);

@@ -1,12 +1,19 @@
 //! 程序入口与根视图 [`AppRoot`]：标题栏、侧边栏与终端主体、全局底部状态栏。
 //! 外壳分模块（`components` / `sidebar_panel` / `terminal_panel` 等），终端核心在 `crates/terminal`。
 
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
+#[cfg(test)]
+#[path = "../../ssh/examples/local_server.rs"]
+mod local_server;
 
 mod actions;
 mod assets;
-mod components;
 mod completion;
+mod components;
 mod config;
 mod dialog;
 use util::format;
@@ -22,8 +29,8 @@ mod status_bar;
 mod tab_bar;
 mod terminal_panel;
 mod transfer_manager;
-mod welcome;
 mod wayx_control;
+mod welcome;
 mod x11;
 
 use gpui::{
@@ -94,7 +101,11 @@ mod close_tests {
     #[test]
     fn identical_context_is_not_reapplied() {
         let current = context("Alacrterm", None);
-        assert!(!needs_context_apply(Some(&current), &current.clone(), false));
+        assert!(!needs_context_apply(
+            Some(&current),
+            &current.clone(),
+            false
+        ));
     }
 
     #[test]
@@ -239,7 +250,8 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         if cancel {
-            self._transfers.update(cx, |manager, cx| manager.cancel_all(cx));
+            self._transfers
+                .update(cx, |manager, cx| manager.cancel_all(cx));
         }
         if self._transfers.read(cx).active_count() == 0 {
             self.finish_main_close(window, cx);
@@ -299,28 +311,46 @@ impl AppRoot {
                 dialog
                     .title("传输尚未完成")
                     .w(px(420.))
-                    .child(div().text_sm().child(format!("仍有 {active} 项传输在运行。")))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(format!("仍有 {active} 项传输在运行。")),
+                    )
                     .footer(
                         DialogFooter::new()
-                            .child(Button::new("transfer-exit-back").label("返回").on_click(move |_, window, cx| {
-                                window.close_dialog(cx);
-                                let _ = returning.update(cx, |root, _| root.close_when_transfers_finish = false);
-                            }))
-                            .child(Button::new("transfer-exit-cancel").label("取消传输并退出").on_click(move |_, window, cx| {
-                                window.close_dialog(cx);
-                                let _ = cancelling.update(cx, |root, cx| {
-                                    root.close_after_pending_transfers(true, window, cx);
-                                });
-                            }))
-                            .child(Button::new("transfer-exit-wait").label("等待完成").primary().on_click(move |_, window, cx| {
-                                window.close_dialog(cx);
-                                let _ = waiting.update(cx, |root, cx| {
-                                    root.close_after_pending_transfers(false, window, cx);
-                                });
-                            })),
+                            .child(Button::new("transfer-exit-back").label("返回").on_click(
+                                move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ = returning.update(cx, |root, _| {
+                                        root.close_when_transfers_finish = false
+                                    });
+                                },
+                            ))
+                            .child(
+                                Button::new("transfer-exit-cancel")
+                                    .label("取消传输并退出")
+                                    .on_click(move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        let _ = cancelling.update(cx, |root, cx| {
+                                            root.close_after_pending_transfers(true, window, cx);
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new("transfer-exit-wait")
+                                    .label("等待完成")
+                                    .primary()
+                                    .on_click(move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        let _ = waiting.update(cx, |root, cx| {
+                                            root.close_after_pending_transfers(false, window, cx);
+                                        });
+                                    }),
+                            ),
                     )
                     .on_cancel(move |_, _, cx| {
-                        let _ = dismissed.update(cx, |root, _| root.close_when_transfers_finish = false);
+                        let _ = dismissed
+                            .update(cx, |root, _| root.close_when_transfers_finish = false);
                         true
                     })
             });
@@ -356,11 +386,18 @@ impl AppRoot {
         let sessions = cx.new(|_| SessionsState::new());
         let app_root = cx.weak_entity();
         let transfers = cx.new(|_| TransferManager::default());
-        let transfer_sub = cx.observe_in(&transfers, window, |root: &mut Self, manager, window, cx| {
-            if close_after_transfers(manager.read(cx).active_count(), root.close_when_transfers_finish) {
-                root.finish_main_close(window, cx);
-            }
-        });
+        let transfer_sub = cx.observe_in(
+            &transfers,
+            window,
+            |root: &mut Self, manager, window, cx| {
+                if close_after_transfers(
+                    manager.read(cx).active_count(),
+                    root.close_when_transfers_finish,
+                ) {
+                    root.finish_main_close(window, cx);
+                }
+            },
+        );
         let transfer_completion_sub = cx.subscribe(&transfers, |root: &mut Self, _, event, cx| {
             if event.result.is_ok() {
                 match &event.done {
@@ -368,31 +405,50 @@ impl AppRoot {
                         let request = request.clone();
                         let root = cx.weak_entity();
                         cx.defer(move |cx| {
-                            let _ = root.update(cx, |root, cx| root.open_preview_window(request, cx));
+                            let _ =
+                                root.update(cx, |root, cx| root.open_preview_window(request, cx));
                         });
-                    },
+                    }
                     TransferDone::OpenExternally(path) => cx.open_with_system(path),
                     TransferDone::Nothing => {}
                 }
             }
-            root.files.update(cx, |files, cx| files.on_transfer_done(
-                event.session, event.label.clone(), &event.result, event.refresh.clone(), cx,
-            ));
+            root.files.update(cx, |files, cx| {
+                files.on_transfer_done(
+                    event.session,
+                    event.label.clone(),
+                    &event.result,
+                    event.refresh.clone(),
+                    cx,
+                )
+            });
         });
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
-        let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Sessions, cx));
-        let right_sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Files, cx));
+        let sidebar =
+            cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Sessions, cx));
+        let right_sidebar =
+            cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Files, cx));
         let right_sidebar_sub = cx.observe(&right_sidebar, |_, _, cx| cx.notify());
         let sidebar_sub = cx.observe(&sidebar, |_, _, cx| cx.notify());
 
         platform::start_wayx();
         let wayx_watch = cx.spawn(async move |root, cx| {
             loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
                 let status = platform::wayx_status();
-                if root.update(cx, |root, cx| {
-                    if root.wayx_status != status { root.wayx_status = status; cx.notify(); }
-                }).is_err() { break; }
+                if root
+                    .update(cx, |root, cx| {
+                        if root.wayx_status != status {
+                            root.wayx_status = status;
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         });
         let mut this = Self {
@@ -422,16 +478,15 @@ impl AppRoot {
             _wayx_watch: wayx_watch,
             _palette_watch: palette_watch,
         };
-        this.dock_layout_sub = Some(cx.subscribe_in(
-            &this.dock,
-            window,
-            |root, _, event, window, cx| {
-                if matches!(event, DockEvent::LayoutChanged) {
-                    root.sync_tabs_with_dock(cx);
-                    root.sync_active_context(window, cx);
-                }
-            },
-        ));
+        this.dock_layout_sub =
+            Some(
+                cx.subscribe_in(&this.dock, window, |root, _, event, window, cx| {
+                    if matches!(event, DockEvent::LayoutChanged) {
+                        root.sync_tabs_with_dock(cx);
+                        root.sync_active_context(window, cx);
+                    }
+                }),
+            );
         // 启动时不建会话（显示欢迎页）。
         this
     }
@@ -570,15 +625,18 @@ impl AppRoot {
             // 远端终端在哪儿，文件管理器就在哪儿（用户手动跳走、shell 没动时不动）。
             files.follow_terminal(snapshot.directory.as_deref(), cx);
         });
-        self.right_sidebar
-            .update(cx, |sidebar, cx| sidebar.set_files_enabled(snapshot.remote, cx));
+        self.right_sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_files_enabled(snapshot.remote, cx)
+        });
     }
 }
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(node) = self.dock.read(cx).zoomed_group() {
-            let group = self.tabs.iter()
+            let group = self
+                .tabs
+                .iter()
                 .filter_map(|tab| tab.read(cx).group())
                 .filter_map(|group| group.upgrade())
                 .find(|group| group.read(cx).node() == node);
@@ -596,7 +654,11 @@ impl Render for AppRoot {
                             .child(tabs),
                     )
                     .child(
-                        div().flex_1().min_h_0().w_full().overflow_hidden()
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .overflow_hidden()
                             .child(self.dock.clone()),
                     )
                     .into_any_element();
@@ -676,13 +738,16 @@ impl Render for AppRoot {
                 .with_state(&right_resize)
                 .on_resize(move |state, _, cx| {
                     if let Some(width) = state.read(cx).sizes().get(1).copied() {
-                        let _ = right_state.update(cx, |sidebar, cx| sidebar.set_panel_width(width, cx));
+                        let _ = right_state
+                            .update(cx, |sidebar, cx| sidebar.set_panel_width(width, cx));
                     }
                 })
                 .child(resizable_panel().child(body))
                 .child(
-                    resizable_panel().size(right_width)
-                        .size_range(px(0.)..Pixels::MAX).flex_none()
+                    resizable_panel()
+                        .size(right_width)
+                        .size_range(px(0.)..Pixels::MAX)
+                        .flex_none()
                         .child(self.right_sidebar.clone()),
                 )
                 .into_any_element()
@@ -698,7 +763,10 @@ impl Render for AppRoot {
             .id("app-root")
             .size_full()
             .track_focus(&self.background_focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_background_mouse_down))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_background_mouse_down),
+            )
             .bg(cx.theme().background)
             // 顶部：自绘标题栏。
             .child(
@@ -728,7 +796,10 @@ impl Render for AppRoot {
                                         .tooltip("设置")
                                         .accessibility_label("设置")
                                         .on_click(|_, window, cx| {
-                                            window.dispatch_action(Box::new(actions::OpenSettings), cx);
+                                            window.dispatch_action(
+                                                Box::new(actions::OpenSettings),
+                                                cx,
+                                            );
                                         }),
                                 ),
                         ),

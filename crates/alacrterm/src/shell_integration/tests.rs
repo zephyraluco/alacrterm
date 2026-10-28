@@ -1,10 +1,9 @@
 //! Application-owned integration policy over the public SSH API.
+use crate::local_server;
 use futures::StreamExt as _;
+use local_server::{BANNER, PASSWORD, PROMPT};
 use ssh::{HostKeyDecision, HostKeyPolicy, SshEvent, SshParams, SshSession, SshSize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
-#[path = "../../../ssh/examples/local_server.rs"]
-mod local_server;
-use local_server::{BANNER, PASSWORD, PROMPT};
 fn temp_known_hosts(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("alacrterm-ssh-test-{name}-known_hosts"));
     let _ = std::fs::remove_file(&path);

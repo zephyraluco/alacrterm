@@ -258,46 +258,66 @@ impl SshFs {
         &self,
         path: impl Into<String>,
     ) -> BoxFuture<'static, Result<Vec<RemoteEntry>, SshError>> {
-        expect(self.send(RequestKind::List(path.into())), |reply| {
-            match reply {
+        expect(
+            self.send(RequestKind::List(path.into())),
+            |reply| match reply {
                 Reply::Entries(entries) => Ok(entries),
                 _ => Err(unexpected()),
-            }
-        })
+            },
+        )
     }
 
     /// Completion queries have a deadline and never keep canceled requests queued.
-    pub fn list_completion_dir(&self, path: impl Into<String>) -> BoxFuture<'static, Result<Vec<RemoteEntry>, SshError>> {
-        expect(self.send(RequestKind::CompletionList(path.into())), |reply| match reply {
-            Reply::Entries(entries) => Ok(entries), _ => Err(unexpected()),
-        })
+    pub fn list_completion_dir(
+        &self,
+        path: impl Into<String>,
+    ) -> BoxFuture<'static, Result<Vec<RemoteEntry>, SshError>> {
+        expect(
+            self.send(RequestKind::CompletionList(path.into())),
+            |reply| match reply {
+                Reply::Entries(entries) => Ok(entries),
+                _ => Err(unexpected()),
+            },
+        )
     }
 
     /// Read bounded project metadata without downloading files or running commands.
-    pub fn read_completion_file(&self, path: impl Into<String>) -> BoxFuture<'static, Result<Vec<u8>, SshError>> {
-        expect(self.send(RequestKind::CompletionRead(path.into())), |reply| match reply {
-            Reply::Bytes(bytes) => Ok(bytes), _ => Err(unexpected()),
-        })
+    pub fn read_completion_file(
+        &self,
+        path: impl Into<String>,
+    ) -> BoxFuture<'static, Result<Vec<u8>, SshError>> {
+        expect(
+            self.send(RequestKind::CompletionRead(path.into())),
+            |reply| match reply {
+                Reply::Bytes(bytes) => Ok(bytes),
+                _ => Err(unexpected()),
+            },
+        )
     }
 
     /// 这个路径是不是目录(输入框跳转前用它把关)。
     pub fn is_dir(&self, path: impl Into<String>) -> BoxFuture<'static, Result<bool, SshError>> {
-        expect(self.send(RequestKind::IsDir(path.into())), |reply| {
-            match reply {
+        expect(
+            self.send(RequestKind::IsDir(path.into())),
+            |reply| match reply {
                 Reply::IsDir(is_dir) => Ok(is_dir),
                 _ => Err(unexpected()),
-            }
-        })
+            },
+        )
     }
 
     /// 某个路径的元数据(预览窗口显示大小 / 判断文件还是目录)。
-    pub fn stat(&self, path: impl Into<String>) -> BoxFuture<'static, Result<RemoteMeta, SshError>> {
-        expect(self.send(RequestKind::Stat(path.into())), |reply| {
-            match reply {
+    pub fn stat(
+        &self,
+        path: impl Into<String>,
+    ) -> BoxFuture<'static, Result<RemoteMeta, SshError>> {
+        expect(
+            self.send(RequestKind::Stat(path.into())),
+            |reply| match reply {
                 Reply::Meta(meta) => Ok(meta),
                 _ => Err(unexpected()),
-            }
-        })
+            },
+        )
     }
 
     /// 建一个目录。父目录必须已经存在(不递归建中间那几层)。
@@ -362,7 +382,11 @@ impl SshFs {
     }
 
     /// 把远端这一个文件下到本地**指定的路径**(文件名由调用方定)。
-    pub fn download_one(&self, remote: impl Into<String>, local_file: impl Into<PathBuf>) -> Transfer {
+    pub fn download_one(
+        &self,
+        remote: impl Into<String>,
+        local_file: impl Into<PathBuf>,
+    ) -> Transfer {
         self.send_transfer(TransferKind::DownloadOne {
             remote: remote.into(),
             local_file: local_file.into(),
@@ -392,8 +416,17 @@ impl SshFs {
         let (reply, receiver) = oneshot::channel();
         let mut request = Request { kind, reply };
 
-        let worker = if matches!(request.kind, RequestKind::CompletionList(_) | RequestKind::CompletionRead(_)) { &self.0.completion } else { &self.0.worker };
-        let mut slot = worker.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let worker = if matches!(
+            request.kind,
+            RequestKind::CompletionList(_) | RequestKind::CompletionRead(_)
+        ) {
+            &self.0.completion
+        } else {
+            &self.0.worker
+        };
+        let mut slot = worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for _ in 0..2 {
             let sender = match slot.as_ref() {
                 Some(sender) if !sender.is_closed() => sender.clone(),
@@ -430,11 +463,7 @@ impl SshFs {
             cancel: cancel.clone(),
         };
 
-        let mut slot = self
-            .0
-            .transfer
-            .lock()
-            .expect("远端文件传输句柄互斥量中毒");
+        let mut slot = self.0.transfer.lock().expect("远端文件传输句柄互斥量中毒");
         for _ in 0..2 {
             let sender = match slot.as_ref() {
                 Some(sender) if !sender.is_closed() => sender.clone(),
@@ -445,7 +474,12 @@ impl SshFs {
                 }
             };
             match sender.send(request) {
-                Ok(()) => return Transfer { events: receiver, cancel },
+                Ok(()) => {
+                    return Transfer {
+                        events: receiver,
+                        cancel,
+                    };
+                }
                 // 线程已退出:请求原样还了回来,重起一个线程再发。
                 Err(returned) => {
                     request = returned.0;
@@ -453,7 +487,10 @@ impl SshFs {
                 }
             }
         }
-        Transfer { events: receiver, cancel }
+        Transfer {
+            events: receiver,
+            cancel,
+        }
     }
 }
 
@@ -510,7 +547,10 @@ enum RequestKind {
     /// 建一个空文件。
     CreateFile(String),
     /// 重命名 / 移动。
-    Rename { from: String, to: String },
+    Rename {
+        from: String,
+        to: String,
+    },
 }
 
 enum Reply {
@@ -539,7 +579,9 @@ fn spawn_worker(params: SshParams) -> TokioSender<Request> {
 /// 起**传输** worker(另一条连接,见模块文档),返回它的入口。
 fn spawn_transfer_worker(params: SshParams) -> TokioSender<TransferRequest> {
     let name = format!("ssh-fs transfer {}", params.endpoint());
-    spawn_thread(name, move |requests| Box::pin(serve_transfers(params, requests)))
+    spawn_thread(name, move |requests| {
+        Box::pin(serve_transfers(params, requests))
+    })
 }
 
 /// 起一个后台线程:自带 current-thread 运行时,在里面把 `serve` 跑完,返回它的入口。
@@ -550,21 +592,19 @@ fn spawn_thread<T: Send + 'static>(
     serve: impl FnOnce(UnboundedReceiver<T>) -> BoxFuture<'static, ()> + Send + 'static,
 ) -> TokioSender<T> {
     let (sender, receiver) = unbounded_channel();
-    let spawned = std::thread::Builder::new()
-        .name(name)
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    log::warn!("无法启动远端文件系统运行时:{error}");
-                    return;
-                }
-            };
-            runtime.block_on(serve(receiver));
-        });
+    let spawned = std::thread::Builder::new().name(name).spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                log::warn!("无法启动远端文件系统运行时:{error}");
+                return;
+            }
+        };
+        runtime.block_on(serve(receiver));
+    });
     if let Err(error) = spawned {
         // 线程起不来 ⇒ 接收端已经没了,后续 `send` 一律失败,调用方会看到「线程已退出」。
         log::warn!("无法启动远端文件系统线程:{error}");
@@ -577,12 +617,20 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
     let mut sftp: Option<SftpSession> = None;
 
     while let Some(request) = requests.recv().await {
-        if request.reply.is_canceled() { continue; }
+        if request.reply.is_canceled() {
+            continue;
+        }
         if sftp.is_none() {
-            let connection = if matches!(request.kind, RequestKind::CompletionList(_) | RequestKind::CompletionRead(_)) {
-                tokio::time::timeout(std::time::Duration::from_secs(5), connect(&params)).await
+            let connection = if matches!(
+                request.kind,
+                RequestKind::CompletionList(_) | RequestKind::CompletionRead(_)
+            ) {
+                tokio::time::timeout(std::time::Duration::from_secs(5), connect(&params))
+                    .await
                     .unwrap_or_else(|_| Err(SshError::Sftp("补全连接超时".into())))
-            } else { connect(&params).await };
+            } else {
+                connect(&params).await
+            };
             match connection {
                 Ok(session) => sftp = Some(session),
                 Err(error) => {
@@ -597,19 +645,34 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
             RequestKind::Home => session.canonicalize(".").await.map(Reply::Home),
             RequestKind::List(path) => list_dir(session, path).await.map(Reply::Entries),
             RequestKind::CompletionList(path) => {
-                match tokio::time::timeout(std::time::Duration::from_secs(5), completion_dir(session, path)).await {
-                    Ok(result) => result.map(Reply::Entries), Err(_) => Err(SftpError::Timeout),
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    completion_dir(session, path),
+                )
+                .await
+                {
+                    Ok(result) => result.map(Reply::Entries),
+                    Err(_) => Err(SftpError::Timeout),
                 }
-            },
+            }
             RequestKind::CompletionRead(path) => {
                 match tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     let file = session.open(path).await?;
                     let mut data = Vec::new();
                     file.take(256 * 1024 + 1).read_to_end(&mut data).await?;
-                    if data.len() > 256 * 1024 { return Err(SftpError::Limited("project metadata exceeds 256 KiB".into())); }
+                    if data.len() > 256 * 1024 {
+                        return Err(SftpError::Limited(
+                            "project metadata exceeds 256 KiB".into(),
+                        ));
+                    }
                     Ok(Reply::Bytes(data))
-                }).await { Ok(result) => result, Err(_) => Err(SftpError::Timeout) }
-            },
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(SftpError::Timeout),
+                }
+            }
             RequestKind::IsDir(path) => session
                 .metadata(path)
                 .await
@@ -628,7 +691,11 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
                 let flags = OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE;
                 match session.open_with_flags(path, flags).await {
                     // 建完立刻关:不关的话 handle 会一直占着(远端有上限)。
-                    Ok(file) => file.close().await.map_err(SftpError::from).map(|()| Reply::Done),
+                    Ok(file) => file
+                        .close()
+                        .await
+                        .map_err(SftpError::from)
+                        .map(|()| Reply::Done),
                     Err(error) => Err(error),
                 }
             }
@@ -710,11 +777,23 @@ async fn completion_dir(session: &SftpSession, path: &str) -> Result<Vec<RemoteE
     let mut result = Vec::new();
     for entry in entries.take(4096) {
         let name = entry.file_name();
-        if matches!(name.as_str(), "." | "..") { continue; }
+        if matches!(name.as_str(), "." | "..") {
+            continue;
+        }
         let is_dir = if entry.file_type().is_symlink() {
-            session.metadata(format!("{}/{name}", path.trim_end_matches('/'))).await.map(|meta| meta.is_dir()).unwrap_or(false)
-        } else { entry.file_type().is_dir() };
-        result.push(RemoteEntry { name, is_dir, size: entry.metadata().len() });
+            session
+                .metadata(format!("{}/{name}", path.trim_end_matches('/')))
+                .await
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false)
+        } else {
+            entry.file_type().is_dir()
+        };
+        result.push(RemoteEntry {
+            name,
+            is_dir,
+            size: entry.metadata().len(),
+        });
     }
     Ok(result)
 }
@@ -834,7 +913,9 @@ async fn serve_transfers(params: SshParams, mut requests: UnboundedReceiver<Tran
             match connect(&params).await {
                 Ok(session) => sftp = Some(session),
                 Err(error) => {
-                    let _ = request.events.unbounded_send(TransferEvent::Done(Err(error)));
+                    let _ = request
+                        .events
+                        .unbounded_send(TransferEvent::Done(Err(error)));
                     continue;
                 }
             }
@@ -847,9 +928,9 @@ async fn serve_transfers(params: SshParams, mut requests: UnboundedReceiver<Tran
         {
             sftp = None;
         }
-        let _ = request
-            .events
-            .unbounded_send(TransferEvent::Done(outcome.map_err(|failure| failure.error)));
+        let _ = request.events.unbounded_send(TransferEvent::Done(
+            outcome.map_err(|failure| failure.error),
+        ));
     }
 
     if let Some(session) = sftp {
@@ -875,14 +956,10 @@ async fn run_transfer(
         TransferKind::Upload { .. } | TransferKind::UploadOne { .. }
     );
     let jobs = match kind {
-        TransferKind::Upload {
-            locals,
-            remote_dir,
-        } => collect_uploads(locals, remote_dir)?,
-        TransferKind::Download {
-            remotes,
-            local_dir,
-        } => collect_downloads(session, remotes, local_dir).await?,
+        TransferKind::Upload { locals, remote_dir } => collect_uploads(locals, remote_dir)?,
+        TransferKind::Download { remotes, local_dir } => {
+            collect_downloads(session, remotes, local_dir).await?
+        }
         TransferKind::DownloadOne { remote, local_file } => {
             let meta = session
                 .metadata(remote.as_str())
@@ -1226,7 +1303,14 @@ async fn collect_removals(
         if file_type.is_symlink() {
             out.push((child, false));
         } else {
-            Box::pin(collect_removals(session, &child, file_type.is_dir(), out, cancel)).await?;
+            Box::pin(collect_removals(
+                session,
+                &child,
+                file_type.is_dir(),
+                out,
+                cancel,
+            ))
+            .await?;
         }
     }
     // 子都排好了,才轮到目录自己。

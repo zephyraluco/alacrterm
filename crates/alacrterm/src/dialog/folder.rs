@@ -1,8 +1,8 @@
 //! 「新建文件夹」对话框：给会话列表建一个文件夹。
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Styled as _,
-    Window, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _,
+    Styled as _, Window, div, px,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, WindowExt as _,
@@ -12,8 +12,8 @@ use gpui_kit::component::{
     v_flex,
 };
 
-use crate::sidebar_panel::sessions::SessionPath;
 use crate::AppRoot;
+use crate::sidebar_panel::sessions::SessionPath;
 
 /// 文件夹表单。
 #[derive(Clone)]
@@ -53,12 +53,14 @@ impl AppRoot {
 
             let footer = DialogFooter::new()
                 .child(DialogClose::new().child(Button::new("folder-cancel").label("取消")))
-                .child(DialogAction::new().child(
-                    Button::new("folder-confirm")
-                        .label("创建")
-                        .primary()
-                        .disabled(!valid),
-                ));
+                .child(
+                    DialogAction::new().child(
+                        Button::new("folder-confirm")
+                            .label("创建")
+                            .primary()
+                            .disabled(!valid),
+                    ),
+                );
 
             dialog
                 .title("新建文件夹")
@@ -70,9 +72,8 @@ impl AppRoot {
                         return false;
                     }
                     let parent = parent_for_ok.clone();
-                    sessions_for_ok.update(cx, |state, cx| {
-                        state.add_folder(name.into(), parent, cx)
-                    });
+                    sessions_for_ok
+                        .update(cx, |state, cx| state.add_folder(name.into(), parent, cx));
                     true
                 })
                 .child(field(&form.name, cx))

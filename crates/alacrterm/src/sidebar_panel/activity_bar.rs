@@ -9,8 +9,9 @@ use gpui::{
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Placement, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
+    h_flex,
     menu::{ContextMenuExt as _, PopupMenuItem},
+    v_flex,
 };
 
 use super::files::FilesState;
@@ -22,47 +23,48 @@ use crate::dialog::name::open_name_dialog;
 use crate::status_bar::{STATUS_BAR_ITEM_HEIGHT, new_status_bar};
 
 /// 全窗口底栏：紧凑的视图切换按钮，侧边栏折叠时仍可操作。
-pub(super) fn status_bar(sidebar: &Sidebar, right: &Entity<Sidebar>, cx: &mut Context<Sidebar>) -> AnyElement {
+pub(super) fn status_bar(
+    sidebar: &Sidebar,
+    right: &Entity<Sidebar>,
+    cx: &mut Context<Sidebar>,
+) -> AnyElement {
     let files_enabled = right.read(cx).files_view_available(cx);
     SidebarView::ALL
         .into_iter()
         .filter(|view| view.visible_with(files_enabled))
-        .fold(
-            new_status_bar(),
-            |bar, view| {
-                let (state, selected) = match view {
-                    SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
-                    SidebarView::Files => (right.downgrade(), right.read(cx).panel_visible(cx)),
-                };
-                let button = Button::new(view.id())
-                    .ghost()
-                    .small()
-                    .h(STATUS_BAR_ITEM_HEIGHT)
-                    .w(STATUS_BAR_ITEM_HEIGHT)
-                    .icon(view.icon())
-                    .tooltip(view.tooltip())
-                    .tooltip_placement(Placement::Top)
-                    .accessibility_label(view.tooltip())
-                    .selected(selected)
-                    .on_click(move |_, _, cx| {
-                        let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
-                    });
-                match view {
-                    SidebarView::Sessions => bar.left(
-                        h_flex()
-                            .items_center()
-                            .child(button)
-                            .child(separator(&cx.theme().border)),
-                    ),
-                    SidebarView::Files => bar.right(
-                        h_flex()
-                            .items_center()
-                            .child(separator(&cx.theme().border))
-                            .child(button),
-                    ),
-                }
-            },
-        )
+        .fold(new_status_bar(), |bar, view| {
+            let (state, selected) = match view {
+                SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
+                SidebarView::Files => (right.downgrade(), right.read(cx).panel_visible(cx)),
+            };
+            let button = Button::new(view.id())
+                .ghost()
+                .small()
+                .h(STATUS_BAR_ITEM_HEIGHT)
+                .w(STATUS_BAR_ITEM_HEIGHT)
+                .icon(view.icon())
+                .tooltip(view.tooltip())
+                .tooltip_placement(Placement::Top)
+                .accessibility_label(view.tooltip())
+                .selected(selected)
+                .on_click(move |_, _, cx| {
+                    let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
+                });
+            match view {
+                SidebarView::Sessions => bar.left(
+                    h_flex()
+                        .items_center()
+                        .child(button)
+                        .child(separator(&cx.theme().border)),
+                ),
+                SidebarView::Files => bar.right(
+                    h_flex()
+                        .items_center()
+                        .child(separator(&cx.theme().border))
+                        .child(button),
+                ),
+            }
+        })
         .into_any_element()
 }
 
@@ -167,54 +169,110 @@ fn files_toolbar(files: Entity<FilesState>, cx: &mut Context<Sidebar>) -> AnyEle
 
     let up = {
         let files = files.clone();
-        tool_button("files-up", IconName::ArrowUp, "上一目录", status.can_go_up, move |_, cx| {
-            let _ = files.update(cx, |files, cx| files.navigate_up(cx));
-        })
+        tool_button(
+            "files-up",
+            IconName::ArrowUp,
+            "上一目录",
+            status.can_go_up,
+            move |_, cx| {
+                files.update(cx, |files, cx| files.navigate_up(cx));
+            },
+        )
     };
 
     let download = {
         let files = files.clone();
         // 提示语跟着选中项的类型走（与行右键菜单那两项同一个措辞）。
-        let tooltip = if dir { "下载文件夹到…" } else { "另存为…" };
-        tool_button("files-download", IconName::Download, tooltip, has_selection, move |_, cx| {
-            let _ = files.update(cx, |files, cx| files.download_selected(cx));
-        })
+        let tooltip = if dir {
+            "下载文件夹到…"
+        } else {
+            "另存为…"
+        };
+        tool_button(
+            "files-download",
+            IconName::Download,
+            tooltip,
+            has_selection,
+            move |_, cx| {
+                files.update(cx, |files, cx| files.download_selected(cx));
+            },
+        )
     };
 
     let upload = {
         let files = files.clone();
-        tool_button("files-upload", IconName::Upload, "上传文件…", ready, move |_, cx| {
-            upload_via_dialog(&files, false, cx);
-        })
+        tool_button(
+            "files-upload",
+            IconName::Upload,
+            "上传文件…",
+            ready,
+            move |_, cx| {
+                upload_via_dialog(&files, false, cx);
+            },
+        )
     };
 
     let refresh = {
         let files = files.clone();
-        tool_button("files-refresh", IconName::Replace, "刷新", ready, move |_, cx| {
-            let _ = files.update(cx, |files, cx| files.refresh(cx));
-        })
+        tool_button(
+            "files-refresh",
+            IconName::Replace,
+            "刷新",
+            ready,
+            move |_, cx| {
+                files.update(cx, |files, cx| files.refresh(cx));
+            },
+        )
     };
 
     // ---- 新建文件夹 / 新建文件 ----
 
     let new_dir = {
         let files = files.clone();
-        tool_button("files-new-dir", IconName::FolderPlus, "新建文件夹", ready, move |window, cx| {
-            let files = files.clone();
-            open_name_dialog(window, cx, "新建文件夹", "例如：logs", "创建", None, move |name, cx| {
-                let _ = files.update(cx, |files, cx| files.create_dir(name, cx));
-            });
-        })
+        tool_button(
+            "files-new-dir",
+            IconName::FolderPlus,
+            "新建文件夹",
+            ready,
+            move |window, cx| {
+                let files = files.clone();
+                open_name_dialog(
+                    window,
+                    cx,
+                    "新建文件夹",
+                    "例如：logs",
+                    "创建",
+                    None,
+                    move |name, cx| {
+                        files.update(cx, |files, cx| files.create_dir(name, cx));
+                    },
+                );
+            },
+        )
     };
 
     let new_file = {
         let files = files.clone();
-        tool_button("files-new-file", IconName::File, "新建文件", ready, move |window, cx| {
-            let files = files.clone();
-            open_name_dialog(window, cx, "新建文件", "例如：notes.txt", "创建", None, move |name, cx| {
-                let _ = files.update(cx, |files, cx| files.create_file(name, cx));
-            });
-        })
+        tool_button(
+            "files-new-file",
+            IconName::File,
+            "新建文件",
+            ready,
+            move |window, cx| {
+                let files = files.clone();
+                open_name_dialog(
+                    window,
+                    cx,
+                    "新建文件",
+                    "例如：notes.txt",
+                    "创建",
+                    None,
+                    move |name, cx| {
+                        files.update(cx, |files, cx| files.create_file(name, cx));
+                    },
+                );
+            },
+        )
     };
 
     // ---- 重命名 ----
@@ -222,14 +280,28 @@ fn files_toolbar(files: Entity<FilesState>, cx: &mut Context<Sidebar>) -> AnyEle
     let rename = {
         let files = files.clone();
         let label = status.selected.clone();
-        tool_button("files-rename", IconName::CaseSensitive, "重命名", has_selection, move |window, cx| {
-            let files = files.clone();
-            // 预填旧名字：用户接着改，不用自己重打一遍。
-            let initial = label.as_deref();
-            open_name_dialog(window, cx, "重命名", "新名字", "重命名", initial, move |name, cx| {
-                let _ = files.update(cx, |files, cx| files.rename_selected(name, cx));
-            });
-        })
+        tool_button(
+            "files-rename",
+            IconName::CaseSensitive,
+            "重命名",
+            has_selection,
+            move |window, cx| {
+                let files = files.clone();
+                // 预填旧名字：用户接着改，不用自己重打一遍。
+                let initial = label.as_deref();
+                open_name_dialog(
+                    window,
+                    cx,
+                    "重命名",
+                    "新名字",
+                    "重命名",
+                    initial,
+                    move |name, cx| {
+                        files.update(cx, |files, cx| files.rename_selected(name, cx));
+                    },
+                );
+            },
+        )
     };
 
     h_flex()
@@ -291,7 +363,7 @@ fn files_panel(panel: SidebarPanel<SidebarContent>, files: Entity<FilesState>) -
         .size_full()
         .on_drop::<ExternalPaths>(move |paths: &ExternalPaths, _, cx| {
             let locals: Vec<PathBuf> = paths.paths().to_vec();
-            let _ = drop_target.update(cx, |files, cx| files.start_upload(locals, cx));
+            drop_target.update(cx, |files, cx| files.start_upload(locals, cx));
         })
         // 拖拽悬停时把整块面板点亮 ⇒ 用户知道这里能放(样式回调每帧按「当前有没有在拖」问一次,
         // 不需要自己存状态)。
@@ -325,7 +397,7 @@ fn files_panel(panel: SidebarPanel<SidebarContent>, files: Entity<FilesState>) -
                 PopupMenuItem::new("刷新")
                     .icon(IconName::Replace)
                     .on_click(move |_, _, cx| {
-                        let _ = refresh.update(cx, |files, cx| files.refresh(cx));
+                        refresh.update(cx, |files, cx| files.refresh(cx));
                     }),
             )
         })
@@ -351,7 +423,7 @@ fn upload_via_dialog(files: &Entity<FilesState>, directories: bool, cx: &mut App
         let Ok(Ok(Some(paths))) = picked.await else {
             return;
         };
-        let _ = files.update(cx, |files, cx| files.start_upload(paths, cx));
+        files.update(cx, |files, cx| files.start_upload(paths, cx));
     })
     .detach();
 }

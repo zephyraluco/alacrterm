@@ -14,9 +14,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Context, Div, DragMoveEvent, Empty, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
-    relative,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div, relative,
 };
 use gpui_kit::component::{
     button::Button,
@@ -28,15 +27,15 @@ use gpui_kit::component::{
     resizable::resize_handle,
     v_flex,
 };
-use terminal::{SshFs, SessionId, TerminalTarget};
+use terminal::{SessionId, SshFs, TerminalTarget};
 use terminal_view::{RenderSettings, TerminalView};
 
+use crate::AppRoot;
 use crate::actions::NewLocalTerminal;
 use crate::assets::IconName;
 use crate::config;
 use crate::dialog::host_key;
 use crate::pane_layout::{Dir, Layout, ratio_at};
-use crate::AppRoot;
 
 pub(crate) use session::SessionRequest;
 use session::SessionTarget;
@@ -84,9 +83,16 @@ impl AppRoot {
         let SessionRequest { name, target } = request;
         let target = match target {
             SessionTarget::Local(shell) => TerminalTarget::Local(shell),
-            SessionTarget::Ssh { host, port, user, password } => {
+            SessionTarget::Ssh {
+                host,
+                port,
+                user,
+                password,
+            } => {
                 let mut params = ssh::SshParams::new(host, port, user);
-                if let Some(password) = password { params = params.with_password(password); }
+                if let Some(password) = password {
+                    params = params.with_password(password);
+                }
                 TerminalTarget::Ssh(params)
             }
         };
@@ -99,7 +105,8 @@ impl AppRoot {
         });
 
         // `add_panel_view` 只会塞进第一个标签组。
-        if let Some(node) = group.and_then(|group| group.upgrade().map(|group| group.read(cx).node()))
+        if let Some(node) =
+            group.and_then(|group| group.upgrade().map(|group| group.read(cx).node()))
         {
             let panel = panel_handle(pane.clone()).panel_id(cx);
             self.dock.update(cx, |area, cx| {
@@ -162,9 +169,18 @@ impl AppRoot {
         let handler = target
             .is_ssh()
             .then(|| host_key::host_key_prompt_handler(root));
-        let options = crate::shell_integration::launch_options(settings.suggestions.remote_integration);
+        let options =
+            crate::shell_integration::launch_options(settings.suggestions.remote_integration);
         let view = cx.new(|cx| {
-            let mut view = TerminalView::new(working_directory, target, handler, options, settings, window, cx);
+            let mut view = TerminalView::new(
+                working_directory,
+                target,
+                handler,
+                options,
+                settings,
+                window,
+                cx,
+            );
             view.set_completion_service(Arc::new(crate::completion::CompletionEngine::default()));
             view
         });
@@ -426,7 +442,7 @@ impl TabPane {
             // ⚠️ 不能在这里同步 `root.update(.. sync_active_context)` —— 本实体正在被更新，
             // 那会再读到自己（gpui 的重复租借检查）。
             if let Some(root) = this.root.upgrade() {
-                let _ = root.update(cx, |root, cx| root.schedule_context_sync(cx));
+                root.update(cx, |root, cx| root.schedule_context_sync(cx));
             }
         })
     }
@@ -507,7 +523,8 @@ impl TabPane {
 
     /// 把渲染参数推给本页所有格子。
     pub(crate) fn set_render_settings(&mut self, settings: Arc<RenderSettings>, cx: &mut App) {
-        let options = crate::shell_integration::launch_options(settings.suggestions.remote_integration);
+        let options =
+            crate::shell_integration::launch_options(settings.suggestions.remote_integration);
         for view in &self.panes {
             view.update(cx, |view, cx| {
                 view.set_launch_options(options.clone(), cx);
@@ -580,12 +597,7 @@ impl TabPane {
     }
 
     /// 焦点往 `dir` 挪一格；没有邻居就什么也不做。
-    pub(crate) fn focus_neighbor(
-        &mut self,
-        dir: Dir,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn focus_neighbor(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_focus(window, cx);
         let Some(ix) = self.layout.neighbor(self.focused, dir) else {
             return;
@@ -615,19 +627,16 @@ impl TabPane {
                     self.render_layout(second, cx),
                 );
                 // 分隔条挂到后一格的前缘（straddle：把手向缝的两侧各伸出一半）。
-                let tail = slot(axis, 1. - ratio)
-                    .relative()
-                    .child(second)
-                    .child(
-                        resize_handle(("terminal-divider", node), axis).on_drag(
-                            DividerDrag { node },
-                            |drag, _, _, cx| {
-                                // 拖分隔条不该顺带点到底下的终端（聚焦 / 选择）。
-                                cx.stop_propagation();
-                                cx.new(|_| drag.clone())
-                            },
-                        ),
-                    );
+                let tail = slot(axis, 1. - ratio).relative().child(second).child(
+                    resize_handle(("terminal-divider", node), axis).on_drag(
+                        DividerDrag { node },
+                        |drag, _, _, cx| {
+                            // 拖分隔条不该顺带点到底下的终端（聚焦 / 选择）。
+                            cx.stop_propagation();
+                            cx.new(|_| drag.clone())
+                        },
+                    ),
+                );
                 let container = match axis {
                     Axis::Horizontal => h_flex().size_full().min_w_0(),
                     Axis::Vertical => v_flex().size_full().min_h_0(),

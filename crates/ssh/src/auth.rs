@@ -94,7 +94,10 @@ async fn try_agent(
         return Ok(false);
     }
 
-    events.status(format!("正在用 ssh-agent 认证({} 个身份)…", identities.len()));
+    events.status(format!(
+        "正在用 ssh-agent 认证({} 个身份)…",
+        identities.len()
+    ));
     for identity in &identities {
         let key = identity.public_key().into_owned();
         let fingerprint = key.fingerprint(Default::default()).to_string();

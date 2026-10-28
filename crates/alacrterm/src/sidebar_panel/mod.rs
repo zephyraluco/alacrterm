@@ -153,7 +153,11 @@ impl Sidebar {
         }
     }
 
-    pub(crate) fn render_status_bar(&self, right: &Entity<Sidebar>, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_status_bar(
+        &self,
+        right: &Entity<Sidebar>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         activity_bar::status_bar(self, right, cx)
     }
 
@@ -221,7 +225,11 @@ impl Sidebar {
         let container = self.resize.read(cx).container_size();
         if self.split_width != Some(container) {
             self.split_width = Some(container);
-            let index = if self.active == SidebarView::Files { 1 } else { 0 };
+            let index = if self.active == SidebarView::Files {
+                1
+            } else {
+                0
+            };
             self.resize.update(cx, |state, cx| {
                 state.resize_panel(index, width, window, cx);
             });
@@ -236,7 +244,9 @@ impl Sidebar {
 
     /// 当前该摆出来的视图；都不可用则 `None`。
     fn active_view(&self, cx: &App) -> Option<SidebarView> {
-        self.active.visible_with(self.files_view_available(cx)).then_some(self.active)
+        self.active
+            .visible_with(self.files_view_available(cx))
+            .then_some(self.active)
     }
 
     /// 图标栏点选：显示该视图；再点当前那枚 = 折叠。
@@ -269,8 +279,9 @@ impl Render for Sidebar {
 impl AppRoot {
     /// 显示 / 折叠侧边栏（`Ctrl+Shift+B`）。
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.set_visible(!sidebar.visible(), cx));
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_visible(!sidebar.visible(), cx)
+        });
     }
 
     /// 打开侧边栏的某个视图（`Ctrl+Shift+E` / `Ctrl+Shift+G`）。

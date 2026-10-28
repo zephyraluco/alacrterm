@@ -36,6 +36,9 @@ pub struct LaunchOptions {
 
 impl LaunchOptions {
     pub(crate) fn ssh_options(&self) -> ssh::SessionOptions {
-        ssh::SessionOptions { setup: self.ssh_setup.clone(), x11: self.ssh_x11.clone() }
+        ssh::SessionOptions {
+            setup: self.ssh_setup.clone(),
+            x11: self.ssh_x11.clone(),
+        }
     }
 }

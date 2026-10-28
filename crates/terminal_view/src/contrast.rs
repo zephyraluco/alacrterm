@@ -86,29 +86,29 @@ pub fn apca_contrast(text_color: Hsla, background_color: Hsla) -> f32 {
     }
 
     let sapc;
-    let output_contrast;
-    if bg_y_clamped > text_y_clamped {
+
+    let output_contrast = if bg_y_clamped > text_y_clamped {
         // 正常极性：深色文字在浅色背景上
         sapc = (bg_y_clamped.powf(constants.norm_bg) - text_y_clamped.powf(constants.norm_txt))
             * constants.scale_bow;
 
         // 低对比度平滑滚降，防止极性反转
-        output_contrast = if sapc < constants.lo_clip {
+        if sapc < constants.lo_clip {
             0.0
         } else {
             sapc - constants.lo_bow_offset
-        };
+        }
     } else {
         // 反极性：浅色文字在深色背景上
         sapc = (bg_y_clamped.powf(constants.rev_bg) - text_y_clamped.powf(constants.rev_txt))
             * constants.scale_wob;
 
-        output_contrast = if sapc > -constants.lo_clip {
+        if sapc > -constants.lo_clip {
             0.0
         } else {
             sapc + constants.lo_wob_offset
-        };
-    }
+        }
+    };
 
     // 缩放为百分比形式的 Lc 值
     output_contrast * 100.0
@@ -261,8 +261,7 @@ fn adjust_lightness_and_saturation_for_contrast(
             a: foreground.a,
         };
 
-        let adjusted =
-            adjust_lightness_for_contrast(test_color, background, minimum_apca_contrast);
+        let adjusted = adjust_lightness_for_contrast(test_color, background, minimum_apca_contrast);
         let contrast = apca_contrast(adjusted, background).abs();
 
         if contrast >= minimum_apca_contrast {

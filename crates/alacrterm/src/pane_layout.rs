@@ -193,9 +193,7 @@ fn leaf_mut(layout: &mut Layout, ix: usize) -> Option<&mut Layout> {
     }
     match layout {
         Layout::Leaf(_) => None,
-        Layout::Split { first, second, .. } => {
-            leaf_mut(first, ix).or_else(|| leaf_mut(second, ix))
-        }
+        Layout::Split { first, second, .. } => leaf_mut(first, ix).or_else(|| leaf_mut(second, ix)),
     }
 }
 
@@ -355,7 +353,12 @@ mod tests {
         layout.split(1, Axis::Vertical, 2, 9);
         assert_eq!(
             layout,
-            split(1, Axis::Horizontal, leaf(0), split(9, Axis::Vertical, leaf(1), leaf(2)))
+            split(
+                1,
+                Axis::Horizontal,
+                leaf(0),
+                split(9, Axis::Vertical, leaf(1), leaf(2))
+            )
         );
     }
 
@@ -368,7 +371,12 @@ mod tests {
 
     #[test]
     fn removing_renumbers_the_leaves_after_it() {
-        let mut layout = split(1, Axis::Horizontal, leaf(0), split(2, Axis::Vertical, leaf(1), leaf(2)));
+        let mut layout = split(
+            1,
+            Axis::Horizontal,
+            leaf(0),
+            split(2, Axis::Vertical, leaf(1), leaf(2)),
+        );
         layout.remove(1);
         // 原来的 2 号前移成 1 号，左边的 0 号不动。
         assert_eq!(layout, split(1, Axis::Horizontal, leaf(0), leaf(1)));
@@ -376,14 +384,24 @@ mod tests {
 
     #[test]
     fn removing_the_last_leaf_keeps_the_tree_prefix() {
-        let mut layout = split(1, Axis::Horizontal, leaf(0), split(2, Axis::Vertical, leaf(1), leaf(2)));
+        let mut layout = split(
+            1,
+            Axis::Horizontal,
+            leaf(0),
+            split(2, Axis::Vertical, leaf(1), leaf(2)),
+        );
         layout.remove(2);
         assert_eq!(layout, split(1, Axis::Horizontal, leaf(0), leaf(1)));
     }
 
     #[test]
     fn set_ratio_targets_only_its_own_node() {
-        let mut layout = split(1, Axis::Horizontal, leaf(0), split(2, Axis::Vertical, leaf(1), leaf(2)));
+        let mut layout = split(
+            1,
+            Axis::Horizontal,
+            leaf(0),
+            split(2, Axis::Vertical, leaf(1), leaf(2)),
+        );
         assert!(layout.set_ratio(2, 0.3));
         assert_eq!(layout.axis_of(2), Some(Axis::Vertical));
         assert_eq!(layout.axis_of(1), Some(Axis::Horizontal));
@@ -414,7 +432,12 @@ mod tests {
         //  │       ├───────┤
         //  │       │   2   │
         //  └───────┴───────┘
-        let layout = split(1, Axis::Horizontal, leaf(0), split(2, Axis::Vertical, leaf(1), leaf(2)));
+        let layout = split(
+            1,
+            Axis::Horizontal,
+            leaf(0),
+            split(2, Axis::Vertical, leaf(1), leaf(2)),
+        );
         assert_eq!(layout.neighbor(0, Dir::Right), Some(1));
         assert_eq!(layout.neighbor(1, Dir::Left), Some(0));
         assert_eq!(layout.neighbor(1, Dir::Down), Some(2));
@@ -428,7 +451,12 @@ mod tests {
     #[test]
     fn neighbor_follows_the_dragged_ratio() {
         // 左边很宽（占比 0.9）：右上 / 右下两格都缩在右侧窄条里，几何必须按比例算。
-        let mut layout = split(1, Axis::Horizontal, leaf(0), split(2, Axis::Vertical, leaf(1), leaf(2)));
+        let mut layout = split(
+            1,
+            Axis::Horizontal,
+            leaf(0),
+            split(2, Axis::Vertical, leaf(1), leaf(2)),
+        );
         assert!(layout.set_ratio(1, 0.9));
         assert_eq!(layout.neighbor(0, Dir::Right), Some(1));
         assert_eq!(layout.neighbor(1, Dir::Left), Some(0));

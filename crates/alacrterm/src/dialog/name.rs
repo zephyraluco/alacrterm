@@ -6,8 +6,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Entity, IntoElement, ParentElement as _, Styled as _,
-    Window, div, px,
+    AnyElement, App, AppContext as _, Entity, IntoElement, ParentElement as _, Styled as _, Window,
+    div, px,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, WindowExt as _,
@@ -42,12 +42,14 @@ pub(crate) fn open_name_dialog(
         let valid = !input.read(cx).value().trim().is_empty();
         let footer = DialogFooter::new()
             .child(DialogClose::new().child(Button::new("name-cancel").label("取消")))
-            .child(DialogAction::new().child(
-                Button::new("name-confirm")
-                    .label(confirm)
-                    .primary()
-                    .disabled(!valid),
-            ));
+            .child(
+                DialogAction::new().child(
+                    Button::new("name-confirm")
+                        .label(confirm)
+                        .primary()
+                        .disabled(!valid),
+                ),
+            );
 
         let on_ok = on_ok.clone();
         let input_for_ok = input.clone();

@@ -10,19 +10,19 @@
 //! - 高性能网格渲染（批量文本 / 背景矩形 / 块字符 / 光标 / 高亮）
 
 pub mod completion;
-pub mod completion_service;
 mod completion_controller;
+pub mod completion_service;
 mod contrast;
 mod prompt_input;
 mod scrollbar;
 mod suggestion_popup;
 
 mod suggestions;
-pub use suggestions::Suggestions as SuggestionModel;
 pub use settings::SuggestionSettings;
+pub use suggestions::Suggestions as SuggestionModel;
 pub mod terminal_element;
 
-use std::{cell::Cell, rc::Rc, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
+use std::{cell::Cell, ops::Range as StdRange, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
 use gpui::{
     App, AppContext as _, AsyncApp, Entity, FocusHandle, InteractiveElement, IntoElement,
@@ -30,8 +30,8 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, rgb,
 };
 use terminal::{
-    Event as TerminalEvent, HostKeyPrompt, Modes, SshFs, Terminal, TerminalBounds, TerminalBuilder,
-    TerminalTarget, LaunchOptions,
+    Event as TerminalEvent, HostKeyPrompt, LaunchOptions, Modes, SshFs, Terminal, TerminalBounds,
+    TerminalBuilder, TerminalTarget,
 };
 
 use crate::terminal_element::{TerminalElement, TerminalRenderSettings};
@@ -119,7 +119,11 @@ impl TerminalView {
         let remote = target.is_ssh();
         let env = std::env::vars().collect();
         let builder = TerminalBuilder::new_with_options(
-            working_directory, target, env, launch_options.clone(), cx,
+            working_directory,
+            target,
+            env,
+            launch_options.clone(),
+            cx,
         );
         let focus_handle = cx.focus_handle();
 
@@ -202,7 +206,8 @@ impl TerminalView {
                         // 只排一条 `InternalEvent` + notify（通知的是 `Terminal`），而那条队列
                         // 要等 `TerminalElement::prepaint` 里的 `sync` 才被消费 —— 视图不重绘
                         // 就等于「拖选不跟手」。原因与实测见 `docs/terminal-architecture.md` §4.4。
-                        this._subscriptions.push(cx.observe(&terminal, |_, _, cx| cx.notify()));
+                        this._subscriptions
+                            .push(cx.observe(&terminal, |_, _, cx| cx.notify()));
                         cx.notify();
                     });
                 });
@@ -236,7 +241,10 @@ impl TerminalView {
     }
 
     /// Install the host's completion providers before starting user interaction.
-    pub fn set_completion_service(&mut self, service: Arc<dyn completion_service::CompletionService>) {
+    pub fn set_completion_service(
+        &mut self,
+        service: Arc<dyn completion_service::CompletionService>,
+    ) {
         self.completion.cancel();
         self.completion.model.service = Some(service);
     }
@@ -246,14 +254,14 @@ impl TerminalView {
         if !self.remote || !self.has_exited(cx) {
             return;
         }
-        if let Some(terminal) = &self.terminal {
-            if terminal.update(cx, |terminal, cx| terminal.reconnect(cx)) {
-                self.recovery_task = gpui::Task::ready(());
-                self.completion.reset_session();
-                self.terminal_blinking = None;
-                self.ime_state = None;
-                cx.notify();
-            }
+        if let Some(terminal) = &self.terminal
+            && terminal.update(cx, |terminal, cx| terminal.reconnect(cx))
+        {
+            self.recovery_task = gpui::Task::ready(());
+            self.completion.reset_session();
+            self.terminal_blinking = None;
+            self.ime_state = None;
+            cx.notify();
         }
     }
 
@@ -776,13 +784,12 @@ impl TerminalView {
             && self
                 .terminal
                 .as_ref()
-                .map_or(true, |t| !t.read(cx).mouse_mode(e.modifiers.shift));
-        if should_paste {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                if let Some(terminal) = &self.terminal {
-                    terminal.update(cx, |terminal, _cx| terminal.paste(&text));
-                }
-            }
+                .is_none_or(|t| !t.read(cx).mouse_mode(e.modifiers.shift));
+        if should_paste
+            && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+            && let Some(terminal) = &self.terminal
+        {
+            terminal.update(cx, |terminal, _cx| terminal.paste(&text));
         }
     }
 
@@ -835,7 +842,9 @@ impl TerminalView {
 
     /// 会话进程是否已结束（本地 shell 退出 / ssh 连接断开等）。
     pub fn has_exited(&self, cx: &App) -> bool {
-        self.terminal.as_ref().is_some_and(|terminal| terminal.read(cx).has_exited())
+        self.terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.read(cx).has_exited())
     }
 
     /// 计算光标是否可见（闪烁控制）。
@@ -920,45 +929,44 @@ impl Render for TerminalView {
             );
         }
 
-        if let Some(terminal) = &self.terminal {
-            if let Some((history, offset)) = terminal
+        if let Some(terminal) = &self.terminal
+            && let Some((history, offset)) = terminal
                 .read(cx)
                 .scrollback_state()
                 .filter(|(history, _)| *history > 0)
-            {
-                let line_height = terminal
-                    .read(cx)
-                    .last_content()
-                    .terminal_bounds
-                    .line_height
-                    .max(gpui::px(1.));
-                let handle = scrollbar::HistoryScrollbar::new(
-                    history,
-                    offset,
-                    line_height,
-                    self.scrollbar_target.clone(),
-                );
-                let geometry = handle.clone();
-                root = root.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(
-                            gpui::canvas(
-                                move |bounds, _, _| geometry.set_bounds(bounds),
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full(),
+        {
+            let line_height = terminal
+                .read(cx)
+                .last_content()
+                .terminal_bounds
+                .line_height
+                .max(gpui::px(1.));
+            let handle = scrollbar::HistoryScrollbar::new(
+                history,
+                offset,
+                line_height,
+                self.scrollbar_target.clone(),
+            );
+            let geometry = handle.clone();
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(
+                        gpui::canvas(
+                            move |bounds, _, _| geometry.set_bounds(bounds),
+                            |_, _, _, _| {},
                         )
-                        .child(
-                            gpui_kit::component::scroll::Scrollbar::vertical(&handle)
-                                .id("terminal-history-scrollbar"),
-                        ),
-                );
-            }
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
+                    .child(
+                        gpui_kit::component::scroll::Scrollbar::vertical(&handle)
+                            .id("terminal-history-scrollbar"),
+                    ),
+            );
         }
 
         if let Some(popup) = self.render_suggestions(cx) {

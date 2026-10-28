@@ -29,7 +29,7 @@ impl<'a> SessionContext<'a> {
 
     /// Ask the server to pass an environment variable to the future shell.
     pub async fn set_env(&mut self, name: &str, value: &str, timeout: Duration) -> Result<bool> {
-        Ok(tokio::time::timeout(timeout, async {
+        tokio::time::timeout(timeout, async {
             self.channel.set_env(true, name, value).await?;
             loop {
                 match self.channel.wait().await {
@@ -42,7 +42,7 @@ impl<'a> SessionContext<'a> {
                 }
             }
         })
-        .await??)
+        .await?
     }
 
     /// Reauthenticate on a separate transport, trusting only recorded host keys.

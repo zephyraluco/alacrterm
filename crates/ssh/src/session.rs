@@ -165,11 +165,22 @@ impl SshSession {
         events: UnboundedSender<SshEvent>,
         setup: Option<Arc<dyn crate::SessionSetup>>,
     ) -> std::io::Result<Self> {
-        Self::connect_with_options(params, size, events, crate::SessionOptions { setup, ..Default::default() })
+        Self::connect_with_options(
+            params,
+            size,
+            events,
+            crate::SessionOptions {
+                setup,
+                ..Default::default()
+            },
+        )
     }
 
     pub fn connect_with_options(
-        params: SshParams, size: SshSize, events: UnboundedSender<SshEvent>, options: crate::SessionOptions,
+        params: SshParams,
+        size: SshSize,
+        events: UnboundedSender<SshEvent>,
+        options: crate::SessionOptions,
     ) -> std::io::Result<Self> {
         Self::spawn(params, Launch::Shell(size, options), events)
     }
@@ -329,31 +340,37 @@ async fn run_session(
         .await
         .map_err(|error| SshError::ChannelOpen(error.to_string()))?;
     if let Some(x11) = &x11 {
-    // Declining X11 must not prevent a normal SSH terminal from opening.
-    let accepted = if channel
-        .request_x11(true, false, "MIT-MAGIC-COOKIE-1", x11.cookie_hex(), 0)
-        .await
-        .is_ok()
-    {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match channel.wait().await {
-                    Some(ChannelMsg::Success) => return true,
-                    Some(ChannelMsg::Failure | ChannelMsg::Close) | None => return false,
-                    _ => {}
+        // Declining X11 must not prevent a normal SSH terminal from opening.
+        let accepted = if channel
+            .request_x11(true, false, "MIT-MAGIC-COOKIE-1", x11.cookie_hex(), 0)
+            .await
+            .is_ok()
+        {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match channel.wait().await {
+                        Some(ChannelMsg::Success) => return true,
+                        Some(ChannelMsg::Failure | ChannelMsg::Close) | None => return false,
+                        _ => {}
+                    }
                 }
-            }
-        })
-        .await
-        .unwrap_or(false)
-    } else {
-        false
-    };
-    if !accepted {
-        x11.disable();
+            })
+            .await
+            .unwrap_or(false)
+        } else {
+            false
+        };
+        if !accepted {
+            x11.disable();
+        }
     }
-    }
-    if let Launch::Shell(_, crate::SessionOptions { setup: Some(setup), .. }) = launch {
+    if let Launch::Shell(
+        _,
+        crate::SessionOptions {
+            setup: Some(setup), ..
+        },
+    ) = launch
+    {
         setup
             .prepare(crate::SessionContext::new(params, &mut channel, sink))
             .await;

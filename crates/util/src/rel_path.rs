@@ -61,7 +61,7 @@ impl RelPath {
             path = prefix;
         }
 
-        if is_absolute(&path, path_style) {
+        if is_absolute(path, path_style) {
             return Err(anyhow!("absolute path not allowed: {path:?}"));
         }
 
@@ -77,7 +77,7 @@ impl RelPath {
 
         if result
             .components()
-            .any(|component| component == "" || component == "." || component == "..")
+            .any(|component| component.is_empty() || component == "." || component == "..")
         {
             let mut normalized = RelPathBuf::new();
             for component in result.components() {
@@ -151,12 +151,10 @@ impl RelPath {
     }
 
     pub fn ends_with(&self, other: &Self) -> bool {
-        if let Some(suffix) = self.0.strip_suffix(&other.0) {
-            if suffix.ends_with('/') {
-                return true;
-            } else if suffix.is_empty() {
-                return true;
-            }
+        if let Some(suffix) = self.0.strip_suffix(&other.0)
+            && (suffix.ends_with('/') || suffix.is_empty())
+        {
+            return true;
         }
         false
     }
@@ -341,6 +339,12 @@ impl RelPathBuf {
     }
 }
 
+impl Default for RelPathBuf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'de> Deserialize<'de> for RelPathBuf {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -353,9 +357,9 @@ impl<'de> Deserialize<'de> for RelPathBuf {
     }
 }
 
-impl Into<Arc<RelPath>> for RelPathBuf {
-    fn into(self) -> Arc<RelPath> {
-        Arc::from(self.as_rel_path())
+impl From<RelPathBuf> for Arc<RelPath> {
+    fn from(val: RelPathBuf) -> Self {
+        Arc::from(val.as_rel_path())
     }
 }
 

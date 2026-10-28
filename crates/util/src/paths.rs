@@ -21,9 +21,7 @@ use crate::rel_path::RelPathBuf;
 /// Returns the path to the user's home directory.
 pub fn home_dir() -> &'static PathBuf {
     static HOME_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    HOME_DIR.get_or_init(|| {
-        dirs::home_dir().expect("failed to determine home directory")
-    })
+    HOME_DIR.get_or_init(|| dirs::home_dir().expect("failed to determine home directory"))
 }
 
 pub trait PathExt {
@@ -203,18 +201,14 @@ pub fn strip_path_suffix<'a>(base: &'a Path, suffix: &Path) -> Option<&'a Path> 
         .as_os_str()
         .as_encoded_bytes()
         .strip_suffix(suffix.as_os_str().as_encoded_bytes())
-    {
-        if remainder
+        && remainder
             .last()
             .is_none_or(|last_byte| std::path::is_separator(*last_byte as char))
-        {
-            let os_str = unsafe {
-                OsStr::from_encoded_bytes_unchecked(
-                    &remainder[0..remainder.len().saturating_sub(1)],
-                )
-            };
-            return Some(Path::new(os_str));
-        }
+    {
+        let os_str = unsafe {
+            OsStr::from_encoded_bytes_unchecked(&remainder[0..remainder.len().saturating_sub(1)])
+        };
+        return Some(Path::new(os_str));
     }
     None
 }
@@ -955,7 +949,7 @@ impl PathMatcher {
                 let glob = glob.glob();
                 Some((
                     glob.to_string(),
-                    RelPath::new(&glob.as_ref(), path_style)
+                    RelPath::new(glob.as_ref(), path_style)
                         .ok()
                         .map(std::borrow::Cow::into_owned)?,
                     glob.ends_with(path_style.separators_ch()),
@@ -1240,13 +1234,7 @@ fn case_group_key(name: &str, order: SortOrder) -> u8 {
                 0
             }
         }
-        SortOrder::Lower => {
-            if first.is_uppercase() {
-                1
-            } else {
-                0
-            }
-        }
+        SortOrder::Lower if first.is_uppercase() => 1,
         _ => 0,
     }
 }
@@ -1305,12 +1293,16 @@ pub fn compare_rel_paths_by(
                     return file_dir_ordering;
                 }
 
-                let (a_stem, a_ext) = a_leaf_file
-                    .then(|| stem_and_extension(component_a))
-                    .unwrap_or_default();
-                let (b_stem, b_ext) = b_leaf_file
-                    .then(|| stem_and_extension(component_b))
-                    .unwrap_or_default();
+                let (a_stem, a_ext) = if a_leaf_file {
+                    stem_and_extension(component_a)
+                } else {
+                    Default::default()
+                };
+                let (b_stem, b_ext) = if b_leaf_file {
+                    stem_and_extension(component_b)
+                } else {
+                    Default::default()
+                };
                 let a_key = if a_leaf_file {
                     a_stem
                 } else {
@@ -1504,6 +1496,10 @@ pub trait UrlExt {
     /// A version of `url::Url::to_file_path` that does platform handling based on the provided `PathStyle` instead of the host platform.
     ///
     /// Prefer using this over `url::Url::to_file_path` when you need to handle paths in a cross-platform way as is the case for remoting interactions.
+    #[allow(
+        clippy::result_unit_err,
+        reason = "Matches url::Url::to_file_path error semantics"
+    )]
     fn to_file_path_ext(&self, path_style: PathStyle) -> Result<PathBuf, ()>;
 }
 

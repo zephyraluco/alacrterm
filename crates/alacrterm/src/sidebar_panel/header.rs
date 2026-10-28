@@ -32,7 +32,11 @@ impl Sidebar {
             .text_xs()
             .text_color(cx.theme().sidebar_foreground)
             .children(active.map(view_title))
-            .child(view_menu(active, self.files_view_available(cx), cx.entity()))
+            .child(view_menu(
+                active,
+                self.files_view_available(cx),
+                cx.entity(),
+            ))
             .into_any_element()
     }
 }
@@ -70,7 +74,7 @@ fn view_menu(
                         PopupMenuItem::new(view.label())
                             .checked(active == Some(view))
                             .on_click(move |_, _window, cx| {
-                                let _ = sidebar.update(cx, |sidebar, cx| sidebar.open_view(view, cx));
+                                sidebar.update(cx, |sidebar, cx| sidebar.open_view(view, cx));
                             }),
                     )
                 })

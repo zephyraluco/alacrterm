@@ -10,21 +10,20 @@ use std::{
 
 use gpui::{
     AnyElement, AnyView, App, AppContext as _, Axis, Context, CursorStyle, FocusHandle,
-    InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window, WindowControlArea,
-    div, prelude::FluentBuilder as _, px, svg,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Render,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement,
+    Styled as _, WeakEntity, Window, WindowControlArea, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_kit::{
     base::ResizeHandleContext,
     component::{
-        ActiveTheme as _, IconNamed as _, Sizable as _, h_flex,
+        ActiveTheme as _, IconNamed as _, Sizable as _, TITLE_BAR_HEIGHT,
         button::{Button, ButtonVariants as _},
-        TITLE_BAR_HEIGHT,
         dock::{
             BasePanelView, DockArea, DockAreaRenderer, DockContext, DockSkin, DragPanel,
             DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext, TabGroupRenderer,
         },
+        h_flex,
     },
 };
 
@@ -66,7 +65,13 @@ impl DockAreaRenderer for TerminalDockSkin {
         self.inner.center_frame(window, cx)
     }
 
-    fn split_frame(&self, node: NodeId, axis: Axis, window: &mut Window, cx: &mut App) -> Stateful<gpui::Div> {
+    fn split_frame(
+        &self,
+        node: NodeId,
+        axis: Axis,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Stateful<gpui::Div> {
         self.inner.split_frame(node, axis, window, cx)
     }
 
@@ -161,16 +166,18 @@ impl TabGroupRenderer for TerminalTabBar {
     fn frame(&self, group: &TabGroupContext, _: &mut Window, cx: &mut App) -> Stateful<gpui::Div> {
         let focus = group.active_panel().map(|panel| panel.focus_handle(cx));
         let group_focus = self.state.group_focus(group.node(), cx);
-        div().id("terminal-tab-group").on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            // 组内工具按钮不能冒泡到应用背景并清掉整组焦点。
-            if let Some(focus) = &focus
-                && !focus.contains_focused(window, cx)
-                && !group_focus.contains_focused(window, cx)
-            {
-                window.focus(focus, cx);
-            }
-            cx.stop_propagation();
-        })
+        div()
+            .id("terminal-tab-group")
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                // 组内工具按钮不能冒泡到应用背景并清掉整组焦点。
+                if let Some(focus) = &focus
+                    && !focus.contains_focused(window, cx)
+                    && !group_focus.contains_focused(window, cx)
+                {
+                    window.focus(focus, cx);
+                }
+                cx.stop_propagation();
+            })
     }
 
     fn render_tab_bar(
@@ -225,7 +232,9 @@ impl TabGroupRenderer for TerminalTabBar {
 
 impl TerminalTabBar {
     pub(crate) fn new(root: WeakEntity<AppRoot>) -> Self {
-        Self { state: Rc::new(TabBarState::new(root)) }
+        Self {
+            state: Rc::new(TabBarState::new(root)),
+        }
     }
 
     pub(crate) fn render_title_bar(
@@ -260,7 +269,8 @@ impl TerminalTabBar {
         let toolbar = group
             .active_panel()
             .filter(|panel| {
-                group.is_zoomed() || panel.focus_handle(cx).contains_focused(window, cx)
+                group.is_zoomed()
+                    || panel.focus_handle(cx).contains_focused(window, cx)
                     || group_focus.contains_focused(window, cx)
             })
             .and_then(|panel| PanelHandle::of(panel))
@@ -333,22 +343,37 @@ impl TerminalTabBar {
                         .gap_1()
                         .border_l_1()
                         .border_color(border)
-                        .children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false)))
+                        .children(
+                            buttons
+                                .into_iter()
+                                .map(|b| b.xsmall().ghost().tab_stop(false)),
+                        )
                         .child(
                             Button::new("zoom-terminal-group")
                                 .xsmall()
                                 .ghost()
                                 .tab_stop(false)
-                                .icon(if group.is_zoomed() { IconName::Minimize } else { IconName::Maximize })
-                                .tooltip(if group.is_zoomed() { "还原终端布局" } else { "放大终端组" })
-                                .accessibility_label(if group.is_zoomed() { "还原终端布局" } else { "放大终端组" })
+                                .icon(if group.is_zoomed() {
+                                    IconName::Minimize
+                                } else {
+                                    IconName::Maximize
+                                })
+                                .tooltip(if group.is_zoomed() {
+                                    "还原终端布局"
+                                } else {
+                                    "放大终端组"
+                                })
+                                .accessibility_label(if group.is_zoomed() {
+                                    "还原终端布局"
+                                } else {
+                                    "放大终端组"
+                                })
                                 .on_click(move |_, window, cx| zoom_group.toggle_zoom(window, cx)),
                         ),
                 )
             });
         bar.into_any_element()
     }
-
 
     fn render_tab(
         &self,
@@ -401,9 +426,8 @@ impl TerminalTabBar {
                     .hover(|style| style.bg(muted))
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
-                        let _ = root.update(cx, |root, cx| {
-                            root.close_panel_id(panel_id, window, cx)
-                        });
+                        let _ =
+                            root.update(cx, |root, cx| root.close_panel_id(panel_id, window, cx));
                     })
                     .child(
                         svg()
@@ -429,7 +453,9 @@ impl TerminalTabBar {
             .border_color(border)
             .when(draw_left, |this| this.border_l_1())
             .when(draw_right, |this| this.border_r_1())
-            .when(selected, |this| this.bg(tab_active).text_color(tab_active_fg))
+            .when(selected, |this| {
+                this.bg(tab_active).text_color(tab_active_fg)
+            })
             .when(!selected, |this| {
                 this.text_color(tab_fg).hover(|style| style.bg(muted))
             })

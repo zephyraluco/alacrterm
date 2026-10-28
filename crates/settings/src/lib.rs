@@ -21,7 +21,11 @@ pub fn candidates(relative: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if Path::new(relative).starts_with("config") {
         #[cfg(debug_assertions)]
-        return vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(relative)];
+        return vec![
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(relative),
+        ];
         #[cfg(not(debug_assertions))]
         return user_config_path(relative).into_iter().collect();
     }
@@ -55,7 +59,11 @@ fn user_config_path(relative: &str) -> Option<PathBuf> {
 #[cfg(any(not(debug_assertions), test))]
 fn configuration_path(base: &Path, relative: &str) -> Option<PathBuf> {
     let filename = Path::new(relative).strip_prefix("config").ok()?;
-    let application = if cfg!(target_os = "linux") { "alacrterm" } else { "Alacrterm" };
+    let application = if cfg!(target_os = "linux") {
+        "alacrterm"
+    } else {
+        "Alacrterm"
+    };
     Some(base.join(application).join(filename))
 }
 
@@ -245,7 +253,10 @@ mod tests {
     fn configuration_has_only_the_user_directory_candidate() {
         for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
             let relative = format!("config/{name}");
-            assert_eq!(candidates(&relative), vec![configuration_path(&dirs::config_dir().unwrap(), &relative).unwrap()]);
+            assert_eq!(
+                candidates(&relative),
+                vec![configuration_path(&dirs::config_dir().unwrap(), &relative).unwrap()]
+            );
         }
     }
 
@@ -254,7 +265,14 @@ mod tests {
     fn development_configuration_stays_in_the_source_directory() {
         for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
             let relative = format!("config/{name}");
-            assert_eq!(candidates(&relative), vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(relative)]);
+            assert_eq!(
+                candidates(&relative),
+                vec![
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../..")
+                        .join(relative)
+                ]
+            );
         }
     }
 
@@ -262,7 +280,17 @@ mod tests {
     fn user_paths_separate_configuration_from_bundled_resources() {
         let base = Path::new("AppData/Roaming");
         for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
-            assert_eq!(configuration_path(base, &format!("config/{name}")), Some(base.join(if cfg!(target_os = "linux") { "alacrterm" } else { "Alacrterm" }).join(name)));
+            assert_eq!(
+                configuration_path(base, &format!("config/{name}")),
+                Some(
+                    base.join(if cfg!(target_os = "linux") {
+                        "alacrterm"
+                    } else {
+                        "Alacrterm"
+                    })
+                    .join(name)
+                )
+            );
         }
         assert_eq!(configuration_path(base, "themes/global"), None);
         assert_eq!(configuration_path(base, "themes/terminal"), None);
@@ -270,17 +298,25 @@ mod tests {
 
     #[test]
     fn first_save_creates_user_configuration_directory() {
-        let root = std::env::temp_dir().join(format!("alacrterm-first-config-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("alacrterm-first-config-{}", std::process::id()));
         let cache = util::file_cache::FileCache::new(&root);
         let lease = cache.allocate("installation");
         let installed = configuration_path(lease.path(), "config/app.json").unwrap();
         let build_machine = lease.path().join("build-machine/config/app.json");
         let target = select_write_target(&[installed.clone(), build_machine.clone()]);
         assert_eq!(target, installed);
-        SettingsStore::new(target.clone()).update(serde_json::Map::from_iter([
-            ("dark_theme".into(), json!("Nord")),
-        ])).unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(target).unwrap()).unwrap()["dark_theme"], "Nord");
+        SettingsStore::new(target.clone())
+            .update(serde_json::Map::from_iter([(
+                "dark_theme".into(),
+                json!("Nord"),
+            )]))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(target).unwrap())
+                .unwrap()["dark_theme"],
+            "Nord"
+        );
         assert!(!build_machine.exists());
         std::fs::remove_dir_all(lease.path()).unwrap();
     }
@@ -346,6 +382,9 @@ mod tests {
     #[test]
     fn bundled_resources_keep_executable_relative_candidates() {
         let executable = std::env::current_exe().unwrap();
-        assert_eq!(candidates("themes/global")[0], executable.parent().unwrap().join("themes/global"));
+        assert_eq!(
+            candidates("themes/global")[0],
+            executable.parent().unwrap().join("themes/global")
+        );
     }
 }

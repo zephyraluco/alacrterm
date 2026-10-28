@@ -7,8 +7,5 @@ pub(crate) const STATUS_BAR_ITEM_HEIGHT: Pixels = px(22.);
 const STATUS_BAR_PADDING: Pixels = px(4.);
 
 pub(crate) fn new_status_bar() -> StatusBar {
-    StatusBar::new()
-        .w_full()
-        .flex_none()
-        .py(STATUS_BAR_PADDING)
+    StatusBar::new().w_full().flex_none().py(STATUS_BAR_PADDING)
 }

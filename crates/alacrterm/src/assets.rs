@@ -1,7 +1,7 @@
 //! 自有图标资产：`assets/icons/*.svg` 经 [`icon_named!`] 生成 `IconName`，[`Assets`] 用 rust-embed 嵌入。
 
 use gpui::{AnyElement, App, AssetSource, IntoElement, RenderOnce, Result, SharedString, Window};
-use gpui_kit::component::{icon_named, Icon, IconNamed};
+use gpui_kit::component::{Icon, IconNamed, icon_named};
 use rust_embed::RustEmbed;
 
 icon_named!(IconName, "../../assets/icons");

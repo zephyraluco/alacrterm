@@ -135,7 +135,7 @@ pub(crate) fn find_from_grid_point<T: EventListener>(
             Some((url, true, url_match))
         } else {
             path_match(
-                &term,
+                term,
                 line_start,
                 line_end,
                 point,
@@ -416,9 +416,8 @@ fn path_match<T>(
     for regex in path_hyperlink_regexes {
         let mut path_found = false;
 
-        for (line_start_offset, captures) in regex
-            .captures_iter(&line)
-            .map(|captures| (0usize, captures))
+        for (line_start_offset, captures) in
+            regex.captures_iter(line).map(|captures| (0usize, captures))
         {
             path_found = true;
             let match_range = captures.get(0).unwrap().range();
@@ -1363,7 +1362,7 @@ mod tests {
         fn process_input(term: &mut Term<VoidListener>, c: char) {
             match c {
                 '\t' => term.put_tab(1),
-                c @ _ => term.input(c),
+                c => term.input(c),
             }
         }
 
@@ -1550,7 +1549,7 @@ mod tests {
             let format_path_with_position_and_match =
                 |path_with_position: &PathWithPosition, hyperlink_match: &Match| {
                     let mut result =
-                        format!("Path = «{}»", &path_with_position.path.to_string_lossy());
+                        format!("Path = «{}»", path_with_position.path.to_string_lossy());
                     if let Some(row) = path_with_position.row {
                         result += &format!(", line = {row}");
                         if let Some(column) = path_with_position.column {
@@ -1673,7 +1672,7 @@ mod tests {
 
                 match cell.c {
                     '\t' => result.push(' '),
-                    c @ _ => result.push(c),
+                    c => result.push(c),
                 }
             }
 
@@ -1741,8 +1740,7 @@ mod tests {
                 if expected_hyperlink.hyperlink_match.start()
                     != expected_hyperlink.hyperlink_match.end()
                 {
-                    assert!(
-                        false,
+                    panic!(
                         "No hyperlink found\n     at {source_location}:\n{}",
                         check_hyperlink_match.format_renderable_content()
                     )

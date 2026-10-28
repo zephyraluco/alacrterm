@@ -50,7 +50,9 @@ async fn browses_the_remote_home_directory() {
     let fs = SshFs::new(params);
 
     // 第一次请求才建连接,所以这里同时覆盖了「懒连接 + 认证 + sftp 子系统」整条路。
-    let home = with_timeout("取家目录", fs.home_dir()).await.expect("家目录");
+    let home = with_timeout("取家目录", fs.home_dir())
+        .await
+        .expect("家目录");
     println!("家目录:{home}");
     assert!(home.starts_with('/'), "远端家目录应当是以 / 开头的绝对路径");
 
@@ -69,12 +71,16 @@ async fn browses_the_remote_home_directory() {
     }
 
     // 根目录一定存在且是目录;家目录本身也是目录。
-    assert!(with_timeout("看 / 是不是目录", fs.is_dir("/"))
-        .await
-        .expect("stat /"));
-    assert!(with_timeout("看家目录是不是目录", fs.is_dir(home.clone()))
-        .await
-        .expect("stat 家目录"));
+    assert!(
+        with_timeout("看 / 是不是目录", fs.is_dir("/"))
+            .await
+            .expect("stat /")
+    );
+    assert!(
+        with_timeout("看家目录是不是目录", fs.is_dir(home.clone()))
+            .await
+            .expect("stat 家目录")
+    );
 
     // 同一个句柄第二次请求复用连接(不该重连,也不该报错)。
     let again = with_timeout("再列一次 /etc", fs.list_dir("/etc"))
@@ -92,8 +98,11 @@ async fn reports_a_missing_path_without_killing_the_connection() {
     };
     let fs = SshFs::new(params);
 
-    let missing = with_timeout("列一个不存在的目录", fs.list_dir("/definitely-not-here-1a2b3c"))
-        .await;
+    let missing = with_timeout(
+        "列一个不存在的目录",
+        fs.list_dir("/definitely-not-here-1a2b3c"),
+    )
+    .await;
     let message = missing.expect_err("不存在的路径应当报错").to_string();
     println!("错误:{message}");
     assert!(

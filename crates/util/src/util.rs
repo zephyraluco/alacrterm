@@ -1,9 +1,9 @@
 pub mod atomic_file;
-pub mod resource_registry;
 pub mod file_cache;
 pub mod format;
 pub mod paths;
 pub mod rel_path;
+pub mod resource_registry;
 pub mod shell;
 
 use std::{
@@ -121,7 +121,7 @@ pub fn strip_json_comments(content: &str) -> String {
                 match chars.peek() {
                     Some('/') => {
                         chars.next();
-                        while let Some(comment_ch) = chars.next() {
+                        for comment_ch in chars.by_ref() {
                             if comment_ch == '\n' {
                                 comma.push('\n');
                                 break;
@@ -132,7 +132,7 @@ pub fn strip_json_comments(content: &str) -> String {
                     Some('*') => {
                         chars.next();
                         let mut previous = '\0';
-                        while let Some(comment_ch) = chars.next() {
+                        for comment_ch in chars.by_ref() {
                             if comment_ch == '\n' {
                                 comma.push('\n');
                             }
@@ -171,7 +171,7 @@ pub fn strip_json_comments(content: &str) -> String {
             match chars.peek() {
                 Some('/') => {
                     chars.next();
-                    while let Some(comment_ch) = chars.next() {
+                    for comment_ch in chars.by_ref() {
                         if comment_ch == '\n' {
                             without_comments.push('\n');
                             break;
@@ -182,7 +182,7 @@ pub fn strip_json_comments(content: &str) -> String {
                 Some('*') => {
                     chars.next();
                     let mut previous = '\0';
-                    while let Some(comment_ch) = chars.next() {
+                    for comment_ch in chars.by_ref() {
                         if comment_ch == '\n' {
                             without_comments.push('\n');
                         }

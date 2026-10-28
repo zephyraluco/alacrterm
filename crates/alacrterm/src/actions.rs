@@ -163,13 +163,13 @@ impl AppRoot {
         cx.on_action(move |action: &MoveEntry, cx: &mut App| {
             let from = action.from.clone();
             let into = action.into.clone().unwrap_or_default();
-            let _ = move_sessions.update(cx, |state, cx| state.move_entry(&from, &into, cx));
+            move_sessions.update(cx, |state, cx| state.move_entry(&from, &into, cx));
         });
 
         let remove_sessions = sessions;
         cx.on_action(move |action: &RemoveEntry, cx: &mut App| {
             let path = action.path.clone();
-            let _ = remove_sessions.update(cx, |state, cx| state.remove_entry(&path, cx));
+            remove_sessions.update(cx, |state, cx| state.remove_entry(&path, cx));
         });
 
         let local_root = root.clone();
@@ -273,14 +273,16 @@ impl AppRoot {
 
         let sidebar_sessions = root.clone();
         cx.on_action(move |_: &ShowSessionsView, cx: &mut App| {
-            let _ = sidebar_sessions
-                .update(cx, |this, cx| this.open_sidebar_view(SidebarView::Sessions, cx));
+            let _ = sidebar_sessions.update(cx, |this, cx| {
+                this.open_sidebar_view(SidebarView::Sessions, cx)
+            });
         });
 
         let sidebar_files = root.clone();
         cx.on_action(move |_: &ShowFilesView, cx: &mut App| {
-            let _ = sidebar_files
-                .update(cx, |this, cx| this.open_sidebar_view(SidebarView::Files, cx));
+            let _ = sidebar_files.update(cx, |this, cx| {
+                this.open_sidebar_view(SidebarView::Files, cx)
+            });
         });
 
         // 终端操作：作用于「当前会话」，不需要窗口。
@@ -358,16 +360,14 @@ impl AppRoot {
         let font_up_root = root.clone();
         cx.on_action(move |_: &IncreaseFontSize, cx: &mut App| {
             crate::settings_window::update_render(&font_up_root, cx, |settings| {
-                settings.font_size =
-                    px((settings.font_size.as_f32() + 1.0).min(MAX_FONT_SIZE));
+                settings.font_size = px((settings.font_size.as_f32() + 1.0).min(MAX_FONT_SIZE));
             });
         });
 
         let font_down_root = root.clone();
         cx.on_action(move |_: &DecreaseFontSize, cx: &mut App| {
             crate::settings_window::update_render(&font_down_root, cx, |settings| {
-                settings.font_size =
-                    px((settings.font_size.as_f32() - 1.0).max(MIN_FONT_SIZE));
+                settings.font_size = px((settings.font_size.as_f32() - 1.0).max(MIN_FONT_SIZE));
             });
         });
 

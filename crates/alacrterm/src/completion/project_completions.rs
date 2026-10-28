@@ -83,15 +83,14 @@ fn scripts(data: &[u8]) -> Vec<String> {
 }
 fn packed(data: &[u8], values: &mut BTreeSet<String>) {
     for line in String::from_utf8_lossy(data).lines() {
-        if let Some((_, name)) = line.split_once(' ') {
-            if let Some(name) = name
+        if let Some((_, name)) = line.split_once(' ')
+            && let Some(name) = name
                 .strip_prefix("refs/heads/")
                 .or_else(|| name.strip_prefix("refs/remotes/"))
-            {
-                if !name.ends_with("/HEAD") && literal_name(name) {
-                    values.insert(name.into());
-                }
-            }
+            && !name.ends_with("/HEAD")
+            && literal_name(name)
+        {
+            values.insert(name.into());
         }
     }
 }

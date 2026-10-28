@@ -66,10 +66,10 @@ impl InputTracking {
         !matches!(self.state, TrackingState::Unanchored)
     }
     pub fn capture(&mut self, content: &Content) {
-        if !self.has_anchor() {
-            if let Some(anchor) = PromptAnchor::capture(content) {
-                self.state = TrackingState::Anchored(anchor);
-            }
+        if !self.has_anchor()
+            && let Some(anchor) = PromptAnchor::capture(content)
+        {
+            self.state = TrackingState::Anchored(anchor);
         }
     }
     pub fn request(&mut self, generation: u64, since: Instant) -> bool {

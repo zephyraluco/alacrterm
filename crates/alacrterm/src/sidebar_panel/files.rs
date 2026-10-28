@@ -51,9 +51,7 @@ use gpui_kit::component::{
     progress::Progress,
     v_flex,
 };
-use terminal::{
-    RemoteEntry, SessionId, SshError, SshFs, Transfer,
-};
+use terminal::{RemoteEntry, SessionId, SshError, SshFs, Transfer};
 
 use super::empty_state;
 use super::shared::{RowCache, ellipsis_label, row_content, row_shell};
@@ -123,7 +121,9 @@ fn unique_path(path: PathBuf) -> PathBuf {
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let extension = path.extension().map(|ext| ext.to_string_lossy().into_owned());
+    let extension = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().into_owned());
     for n in 1..1000 {
         let name = match &extension {
             Some(extension) => format!("{stem} ({n}).{extension}"),
@@ -372,7 +372,10 @@ impl FilesState {
         let task = cx.background_spawn({
             let path = path.clone();
             async move {
-                let metadata = fs.stat(path.clone()).await.map_err(|error| error.to_string())?;
+                let metadata = fs
+                    .stat(path.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
                 if !metadata.is_dir {
                     return Err("目标路径不是目录".to_string());
                 }
@@ -482,7 +485,7 @@ impl FilesState {
                             // 上下文同步，否则 `~` 那条目录没人展开（以前靠逐帧兜底）。
                             let app_root = this.app_root.clone();
                             if let Some(root) = app_root.upgrade() {
-                                let _ = root.update(cx, |root, cx| root.schedule_context_sync(cx));
+                                root.update(cx, |root, cx| root.schedule_context_sync(cx));
                             }
                             // 终端已经报过目录、并且已经跳过去了(见 `follow_terminal`):
                             // 别拿家目录盖回来 —— 两条路都是异步的,谁先回来不一定。
@@ -647,7 +650,14 @@ impl FilesState {
                     let _ = state.update(&mut cx, |this, cx| {
                         // 远端目录名会落在选中的目录下面。
                         let transfer = fs.download(vec![remote.clone()], dir);
-                        this.spawn_transfer(fs.clone(), name.clone(), None, transfer, TransferDone::Nothing, cx);
+                        this.spawn_transfer(
+                            fs.clone(),
+                            name.clone(),
+                            None,
+                            transfer,
+                            TransferDone::Nothing,
+                            cx,
+                        );
                     });
                 }
             })
@@ -664,7 +674,14 @@ impl FilesState {
                 };
                 let _ = state.update(&mut cx, |this, cx| {
                     let transfer = fs.download_one(remote.clone(), target);
-                    this.spawn_transfer(fs.clone(), name.clone(), None, transfer, TransferDone::Nothing, cx);
+                    this.spawn_transfer(
+                        fs.clone(),
+                        name.clone(),
+                        None,
+                        transfer,
+                        TransferDone::Nothing,
+                        cx,
+                    );
                 });
             }
         })
@@ -683,7 +700,14 @@ impl FilesState {
             // 先算一个不撞的名字,免得悄悄覆盖用户已有的文件。
             fs.download_one(node.path.clone(), unique_path(dir.join(node.name.as_ref())))
         };
-        self.spawn_transfer(fs, node.name.clone(), None, transfer, TransferDone::Nothing, cx);
+        self.spawn_transfer(
+            fs,
+            node.name.clone(),
+            None,
+            transfer,
+            TransferDone::Nothing,
+            cx,
+        );
     }
 
     /// 「上传…」:把本地这些路径传进当前选中项所在的远端目录。
@@ -944,7 +968,6 @@ impl FilesState {
         };
         if self.root.as_deref() == Some(dir) {
             self.spawn_load(fs, dir.to_string(), cx);
-            return;
         }
         // 非当前目录无需缓存；再次进入时会重新读取。
     }
@@ -964,7 +987,10 @@ impl FilesState {
     /// 侧边栏虚拟列表的全部内容项。
     pub(super) fn sidebar_items(&mut self, cx: &mut Context<Self>) -> Vec<FilesItem> {
         let transfers = self.transfers.read(cx).transfers().to_vec();
-        if transfers.is_empty() && self.error.is_none() && (self.root.is_none() || self.entries.is_none()) {
+        if transfers.is_empty()
+            && self.error.is_none()
+            && (self.root.is_none() || self.entries.is_none())
+        {
             return Vec::new();
         }
 
@@ -1015,9 +1041,7 @@ impl FilesState {
         };
         self.entries.as_ref()?.get(*ix)
     }
-
 }
-
 
 #[derive(Clone)]
 pub(super) enum FilesItem {
@@ -1043,7 +1067,9 @@ impl FilesItem {
     pub(super) fn render(self, cx: &mut App) -> AnyElement {
         match self {
             Self::Transfer { state, id } => {
-                let Ok(Some(transfer)) = state.read_with(&*cx, |files, cx| files.transfers.read(cx).transfer(id)) else {
+                let Ok(Some(transfer)) =
+                    state.read_with(&*cx, |files, cx| files.transfers.read(cx).transfer(id))
+                else {
                     return div().w_full().into_any_element();
                 };
                 let foreign = state
@@ -1086,15 +1112,14 @@ impl FilesItem {
                                 });
                             })
                             .context_menu(move |menu, _window, _cx| {
-                                let menu = row_menu(
+                                row_menu(
                                     menu,
                                     &menu_state,
                                     menu_path.clone(),
                                     remote.clone(),
                                     name.clone(),
                                     is_dir,
-                                );
-                                menu
+                                )
                             }),
                     )
                     .into_any_element()
@@ -1105,10 +1130,11 @@ impl FilesItem {
                 description,
                 detail,
             } => {
-                let mut body = v_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(empty_state(icon, title, Some(description)));
+                let mut body =
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(empty_state(icon, title, Some(description)));
                 if let Some(detail) = detail {
                     body = body.child(
                         div()
@@ -1175,7 +1201,9 @@ fn transfer_element(
                         .disabled(transfer.cancelling)
                         .on_click(move |_, _, cx| {
                             let _ = state.update(cx, |files, cx| {
-                                files.transfers.update(cx, |manager, cx| manager.cancel(id, cx));
+                                files
+                                    .transfers
+                                    .update(cx, |manager, cx| manager.cancel(id, cx));
                             });
                         })
                 }),
@@ -1204,7 +1232,8 @@ fn row_menu(
             PopupMenuItem::new("打开")
                 .icon(IconName::FileText)
                 .on_click(move |_, _, cx| {
-                    let _ = open_state.update(cx, |files, cx| files.open_file(open_path.clone(), cx));
+                    let _ =
+                        open_state.update(cx, |files, cx| files.open_file(open_path.clone(), cx));
                 }),
         );
     }
@@ -1212,7 +1241,11 @@ fn row_menu(
     menu = menu.item({
         let state = state.clone();
         let path = path.clone();
-        let label = if is_dir { "下载文件夹到…" } else { "另存为…" };
+        let label = if is_dir {
+            "下载文件夹到…"
+        } else {
+            "另存为…"
+        };
         PopupMenuItem::new(label)
             .icon(IconName::Download)
             .on_click(move |_, _, cx| {
@@ -1246,7 +1279,6 @@ fn row_menu(
             })
     })
 }
-
 
 /// 画当前目录的一行；文件夹和文件对齐，不显示树形展开箭头。
 fn row_element(ix: usize, row: &FileRow, selected: bool, cx: &mut App) -> ListItem {

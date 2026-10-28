@@ -851,12 +851,32 @@ async fn completion_metadata_reads_are_bounded_and_do_not_block_browsing() {
     let fs = ssh::SshFs::new(params);
     let root = known_hosts.with_extension("metadata");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("package.json"), b"{\"scripts\":{\"build\":\"never execute\"}}").unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        b"{\"scripts\":{\"build\":\"never execute\"}}",
+    )
+    .unwrap();
     std::fs::write(root.join("large"), vec![b'x'; 256 * 1024 + 1]).unwrap();
-    let bytes = tokio::time::timeout(Duration::from_secs(10), fs.read_completion_file(root.join("package.json").to_string_lossy())).await.unwrap().unwrap();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(10),
+        fs.read_completion_file(root.join("package.json").to_string_lossy()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(bytes.starts_with(b"{\"scripts\":"));
-    assert!(fs.read_completion_file(root.join("large").to_string_lossy()).await.is_err());
-    assert_eq!(fs.list_completion_dir(root.to_string_lossy()).await.unwrap().len(), 2);
+    assert!(
+        fs.read_completion_file(root.join("large").to_string_lossy())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fs.list_completion_dir(root.to_string_lossy())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(fs.home_dir().await.is_ok());
     std::fs::remove_dir_all(root).unwrap();
     let _ = std::fs::remove_file(known_hosts);
@@ -870,10 +890,18 @@ async fn native_login_preserves_banner_and_early_input_when_activation_is_refuse
     params.host_key = HostKeyPolicy::AcceptNew;
     params.known_hosts = Some(known_hosts.clone());
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect_with_setup(params, SshSize::cells(80,24), sender, Some(std::sync::Arc::new(ProbeEnvironment))).unwrap();
+    let session = SshSession::connect_with_setup(
+        params,
+        SshSize::cells(80, 24),
+        sender,
+        Some(std::sync::Arc::new(ProbeEnvironment)),
+    )
+    .unwrap();
     session.write(b"first\nsecond\n");
-    let (text, _) = collect_until(&mut events, Duration::from_secs(9), None,
-        |text, _| text.contains("REPLY:second")).await;
+    let (text, _) = collect_until(&mut events, Duration::from_secs(9), None, |text, _| {
+        text.contains("REPLY:second")
+    })
+    .await;
     assert!(text.contains(BANNER));
     assert!(text.find(BANNER).unwrap() < text.find("REPLY:first").unwrap());
     assert!(text.find("REPLY:first").unwrap() < text.find("REPLY:second").unwrap());
@@ -890,8 +918,17 @@ async fn refused_activation_preserves_plain_interactive_shell() {
     params.host_key = HostKeyPolicy::AcceptNew;
     params.known_hosts = Some(known_hosts.clone());
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect_with_setup(params, SshSize::cells(80, 24), sender, Some(std::sync::Arc::new(ProbeEnvironment))).unwrap();
-    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| text.contains(PROMPT)).await;
+    let session = SshSession::connect_with_setup(
+        params,
+        SshSize::cells(80, 24),
+        sender,
+        Some(std::sync::Arc::new(ProbeEnvironment)),
+    )
+    .unwrap();
+    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+        text.contains(PROMPT)
+    })
+    .await;
     assert!(text.contains(BANNER));
     assert!(!text.contains("ALACRTERM_SHELL"));
     session.disconnect();
@@ -901,20 +938,37 @@ async fn refused_activation_preserves_plain_interactive_shell() {
 #[tokio::test]
 async fn dropping_a_session_cancels_an_unresponsive_ssh_handshake() {
     use tokio::io::AsyncReadExt as _;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect(SshParams::new("127.0.0.1", port, "user"), SshSize::cells(80,24), sender).unwrap();
-    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept()).await.unwrap().unwrap();
+    let session = SshSession::connect(
+        SshParams::new("127.0.0.1", port, "user"),
+        SshSize::cells(80, 24),
+        sender,
+    )
+    .unwrap();
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
     drop(session);
     tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(event) = events.next().await {
-            if matches!(event, SshEvent::Closed { .. }) { return; }
+            if matches!(event, SshEvent::Closed { .. }) {
+                return;
+            }
         }
         panic!("session ended without a close event");
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let mut bytes = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut bytes)).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -926,9 +980,13 @@ async fn dropping_a_session_cancels_a_pending_host_key_confirmation() {
     let session = SshSession::connect(params, SshSize::cells(80, 24), sender).unwrap();
     let prompt = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(SshEvent::HostKeyPrompt(prompt)) = events.next().await { break prompt; }
+            if let Some(SshEvent::HostKeyPrompt(prompt)) = events.next().await {
+                break prompt;
+            }
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     drop(session);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -939,7 +997,9 @@ async fn dropping_a_session_cancels_a_pending_host_key_confirmation() {
                 _ => {}
             }
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     drop(prompt);
 }
 
@@ -947,10 +1007,16 @@ async fn dropping_a_session_cancels_a_pending_host_key_confirmation() {
 async fn file_transfer_survives_closing_its_terminal_connection() {
     let port = local_server::serve().await.unwrap();
     let known_hosts = temp_known_hosts("transfer-owner");
-    let (session, mut events) = connect(port, known_hosts.clone(), SshSize::cells(80,24)).await;
-    collect_until(&mut events, Duration::from_secs(5), None, |text, _| text.contains(PROMPT)).await;
+    let (session, mut events) = connect(port, known_hosts.clone(), SshSize::cells(80, 24)).await;
+    collect_until(&mut events, Duration::from_secs(5), None, |text, _| {
+        text.contains(PROMPT)
+    })
+    .await;
     let fs = session.fs();
-    let root = std::env::temp_dir().join(format!("alacrterm-transfer-owner-{}-{port}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "alacrterm-transfer-owner-{}-{port}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&root).unwrap();
     let source = root.join("source.bin");
     let destination = root.join("destination.bin");
@@ -964,19 +1030,29 @@ async fn file_transfer_survives_closing_its_terminal_connection() {
     let _ = std::fs::remove_file(known_hosts);
 }
 
-
 struct ProbeEnvironment;
 impl ssh::SessionSetup for ProbeEnvironment {
-    fn prepare<'a>(&'a self, mut session: ssh::SessionContext<'a>) -> futures::future::BoxFuture<'a, ()> {
+    fn prepare<'a>(
+        &'a self,
+        mut session: ssh::SessionContext<'a>,
+    ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
-            assert!(!session.set_env("TEST_SESSION_SETUP", "1", Duration::from_secs(2)).await.unwrap());
+            assert!(
+                !session
+                    .set_env("TEST_SESSION_SETUP", "1", Duration::from_secs(2))
+                    .await
+                    .unwrap()
+            );
         })
     }
 }
 
 #[tokio::test]
 async fn host_supplied_x11_target_receives_authenticated_setup_and_requests() {
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     struct Target(Arc<AtomicBool>);
     struct Lease(Arc<AtomicBool>);
     impl ssh::X11Target for Target {
@@ -985,7 +1061,9 @@ async fn host_supplied_x11_target_receives_authenticated_setup_and_requests() {
         }
     }
     impl ssh::X11Lease for Lease {
-        fn connect(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Box<dyn ssh::X11Stream>>> {
+        fn connect(
+            &self,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<Box<dyn ssh::X11Stream>>> {
             Box::pin(async move {
                 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
                 self.0.store(true, Ordering::SeqCst);
@@ -1017,9 +1095,16 @@ async fn host_supplied_x11_target_receives_authenticated_setup_and_requests() {
     params.known_hosts = Some(known_hosts.clone());
     let connected = Arc::new(AtomicBool::new(false));
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let options = ssh::SessionOptions { x11: Some(Arc::new(Target(connected.clone()))), ..Default::default() };
-    let session = SshSession::connect_with_options(params, SshSize::cells(80, 24), sender, options).unwrap();
-    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| text.contains("X11:OK") || text.contains("X11:FAILED")).await;
+    let options = ssh::SessionOptions {
+        x11: Some(Arc::new(Target(connected.clone()))),
+        ..Default::default()
+    };
+    let session =
+        SshSession::connect_with_options(params, SshSize::cells(80, 24), sender, options).unwrap();
+    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+        text.contains("X11:OK") || text.contains("X11:FAILED")
+    })
+    .await;
     assert!(text.contains("X11:OK"), "{text}");
     assert!(connected.load(Ordering::SeqCst));
     session.disconnect();
@@ -1028,16 +1113,30 @@ async fn host_supplied_x11_target_receives_authenticated_setup_and_requests() {
 
 #[tokio::test]
 async fn host_setup_executes_auxiliary_commands_without_replacing_native_shell() {
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     struct Setup(Arc<AtomicBool>);
     impl ssh::SessionSetup for Setup {
-        fn prepare<'a>(&'a self, session: ssh::SessionContext<'a>) -> futures::future::BoxFuture<'a, ()> {
+        fn prepare<'a>(
+            &'a self,
+            session: ssh::SessionContext<'a>,
+        ) -> futures::future::BoxFuture<'a, ()> {
             Box::pin(async move {
                 let helper = session.connect_auxiliary().await.unwrap();
-                let output = helper.exec("exit 7", Duration::from_secs(2), 1024).await.unwrap();
+                let output = helper
+                    .exec("exit 7", Duration::from_secs(2), 1024)
+                    .await
+                    .unwrap();
                 assert_eq!(output.exit_status, Some(7));
                 assert!(output.stdout.starts_with(b"EXEC:exit 7"));
-                assert!(helper.exec("exit 0", Duration::from_secs(2), 4).await.is_err());
+                assert!(
+                    helper
+                        .exec("exit 0", Duration::from_secs(2), 4)
+                        .await
+                        .is_err()
+                );
                 helper.disconnect().await.unwrap();
                 self.0.store(true, Ordering::SeqCst);
             })
@@ -1050,8 +1149,17 @@ async fn host_setup_executes_auxiliary_commands_without_replacing_native_shell()
     params.known_hosts = Some(known_hosts.clone());
     let ready = Arc::new(AtomicBool::new(false));
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    let session = SshSession::connect_with_setup(params, SshSize::cells(80, 24), sender, Some(Arc::new(Setup(ready.clone())))).unwrap();
-    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| text.ends_with(PROMPT)).await;
+    let session = SshSession::connect_with_setup(
+        params,
+        SshSize::cells(80, 24),
+        sender,
+        Some(Arc::new(Setup(ready.clone()))),
+    )
+    .unwrap();
+    let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+        text.ends_with(PROMPT)
+    })
+    .await;
     assert!(text.contains(BANNER));
     assert!(ready.load(Ordering::SeqCst));
     session.disconnect();
@@ -1062,7 +1170,10 @@ async fn host_setup_executes_auxiliary_commands_without_replacing_native_shell()
 async fn closing_a_session_cancels_pending_host_preparation() {
     struct Setup(std::sync::Arc<tokio::sync::Notify>);
     impl ssh::SessionSetup for Setup {
-        fn prepare<'a>(&'a self, _session: ssh::SessionContext<'a>) -> futures::future::BoxFuture<'a, ()> {
+        fn prepare<'a>(
+            &'a self,
+            _session: ssh::SessionContext<'a>,
+        ) -> futures::future::BoxFuture<'a, ()> {
             Box::pin(async move {
                 self.0.notify_one();
                 std::future::pending().await
@@ -1076,14 +1187,27 @@ async fn closing_a_session_cancels_pending_host_preparation() {
     params.known_hosts = Some(known_hosts.clone());
     let (sender, mut events) = futures::channel::mpsc::unbounded();
     let started = std::sync::Arc::new(tokio::sync::Notify::new());
-    let session = SshSession::connect_with_setup(params, SshSize::cells(80, 24), sender, Some(std::sync::Arc::new(Setup(started.clone())))).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    let session = SshSession::connect_with_setup(
+        params,
+        SshSize::cells(80, 24),
+        sender,
+        Some(std::sync::Arc::new(Setup(started.clone()))),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
     session.disconnect();
     tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(event) = events.next().await {
-            if let SshEvent::Closed { reason, .. } = event { assert!(reason.is_none()); return; }
+            if let SshEvent::Closed { reason, .. } = event {
+                assert!(reason.is_none());
+                return;
+            }
         }
         panic!("missing close event");
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let _ = std::fs::remove_file(known_hosts);
 }

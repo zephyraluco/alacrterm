@@ -262,7 +262,10 @@ mod tests {
         assert_eq!(feed_path(&mut scanner, b"\x1b"), None);
         assert_eq!(feed_path(&mut scanner, b"]7;fil"), None);
         assert_eq!(feed_path(&mut scanner, b"e://host/opt/ros"), None);
-        assert_eq!(feed_path(&mut scanner, b"\x07").as_deref(), Some("/opt/ros"));
+        assert_eq!(
+            feed_path(&mut scanner, b"\x07").as_deref(),
+            Some("/opt/ros")
+        );
     }
 
     #[test]
@@ -308,7 +311,8 @@ mod tests {
     fn unrelated_osc_sequences_are_skipped() {
         let mut scanner = DirectoryScanner::default();
         // 超链接(OSC 8)、剪贴板(OSC 52)、颜色(OSC 11)都不该被当成目录。
-        let bytes = b"\x1b]8;;http://example.com\x07\x1b]52;c;Zm9v\x07\x1b]11;rgb:0000/0000/0000\x07";
+        let bytes =
+            b"\x1b]8;;http://example.com\x07\x1b]52;c;Zm9v\x07\x1b]11;rgb:0000/0000/0000\x07";
         assert_eq!(scanner.feed(bytes), None);
         // 而且跳过之后状态要干净:下一条线索还得认出来。
         assert_eq!(

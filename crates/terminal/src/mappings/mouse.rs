@@ -1,5 +1,4 @@
 use std::cmp::{self, min};
-use std::iter::repeat;
 
 /// Most of the code, and specifically the constants, in this are copied from Alacritty,
 /// with modifications for our circumstances
@@ -90,51 +89,9 @@ pub(crate) fn scroll_report(
             e.modifiers,
             MouseFormat::from_mode(mode),
         )
-        .map(|report| repeat(report).take(scroll_lines.unsigned_abs() as usize))
+        .map(|report| std::iter::repeat_n(report, scroll_lines.unsigned_abs() as usize))
     } else {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{ScrollDelta, TouchPhase, point};
-
-    #[test]
-    fn scroll_report_repeats_for_negative_scroll_lines() {
-        let grid_point = Point::new(0, 0);
-
-        let scroll_event = ScrollWheelEvent {
-            delta: ScrollDelta::Lines(point(0., -1.)),
-            touch_phase: TouchPhase::Moved,
-            ..Default::default()
-        };
-
-        let mode = Modes::MOUSE_MODE;
-        let reports: Vec<Vec<u8>> = scroll_report(grid_point, -3, &scroll_event, mode)
-            .expect("mouse mode should produce a scroll report")
-            .collect();
-
-        assert_eq!(reports.len(), 3);
-    }
-
-    #[test]
-    fn scroll_report_repeats_for_positive_scroll_lines() {
-        let grid_point = Point::new(0, 0);
-
-        let scroll_event = ScrollWheelEvent {
-            delta: ScrollDelta::Lines(point(0., 1.)),
-            touch_phase: TouchPhase::Moved,
-            ..Default::default()
-        };
-
-        let mode = Modes::MOUSE_MODE;
-        let reports: Vec<Vec<u8>> = scroll_report(grid_point, 3, &scroll_event, mode)
-            .expect("mouse mode should produce a scroll report")
-            .collect();
-
-        assert_eq!(reports.len(), 3);
     }
 }
 
@@ -315,4 +272,46 @@ fn sgr_mouse_report(point: Point, button: u8, pressed: bool) -> String {
     );
 
     msg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{ScrollDelta, TouchPhase, point};
+
+    #[test]
+    fn scroll_report_repeats_for_negative_scroll_lines() {
+        let grid_point = Point::new(0, 0);
+
+        let scroll_event = ScrollWheelEvent {
+            delta: ScrollDelta::Lines(point(0., -1.)),
+            touch_phase: TouchPhase::Moved,
+            ..Default::default()
+        };
+
+        let mode = Modes::MOUSE_MODE;
+        let reports: Vec<Vec<u8>> = scroll_report(grid_point, -3, &scroll_event, mode)
+            .expect("mouse mode should produce a scroll report")
+            .collect();
+
+        assert_eq!(reports.len(), 3);
+    }
+
+    #[test]
+    fn scroll_report_repeats_for_positive_scroll_lines() {
+        let grid_point = Point::new(0, 0);
+
+        let scroll_event = ScrollWheelEvent {
+            delta: ScrollDelta::Lines(point(0., 1.)),
+            touch_phase: TouchPhase::Moved,
+            ..Default::default()
+        };
+
+        let mode = Modes::MOUSE_MODE;
+        let reports: Vec<Vec<u8>> = scroll_report(grid_point, 3, &scroll_event, mode)
+            .expect("mouse mode should produce a scroll report")
+            .collect();
+
+        assert_eq!(reports.len(), 3);
+    }
 }

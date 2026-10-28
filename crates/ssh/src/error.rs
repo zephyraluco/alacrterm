@@ -34,7 +34,11 @@ pub enum SshError {
         "主机密钥已变更:{host}:{port} 给的密钥与 known_hosts 第 {line} 行记录的不一致。\
          确认服务器确实换了密钥后,删掉那一行(或那个 host 段)再重连。"
     )]
-    HostKeyChanged { host: String, port: u16, line: usize },
+    HostKeyChanged {
+        host: String,
+        port: u16,
+        line: usize,
+    },
 
     /// 主机密钥校验本身失败(读不到 `known_hosts` 等)。
     #[error("主机密钥校验失败:{0}")]

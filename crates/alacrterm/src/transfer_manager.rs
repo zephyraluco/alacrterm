@@ -112,7 +112,9 @@ impl TransferManager {
     fn complete(&mut self, id: u64, completion: TransferCompleted, cx: &mut Context<Self>) {
         // The task is delivering its final result. Release its handle without
         // cancelling the update that is currently dispatching completion effects.
-        if let Some(task) = self.tasks.remove(&id) { task.detach(); }
+        if let Some(task) = self.tasks.remove(&id) {
+            task.detach();
+        }
         self.book.remove(id);
         cx.emit(completion);
         cx.notify();

@@ -21,23 +21,24 @@
 //! - 主题色使用 `terminal::TerminalColors`（本地定义）
 
 use std::mem;
-use std::rc::Rc;
 use std::ops::Range as StdRange;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
     AbsoluteLength, App, Bounds, ContentMask, Context, DispatchPhase, Element, ElementId, Entity,
-    FocusHandle, Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox,
-    Hsla, InputHandler, InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId,
-    Length, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint,
-    ShapedLine, SharedString, StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle,
-    UTF16Selection, UnderlineStyle, WhiteSpace, Window, fill, hsla, point, px, relative, size,
+    FocusHandle, Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, HighlightStyle,
+    Hitbox, Hsla, InputHandler, InspectorElementId, InteractiveElement, Interactivity, IntoElement,
+    LayoutId, Length, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point as GpuiPoint, ShapedLine, SharedString, StatefulInteractiveElement,
+    StrikethroughStyle, TextRun, TextStyle, UTF16Selection, UnderlineStyle, WhiteSpace, Window,
+    fill, hsla, point, px, relative, size,
 };
 use itertools::Itertools;
 use terminal::{
-    Cell, Color, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal, TerminalBounds,
-    TerminalColors, get_color_at_index, is_app_chosen_exact_color, is_default_background_color,
-    rgba_color,
+    Cell, Color, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
+    TerminalBounds, TerminalColors, get_color_at_index, is_app_chosen_exact_color,
+    is_default_background_color, rgba_color,
 };
 
 use crate::{TerminalView, contrast::ensure_minimum_contrast};
@@ -84,7 +85,11 @@ impl Default for TerminalRenderSettings {
     }
 }
 
-type GridLayout = (Vec<LayoutRect>, Vec<BatchedTextRun>, Vec<BlockElementLayoutRect>);
+type GridLayout = (
+    Vec<LayoutRect>,
+    Vec<BatchedTextRun>,
+    Vec<BlockElementLayoutRect>,
+);
 
 #[derive(Default)]
 pub(crate) struct GridCache {
@@ -142,17 +147,17 @@ impl CursorLayout {
         match self.kind {
             CursorKind::Block => {
                 window.paint_quad(fill(bounds, self.color));
-                if let Some(text) = &self.text {
-                    if let Err(error) = text.paint(
+                if let Some(text) = &self.text
+                    && let Err(error) = text.paint(
                         bounds.origin,
                         self.height,
                         gpui::TextAlign::Left,
                         None,
                         window,
                         cx,
-                    ) {
-                        log::error!("failed to paint cursor text: {error}");
-                    }
+                    )
+                {
+                    log::error!("failed to paint cursor text: {error}");
                 }
             }
             CursorKind::Underline => {
@@ -622,8 +627,7 @@ impl TerminalElement {
                         let cell_style = TerminalElement::cell_style(
                             point,
                             cell,
-                            fg,
-                            bg,
+                            (fg, bg),
                             colors,
                             text_style,
                             hyperlink,
@@ -943,8 +947,7 @@ impl TerminalElement {
     fn cell_style(
         point: Point,
         cell: &Cell,
-        fg: Color,
-        bg: Color,
+        (fg, bg): (Color, Color),
         colors: &TerminalColors,
         text_style: &TextStyle,
         hyperlink: Option<(HighlightStyle, &Range)>,
@@ -1082,8 +1085,10 @@ impl TerminalElement {
                 }
 
                 // 只有从本终端按下的手势才能拖选，不能接管从标题栏进入的拖动。
-                if e.pressed_button.is_some() && drag_button.get() == e.pressed_button
-                    && !cx.has_active_drag() && focus.is_focused(window)
+                if e.pressed_button.is_some()
+                    && drag_button.get() == e.pressed_button
+                    && !cx.has_active_drag()
+                    && focus.is_focused(window)
                 {
                     let hovered = hitbox.is_hovered(window);
 
