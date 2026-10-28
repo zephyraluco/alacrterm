@@ -44,7 +44,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::InputState,
     list::ListItem,
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     notification::Notification,
@@ -63,6 +63,10 @@ use crate::format;
 use crate::preview_cache::PreviewCache;
 use crate::preview_window::{FileKind, PreviewRequest};
 use crate::transfer_manager::{TransferDone, TransferManager, TransferState};
+
+mod path_input;
+
+use path_input::PathCompletion;
 
 /// 路径输入框那一行的高度。
 const PATH_ROW_HEIGHT: Pixels = px(36.);
@@ -180,7 +184,6 @@ fn nodes_from(parent: &str, entries: Vec<RemoteEntry>) -> Vec<FileNode> {
 /// 后台读取结果的回填目标。
 enum LoadTarget {
     Root,
-    Navigate(String),
     Dir(FilePath),
 }
 
@@ -249,6 +252,8 @@ pub(crate) struct FilesState {
     selected: Option<FilePath>,
     path_input: Entity<InputState>,
     path_input_pending: bool,
+    completion: PathCompletion,
+    navigation_error: Option<String>,
     /// 上一次「跟着终端走」跟着的那个目录（见 [`FilesState::follow_terminal`]）。
     ///
     /// 即「终端上一次报的目录」:shell 每次画提示符都会报一遍同一个目录,靠它去重;
@@ -277,7 +282,7 @@ impl FilesState {
     /// 根视图据此决定即使上下文快照没变也要跑一次同步（见
     /// [`crate::AppRoot::sync_active_context`]）。
     pub(crate) fn needs_window_sync(&self) -> bool {
-        self.path_input_pending
+        self.path_input_pending || self.navigation_error.is_some()
     }
 
     pub(crate) fn has_transfers(&self, cx: &App) -> bool {
@@ -313,6 +318,8 @@ impl FilesState {
             selected: None,
             path_input,
             path_input_pending: false,
+            completion: PathCompletion::default(),
+            navigation_error: None,
             followed: None,
             home: None,
             nav_seq: 0,
@@ -327,19 +334,21 @@ impl FilesState {
 
     /// 与当前会话对齐。
     pub(crate) fn sync(&mut self, fs: Option<SshFs>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fs != fs {
+            self.completion = PathCompletion::default();
+            self.navigation_error = None;
+            self.fs = fs;
+            self.root = None;
+            self.followed = None;
+            self.home = None;
+            self.reset(window, cx);
+            return;
+        }
         if self.path_input_pending {
             self.path_input_pending = false;
             self.sync_path_input(window, cx);
         }
-        if self.fs == fs {
-            return;
-        }
-        self.fs = fs;
-        self.root = None;
-        // 换了会话就忘了「上次跟到哪儿」与旧会话的家目录:新会话的目录跟旧会话没关系。
-        self.followed = None;
-        self.home = None;
-        self.reset(window, cx);
+        self.show_navigation_error(window, cx);
     }
 
     /// 跟着终端走：远端 shell 报了个新目录就跳过去。
@@ -363,72 +372,105 @@ impl FilesState {
             return;
         };
         let directory = directory.as_str();
-        if self.fs.is_none()
-            || self.root.as_deref() == Some(directory)
-            || self.followed.as_deref() == Some(directory)
-        {
+        if self.fs.is_none() || self.followed.as_deref() == Some(directory) {
             return;
         }
+        // 先记住终端上报值，手动跳转失败后也不拿旧目录覆盖路径框。
         self.followed = Some(directory.to_string());
+        if self.completion.editing || self.root.as_deref() == Some(directory) {
+            return;
+        }
         self.navigate_to(directory, cx);
     }
 
-    /// 输入框改动 / 回车时跳转。
-    fn on_path_input_event(
-        &mut self,
-        event: &InputEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
-            return;
-        }
-        let text = self.path_input.read(cx).value().trim().to_string();
-        self.navigate_to(&text, cx);
-    }
-
-    /// 跳到 `text` 指的目录,只认最新一次请求。
+    /// 只在确认后导航；直接读目录以保留不存在、非目录、权限等错误。
     fn navigate_to(&mut self, text: &str, cx: &mut Context<Self>) {
-        let Some(fs) = self.fs.clone() else {
+        let Some(fs) = self.fs.clone() else { return };
+        let Some(path) = path_input::resolve_path(
+            text,
+            self.root.as_deref().or(self.completion.base.as_deref()),
+            self.home.as_deref(),
+        ) else {
+            self.navigation_failed(
+                "无法解析路径，请输入绝对路径或等待远端家目录加载".into(),
+                cx,
+            );
             return;
         };
-        let text = text.to_string();
-        if text.is_empty() || self.root.as_deref() == Some(text.as_str()) {
-            return;
-        }
-        let generation = self.generation;
+        self.completion.dismiss();
+        self.path_input_pending = false;
+        self.generation += 1;
         self.nav_seq += 1;
+        self.loading.clear();
+        let generation = self.generation;
         let seq = self.nav_seq;
         let task = cx.background_spawn({
-            let fs = fs.clone();
-            let text = text.clone();
-            async move { fs.is_dir(text).await }
-        });
-        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let mut cx = cx.clone();
+            let path = path.clone();
             async move {
-                let is_dir = task.await.unwrap_or(false);
-                if !is_dir {
+                let metadata = fs.stat(path.clone()).await.map_err(|error| error.to_string())?;
+                if !metadata.is_dir {
+                    return Err("目标路径不是目录".to_string());
+                }
+                fs.list_dir(path).await.map_err(|error| error.to_string())
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation || this.nav_seq != seq {
                     return;
                 }
-                let _ = this.update(&mut cx, |this, cx| {
-                    if this.generation != generation || this.nav_seq != seq {
-                        return;
+                match result {
+                    Ok(entries) => {
+                        this.completion.cache.clear();
+                        this.completion.base = Some(path.clone());
+                        this.root = Some(path.clone());
+                        this.entries = Some(nodes_from(&path, entries));
+                        this.error = None;
+                        this.expanded.clear();
+                        this.selected = None;
+                        this.rows.bump();
+                        this.path_input_pending = true;
+                        this.schedule_path_sync(cx);
                     }
-                    this.generation += 1;
-                    this.spawn_load(fs, text.clone(), LoadTarget::Navigate(text), cx);
-                });
-            }
+                    Err(error) => this.navigation_failed(format!("无法打开 {path}：{error}"), cx),
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
 
+    fn navigation_failed(&mut self, message: String, cx: &mut Context<Self>) {
+        self.generation += 1;
+        self.root = None;
+        self.entries = None;
+        self.error = Some(message.clone());
+        self.expanded.clear();
+        self.loading.clear();
+        self.selected = None;
+        self.rows.bump();
+        self.path_input_pending = false;
+        self.completion.dismiss();
+        self.navigation_error = Some(message);
+        self.schedule_path_sync(cx);
+        cx.notify();
+    }
+
+    fn schedule_path_sync(&self, cx: &mut Context<Self>) {
+        let _ = self
+            .app_root
+            .update(cx, |root, cx| root.schedule_context_sync(cx));
+    }
+
     fn sync_path_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.root.clone().unwrap_or_default();
+        self.completion.base = self.root.clone();
         let current = self.path_input.read(cx).value();
         if current.as_ref() == text {
             return;
         }
+        self.completion.value = text.clone();
         self.path_input
             .update(cx, |input, cx| input.set_value(text, window, cx));
     }
@@ -441,6 +483,8 @@ impl FilesState {
 
     /// 重置状态并按需重读根目录。
     fn reset_no_window(&mut self, cx: &mut Context<Self>) {
+        self.completion.dismiss();
+        self.completion.cache.clear();
         self.path_input_pending = true;
         self.generation += 1;
         self.entries = None;
@@ -499,6 +543,8 @@ impl FilesState {
 
     /// 后台读一个目录,读完按 [`LoadTarget`] 回填。
     fn spawn_load(&mut self, fs: SshFs, dir: String, target: LoadTarget, cx: &mut Context<Self>) {
+        self.completion.dismiss();
+        self.completion.cache.clear();
         if self.loading.contains(&dir) {
             return;
         }
@@ -532,17 +578,6 @@ impl FilesState {
                         };
                         match &target {
                             LoadTarget::Root => this.entries = Some(entries),
-                            LoadTarget::Navigate(root) => {
-                                this.root = Some(root.clone());
-                                this.path_input_pending = true;
-                                this.expanded.clear();
-                                this.entries = Some(entries);
-                                // 路径框要窗口才能刷新：让根视图下一帧再跑一次同步。
-                                let app_root = this.app_root.clone();
-                                if let Some(root) = app_root.upgrade() {
-                                    let _ = root.update(cx, |root, cx| root.schedule_context_sync(cx));
-                                }
-                            }
                             LoadTarget::Dir(path) => {
                                 if let Some(entries_root) = this.entries.as_mut()
                                     && let Some(node) = Self::node_mut(entries_root, path)
@@ -1011,26 +1046,6 @@ impl FilesState {
             selected: selected.map(|node| node.name.clone()),
             selected_is_dir: selected.is_some_and(|node| node.is_dir),
         }
-    }
-
-    /// 固定在列表上方的路径框，不参与虚拟列表滚动。
-    pub(super) fn render_path_input(&self) -> Option<AnyElement> {
-        self.fs.as_ref()?;
-        Some(
-            h_flex()
-                .w_full()
-                .h(PATH_ROW_HEIGHT)
-                .flex_none()
-                .px_2()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(&self.path_input)
-                            .cleanable(false)
-                            .aria_label("远端目录路径"),
-                    ),
-                )
-                .into_any_element(),
-        )
     }
 
     /// 侧边栏虚拟列表的全部内容项。

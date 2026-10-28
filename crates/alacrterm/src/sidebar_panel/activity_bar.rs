@@ -98,7 +98,7 @@ pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElem
             SidebarView::Files => {
                 let files = sidebar.files.read(cx);
                 let ready = files.status().ready;
-                let path_input = files.render_path_input();
+                let path_input = files.render_path_input(sidebar.files.clone(), cx);
                 Some(
                     v_flex()
                         .w_full()
