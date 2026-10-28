@@ -17,7 +17,7 @@ struct Coordinator {
 }
 impl Global for Coordinator {}
 
-type Continuation = Box<dyn FnOnce(&mut App) -> anyhow::Result<()>>;
+type Continuation = Box<dyn FnOnce(&mut Window, &mut App) -> anyhow::Result<()>>;
 type Completion = Box<dyn FnOnce(bool, &mut App)>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,7 +120,7 @@ pub(crate) fn request_with_completion(
                 if let Some(completed) = completed.take() {
                     completed(true, cx);
                 }
-                if let Err(error) = action(cx) {
+                if let Err(error) = action(window, cx) {
                     window
                         .push_notification(Notification::error(format!("操作失败：{error:#}")), cx);
                 }
@@ -174,18 +174,15 @@ impl AppRoot {
                 return;
             };
             if active == 0 && !Self::preview_has_pending_changes(preview, cx) {
-                let handle = window.window_handle();
                 request(
                     root,
                     window,
                     cx,
                     "关闭窗口",
-                    Box::new(move |cx| {
-                        handle.update(cx, |_, window, _| {
-                            #[cfg(target_os = "macos")]
-                            native::permit();
-                            window.remove_window();
-                        })?;
+                    Box::new(|window, _| {
+                        #[cfg(target_os = "macos")]
+                        native::permit();
+                        window.remove_window();
                         Ok(())
                     }),
                 );
@@ -207,18 +204,15 @@ impl AppRoot {
             return false;
         }
         if close_after_transfers(active, true) {
-            let handle = window.window_handle();
             request(
                 root.clone(),
                 window,
                 cx,
                 "关闭窗口",
-                Box::new(move |cx| {
-                    handle.update(cx, |_, window, _| {
-                        #[cfg(target_os = "macos")]
-                        native::permit();
-                        window.remove_window();
-                    })?;
+                Box::new(|window, _| {
+                    #[cfg(target_os = "macos")]
+                    native::permit();
+                    window.remove_window();
                     Ok(())
                 }),
             );
@@ -409,7 +403,7 @@ pub(crate) fn attach_native(root: WeakEntity<AppRoot>, window: &mut Window, cx: 
                                 window,
                                 cx,
                                 "退出 Alacrterm",
-                                Box::new(|_| {
+                                Box::new(|_, _| {
                                     platform::shutdown_wayx();
                                     native::allow();
                                     Ok(())

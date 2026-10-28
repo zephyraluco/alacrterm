@@ -599,7 +599,7 @@ pub(crate) fn attach_sparkle_guard(
                             window,
                             cx,
                             "重启并更新",
-                            Box::new(move |cx| {
+                            Box::new(move |_, cx| {
                                 platform::shutdown_wayx();
                                 crate::exit_coordinator::allow_sparkle_restart(&approved_root, cx);
                                 Ok(())
