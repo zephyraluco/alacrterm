@@ -45,7 +45,7 @@ use gpui_kit::{
 };
 use sidebar_panel::files::FilesState;
 use sidebar_panel::sessions::SessionsState;
-use sidebar_panel::Sidebar;
+use sidebar_panel::{Sidebar, SidebarView};
 use tab_bar::{TerminalDockSkin, TerminalTabBar};
 use terminal_panel::TabPane;
 use transfer_manager::{TransferDone, TransferManager};
@@ -174,6 +174,8 @@ struct AppRoot {
     /// 侧边栏。
     sidebar: Entity<Sidebar>,
     _sidebar_sub: Subscription,
+    right_sidebar: Entity<Sidebar>,
+    _right_sidebar_sub: Subscription,
     /// 「会话」视图状态。
     sessions: Entity<SessionsState>,
     /// 「文件管理器」视图状态。
@@ -376,7 +378,9 @@ impl AppRoot {
             ));
         });
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
-        let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), cx));
+        let sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Sessions, cx));
+        let right_sidebar = cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Files, cx));
+        let right_sidebar_sub = cx.observe(&right_sidebar, |_, _, cx| cx.notify());
         let sidebar_sub = cx.observe(&sidebar, |_, _, cx| cx.notify());
 
         platform::start_wayx();
@@ -394,6 +398,8 @@ impl AppRoot {
             active: 0,
             sidebar,
             _sidebar_sub: sidebar_sub,
+            right_sidebar,
+            _right_sidebar_sub: right_sidebar_sub,
             sessions,
             files,
             _transfers: transfers,
@@ -562,7 +568,7 @@ impl AppRoot {
             // 远端终端在哪儿，文件管理器就在哪儿（用户手动跳走、shell 没动时不动）。
             files.follow_terminal(snapshot.directory.as_deref(), cx);
         });
-        self.sidebar
+        self.right_sidebar
             .update(cx, |sidebar, cx| sidebar.set_files_enabled(snapshot.remote, cx));
     }
 }
@@ -604,6 +610,8 @@ impl Render for AppRoot {
         // 侧边栏宽度每帧钉回用户拖拽值。
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
+        self.right_sidebar
+            .update(cx, |sidebar, cx| sidebar.pin_width(window, cx));
 
         // 中间列：终端区或欢迎页。
         let has_tabs = !self.tabs.is_empty();
@@ -627,7 +635,7 @@ impl Render for AppRoot {
             .into_any_element();
 
         // 分栏组：最左整列 | 中间列。
-        let visible = self.sidebar.read(cx).visible();
+        let visible = self.sidebar.read(cx).panel_visible(cx);
         let width = self.sidebar.read(cx).width();
         let resize = self.sidebar.read(cx).resize_state().clone();
         let sidebar_state = self.sidebar.downgrade();
@@ -656,9 +664,33 @@ impl Render for AppRoot {
             mid_column
         };
 
-        let status_bar = self
-            .sidebar
-            .update(cx, |sidebar, cx| sidebar.render_status_bar(cx));
+        let right = self.right_sidebar.read(cx);
+        let right_visible = right.panel_visible(cx);
+        let right_width = right.width();
+        let right_resize = right.resize_state().clone();
+        let right_state = self.right_sidebar.downgrade();
+        let body = if right_visible {
+            h_resizable("right-sidebar-split")
+                .with_state(&right_resize)
+                .on_resize(move |state, _, cx| {
+                    if let Some(width) = state.read(cx).sizes().get(1).copied() {
+                        let _ = right_state.update(cx, |sidebar, cx| sidebar.set_panel_width(width, cx));
+                    }
+                })
+                .child(resizable_panel().child(body))
+                .child(
+                    resizable_panel().size(right_width)
+                        .size_range(px(0.)..Pixels::MAX).flex_none()
+                        .child(self.right_sidebar.clone()),
+                )
+                .into_any_element()
+        } else {
+            body
+        };
+
+        let status_bar = self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.render_status_bar(&self.right_sidebar, cx)
+        });
 
         v_flex()
             .id("app-root")

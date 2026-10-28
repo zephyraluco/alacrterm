@@ -1,4 +1,4 @@
-//! 左侧可折叠面板，共享会话和文件视图的状态。
+//! 左右独立的可折叠面板，分别显示会话和文件视图。
 //! 视图切换入口位于全局底部状态栏。
 
 use gpui::{
@@ -30,10 +30,8 @@ pub(super) const PANEL_HEADER_HEIGHT: Pixels = px(28.);
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: Pixels = px(220.);
 /// 窄到该宽度即折叠。
 const SIDEBAR_COLLAPSE_WIDTH: Pixels = px(24.);
-/// 侧边栏在分栏组里的下标。
-const SIDEBAR_PANEL_INDEX: usize = 0;
 
-/// 拖到窗口左沿（≤ [`SIDEBAR_COLLAPSE_WIDTH`]）时折叠面板。
+/// 拖到所属窗口边缘（≤ [`SIDEBAR_COLLAPSE_WIDTH`]）时折叠面板。
 fn sidebar_width_after_drag(width: Pixels) -> Option<Pixels> {
     (width > SIDEBAR_COLLAPSE_WIDTH).then_some(width)
 }
@@ -111,7 +109,7 @@ impl SidebarView {
     }
 }
 
-/// 最左侧整列（全应用唯一一条）。
+/// 独立的侧栏面板；会话位于左侧，文件管理器位于右侧。
 pub(crate) struct Sidebar {
     /// 当前显示的视图。
     active: SidebarView,
@@ -138,10 +136,11 @@ impl Sidebar {
     pub(crate) fn new(
         sessions: Entity<SessionsState>,
         files: Entity<FilesState>,
+        active: SidebarView,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            active: SidebarView::Sessions,
+            active,
             files_enabled: false,
             visible: false,
             width: SIDEBAR_DEFAULT_WIDTH,
@@ -154,8 +153,12 @@ impl Sidebar {
         }
     }
 
-    pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        activity_bar::status_bar(self, cx)
+    pub(crate) fn render_status_bar(&self, right: &Entity<Sidebar>, cx: &mut Context<Self>) -> AnyElement {
+        activity_bar::status_bar(self, right, cx)
+    }
+
+    pub(crate) fn panel_visible(&self, cx: &App) -> bool {
+        self.visible && self.active_view(cx).is_some()
     }
 
     pub(crate) fn visible(&self) -> bool {
@@ -190,7 +193,7 @@ impl Sidebar {
         self.width
     }
 
-    /// 记下拖拽后的面板宽度；拖到左沿则收起。
+    /// 记下拖拽后的面板宽度；拖到所属窗口边缘则收起。
     pub(crate) fn set_panel_width(&mut self, panel_width: Pixels, cx: &mut Context<Self>) {
         let Some(width) = sidebar_width_after_drag(panel_width) else {
             self.set_visible(false, cx);
@@ -211,14 +214,14 @@ impl Sidebar {
 
     /// 容器宽度变过就把整列钉回期望宽度。
     pub(crate) fn pin_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.visible {
+        if !self.panel_visible(cx) {
             return;
         }
         let width = self.width;
         let container = self.resize.read(cx).container_size();
         if self.split_width != Some(container) {
             self.split_width = Some(container);
-            let index = SIDEBAR_PANEL_INDEX;
+            let index = if self.active == SidebarView::Files { 1 } else { 0 };
             self.resize.update(cx, |state, cx| {
                 state.resize_panel(index, width, window, cx);
             });
@@ -233,13 +236,7 @@ impl Sidebar {
 
     /// 当前该摆出来的视图；都不可用则 `None`。
     fn active_view(&self, cx: &App) -> Option<SidebarView> {
-        let files_available = self.files_view_available(cx);
-        if self.active.visible_with(files_available) {
-            return Some(self.active);
-        }
-        SidebarView::ALL
-            .into_iter()
-            .find(|view| view.visible_with(files_available))
+        self.active.visible_with(self.files_view_available(cx)).then_some(self.active)
     }
 
     /// 图标栏点选：显示该视图；再点当前那枚 = 折叠。
@@ -278,8 +275,11 @@ impl AppRoot {
 
     /// 打开侧边栏的某个视图（`Ctrl+Shift+E` / `Ctrl+Shift+G`）。
     pub(crate) fn open_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.open_view(view, cx));
+        let sidebar = match view {
+            SidebarView::Sessions => &self.sidebar,
+            SidebarView::Files => &self.right_sidebar,
+        };
+        sidebar.update(cx, |sidebar, cx| sidebar.open_view(view, cx));
     }
 }
 

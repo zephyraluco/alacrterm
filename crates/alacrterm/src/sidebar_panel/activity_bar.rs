@@ -23,9 +23,8 @@ use crate::dialog::name::open_name_dialog;
 use crate::status_bar::STATUS_BAR_HEIGHT;
 
 /// 全窗口底栏：紧凑的视图切换按钮，侧边栏折叠时仍可操作。
-pub(super) fn status_bar(sidebar: &Sidebar, cx: &mut Context<Sidebar>) -> AnyElement {
-    let active = if sidebar.visible() { sidebar.active_view(cx) } else { None };
-    let files_enabled = sidebar.files_view_available(cx);
+pub(super) fn status_bar(sidebar: &Sidebar, right: &Entity<Sidebar>, cx: &mut Context<Sidebar>) -> AnyElement {
+    let files_enabled = right.read(cx).files_view_available(cx);
     SidebarView::ALL
         .into_iter()
         .filter(|view| view.visible_with(files_enabled))
@@ -36,7 +35,10 @@ pub(super) fn status_bar(sidebar: &Sidebar, cx: &mut Context<Sidebar>) -> AnyEle
                 .flex_none()
                 .py_0(),
             |bar, view| {
-                let state = cx.weak_entity();
+                let (state, selected) = match view {
+                    SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
+                    SidebarView::Files => (right.downgrade(), right.read(cx).panel_visible(cx)),
+                };
                 let button = Button::new(view.id())
                     .ghost()
                     .xsmall()
@@ -44,7 +46,7 @@ pub(super) fn status_bar(sidebar: &Sidebar, cx: &mut Context<Sidebar>) -> AnyEle
                     .tooltip(view.tooltip())
                     .tooltip_placement(Placement::Top)
                     .accessibility_label(view.tooltip())
-                    .selected(active == Some(view))
+                    .selected(selected)
                     .on_click(move |_, _, cx| {
                         let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
                     });
