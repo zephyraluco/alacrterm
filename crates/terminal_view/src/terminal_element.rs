@@ -1109,7 +1109,11 @@ impl TerminalElement {
             move |e: &MouseUpEvent, phase, _, cx| {
                 if phase == DispatchPhase::Capture && drag_button.get() == Some(e.button) {
                     drag_button.set(None);
-                    terminal.update(cx, |terminal, cx| terminal.mouse_up(e, cx));
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.mouse_up(e, cx);
+                        // Release queues clipboard/link work that sync drains during prepaint.
+                        cx.notify();
+                    });
                 }
             }
         });
