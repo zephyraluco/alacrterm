@@ -623,7 +623,7 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
                                             cx,
                                             "安装更新",
                                             Box::new(move |cx| prepared.install(cx)),
-                                            Box::new(move |cx| {
+                                            Box::new(move |_, cx| {
                                                 installing.update(cx, |update, cx| {
                                                     update.finish_preparing(None, cx)
                                                 })

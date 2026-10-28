@@ -7,14 +7,15 @@
 static bool installed;
 static bool requested;
 static bool permitted;
+static bool awaitingReply;
 static NSApplicationTerminateReply (*originalShouldTerminate)(id, SEL, NSApplication *);
 static NSApplicationTerminateReply shouldTerminate(id self, SEL selector, NSApplication *app) {
     if (permitted) {
         permitted = false;
         return originalShouldTerminate ? originalShouldTerminate(self, selector, app) : NSTerminateNow;
     }
-    requested = true;
-    return NSTerminateCancel;
+    if (!awaitingReply) { requested = true; awaitingReply = true; }
+    return NSTerminateLater;
 }
 bool alacrterm_exit_install(void) {
     NSCAssert([NSThread isMainThread], @"Exit coordination must run on the main thread");
@@ -36,8 +37,20 @@ bool alacrterm_exit_install(void) {
 bool alacrterm_exit_requested(void) { bool value = requested; requested = false; return value; }
 void alacrterm_exit_permit(void) { permitted = true; }
 void alacrterm_exit_allow(void) {
+    if (awaitingReply) {
+        awaitingReply = false;
+        [NSApp replyToApplicationShouldTerminate:YES];
+        return;
+    }
     permitted = true;
     [NSApp terminate:nil];
     // If a future GPUI delegate cancels termination, the permission must not leak.
     permitted = false;
+}
+
+void alacrterm_exit_cancel(void) {
+    if (awaitingReply) {
+        awaitingReply = false;
+        [NSApp replyToApplicationShouldTerminate:NO];
+    }
 }

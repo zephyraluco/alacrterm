@@ -18,6 +18,7 @@ struct Coordinator {
 impl Global for Coordinator {}
 
 type Continuation = Box<dyn FnOnce(&mut App) -> anyhow::Result<()>>;
+type Completion = Box<dyn FnOnce(bool, &mut App)>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Snapshot {
@@ -60,7 +61,7 @@ pub(crate) fn request(
     title: &'static str,
     action: Continuation,
 ) {
-    request_with_completion(root, window, cx, title, action, Box::new(|_| {}));
+    request_with_completion(root, window, cx, title, action, Box::new(|_, _| {}));
 }
 
 pub(crate) fn request_with_completion(
@@ -69,14 +70,14 @@ pub(crate) fn request_with_completion(
     cx: &mut App,
     title: &'static str,
     action: Continuation,
-    completed: Box<dyn FnOnce(&mut App)>,
+    completed: Completion,
 ) {
     let Some(before) = snapshot(&root, cx) else {
-        completed(cx);
+        completed(false, cx);
         return;
     };
     if before.blocked() {
-        completed(cx);
+        completed(false, cx);
         window.push_notification(
             Notification::warning("请先完成文件传输，并保存预览中的改动后重试"),
             cx,
@@ -87,7 +88,7 @@ pub(crate) fn request_with_completion(
         cx.set_global(Coordinator::default());
     }
     if cx.global::<Coordinator>().prompting {
-        completed(cx);
+        completed(false, cx);
         return;
     }
     cx.global_mut::<Coordinator>().prompting = true;
@@ -104,10 +105,7 @@ pub(crate) fn request_with_completion(
     window
         .spawn(cx, async move |cx| {
             let accepted = prompt.await.ok() == Some(0);
-            gpui::AsyncApp::update(cx, |cx| {
-                cx.global_mut::<Coordinator>().prompting = false;
-                completed(cx);
-            });
+            let mut completed = Some(completed);
             let result = cx.update(|window, cx| {
                 if !accepted {
                     return;
@@ -119,9 +117,18 @@ pub(crate) fn request_with_completion(
                     );
                     return;
                 }
+                if let Some(completed) = completed.take() {
+                    completed(true, cx);
+                }
                 if let Err(error) = action(cx) {
                     window
                         .push_notification(Notification::error(format!("操作失败：{error:#}")), cx);
+                }
+            });
+            gpui::AsyncApp::update(cx, |cx| {
+                cx.global_mut::<Coordinator>().prompting = false;
+                if let Some(completed) = completed {
+                    completed(false, cx);
                 }
             });
             if let Err(error) = result {
@@ -321,6 +328,7 @@ mod native {
         fn alacrterm_exit_requested() -> bool;
         fn alacrterm_exit_allow();
         fn alacrterm_exit_permit();
+        fn alacrterm_exit_cancel();
     }
     pub(super) fn install() -> bool {
         #[cfg(target_os = "macos")]
@@ -346,6 +354,12 @@ mod native {
         #[cfg(target_os = "macos")]
         unsafe {
             alacrterm_exit_allow();
+        }
+    }
+    pub(super) fn cancel() {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            alacrterm_exit_cancel();
         }
     }
     #[cfg(target_os = "macos")]
@@ -390,7 +404,7 @@ pub(crate) fn attach_native(root: WeakEntity<AppRoot>, window: &mut Window, cx: 
                         }) {
                             native::allow();
                         } else {
-                            request(
+                            request_with_completion(
                                 root.clone(),
                                 window,
                                 cx,
@@ -399,6 +413,11 @@ pub(crate) fn attach_native(root: WeakEntity<AppRoot>, window: &mut Window, cx: 
                                     platform::shutdown_wayx();
                                     native::allow();
                                     Ok(())
+                                }),
+                                Box::new(|accepted, _| {
+                                    if !accepted {
+                                        native::cancel();
+                                    }
                                 }),
                             );
                         }
