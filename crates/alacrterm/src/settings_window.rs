@@ -1,12 +1,16 @@
 //! 独立窗口形式的「设置」界面：两页（主题 / 终端），入口 [`AppRoot::open_settings_window`]。
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FontWeight, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
     WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Root, Sizable as _, ThemeMode, TitleBar, h_flex,
+    ActiveTheme as _, Disableable as _, Icon, Root, Sizable as _, ThemeMode, TitleBar,
+    button::Button,
+    h_flex,
     setting::{
         AnySettingField, NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
         Settings,
@@ -28,6 +32,7 @@ const MIN_WINDOW_SIZE: (f32, f32) = (560., 400.);
 struct SettingsWindow {
     app_root: WeakEntity<AppRoot>,
     _main_window_closed: Subscription,
+    _updates: Subscription,
 }
 
 impl SettingsWindow {
@@ -40,6 +45,7 @@ impl SettingsWindow {
         let main_window_id = main_window.window_id();
         Self {
             app_root,
+            _updates: cx.observe(&crate::updates::model(cx), |_, _, cx| cx.notify()),
             _main_window_closed: cx.on_window_closed(move |cx, closed| {
                 if closed == main_window_id {
                     cx.quit();
@@ -462,7 +468,10 @@ impl Render for SettingsWindow {
                 div().flex_1().min_h_0().child(
                     Settings::new("app-settings")
                         .page(self.theme_page(cx))
-                        .page(self.terminal_page(cx)),
+                        .page(self.terminal_page(cx))
+                        .page(SettingPage::new("更新").group(SettingGroup::new().item(
+                            SettingItem::new("在线更新", update_field(self.app_root.clone())),
+                        ))),
                 ),
             )
         // 覆盖层由 gpui-kit `Root` 渲染。
@@ -504,4 +513,51 @@ impl AppRoot {
             Err(err) => log::error!("failed to open settings window: {err:#}"),
         }
     }
+}
+
+fn update_field(root: WeakEntity<AppRoot>) -> SettingField<SharedString> {
+    SettingField::render(move |_, _, cx| update_controls(root.clone(), cx).into_any_element())
+}
+
+fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
+    use crate::updates::{self, Phase};
+    let entity = updates::model(cx);
+    let update = entity.read(cx);
+    let checking = entity.clone();
+    let downloading = entity.clone();
+    let cancelling = entity.clone();
+    let automatic = entity.clone();
+    let installing = entity.clone();
+    let is_download = matches!(update.phase, Phase::Available | Phase::Failed(_))
+        && update.release.is_some()
+        && !update.manual;
+    v_flex().gap_2().w_full()
+        .child(format!("当前版本：{}", env!("CARGO_PKG_VERSION")))
+        .child(update.status())
+        .when(!matches!(update.phase, Phase::Disabled) && !update.notice.is_empty(), |view| view.child(update.notice.clone()))
+        .child(Switch::new("update-automatic").checked(update.automatic).label("自动检查更新").on_click(move |enabled, _, cx| automatic.update(cx, |update, cx| update.set_automatic(*enabled, cx))))
+        .child(h_flex().gap_2()
+            .child(Button::new("check-update").label("检查更新").disabled(update.busy() || matches!(update.phase, Phase::Disabled | Phase::Ready)).on_click(move |_, _, cx| checking.update(cx, |update, cx| update.check(cx))))
+            .child(Button::new("update-release-page").label("发布页").on_click(|_, _, cx| cx.open_url(updater::DOWNLOAD_PAGE))))
+        .when(is_download, |view| view.child(Button::new("download-update").label("下载更新").on_click(move |_, _, cx| downloading.update(cx, |update, cx| update.download(cx)))))
+        .when(matches!(update.phase, Phase::Downloading(_)), |view| view.child(Button::new("cancel-update-download").label("取消下载").on_click(move |_, _, cx| cancelling.update(cx, |update, cx| update.cancel_download(cx)))))
+        .when(update.phase == Phase::Ready, |view| view.child(Button::new("install-update").label(if cfg!(windows) { "重启并更新" } else { "打开系统安装器" }).on_click(move |_, window, cx| {
+            let Ok((transfers, preview)) = root.read_with(cx, |root, cx| (root._transfers.read(cx).active_count(), root.preview_window)) else { return; };
+            let dirty = AppRoot::preview_has_pending_changes(preview, cx);
+            if transfers > 0 || dirty {
+                window.push_notification(gpui_kit::component::notification::Notification::warning("请先完成文件传输，并保存或关闭预览中的改动，再安装更新"), cx);
+                return;
+            }
+            let prompt = window.prompt(gpui::PromptLevel::Warning, "安装更新", Some("更新需要重新启动应用。所有终端连接与 X11 会话将中断，本地终端进程无法恢复。是否继续？"), &["继续", "取消"], cx);
+            let installing = installing.clone();
+            cx.spawn(async move |cx| {
+                if prompt.await.ok() != Some(0) { return; }
+                installing.update(cx, |update, cx| match update.install_package(cx) {
+                    Ok(true) => cx.quit(),
+                    Ok(false) => {},
+                    Err(error) => { update.notice = format!("安装更新失败：{error:#}"); cx.notify(); }
+                });
+            }).detach();
+        })))
+        .when_some(update.release.as_ref(), |view, release| view.child(div().text_sm().child(release.notes.clone())))
 }

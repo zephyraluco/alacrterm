@@ -208,6 +208,7 @@ dependencies = [
  "russh-sftp",
  "rust-embed",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "session",
@@ -218,6 +219,7 @@ dependencies = [
  "terminal_view",
  "tokio",
  "transfer",
+ "updater",
  "util",
 ]
 

@@ -1,5 +1,6 @@
 //! Signed release metadata and downloads, independent of application windows.
 pub mod download;
+pub mod linux;
 pub mod manifest;
 pub mod windows;
 

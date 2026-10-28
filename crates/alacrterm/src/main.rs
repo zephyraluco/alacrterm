@@ -29,6 +29,7 @@ mod status_bar;
 mod tab_bar;
 mod terminal_panel;
 mod transfer_manager;
+mod updates;
 mod wayx_control;
 mod welcome;
 mod x11;
@@ -146,6 +147,7 @@ fn main() {
             .detach();
             gpui_kit::init(cx);
             config::install(cx);
+            updates::install(cx);
             config::load_themes(cx);
             config::apply_saved_themes(cx);
             config::change_theme(ThemeMode::Dark, cx);
@@ -176,6 +178,7 @@ fn main() {
             .expect("failed to open window");
         });
     platform::shutdown_wayx();
+    updates::finish_handoff();
 }
 
 /// 应用根视图（只存共享状态）。
