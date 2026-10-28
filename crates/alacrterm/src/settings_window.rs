@@ -6,7 +6,6 @@ use gpui::{
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
     WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Root, Sizable as _, ThemeMode, TitleBar,
     button::Button,
@@ -58,7 +57,7 @@ impl SettingsWindow {
     fn theme_page(&self, cx: &App) -> SettingPage {
         SettingPage::new("主题")
             .icon(Icon::new(IconName::Moon))
-            .default_open(!matches!(crate::updates::model(cx).read(cx).phase, crate::updates::Phase::Available | crate::updates::Phase::Ready | crate::updates::Phase::Downloading(_)))
+            .default_open(!crate::updates::model(cx).read(cx).phase.has_update())
             .group(
                 SettingGroup::new()
                     .item(
@@ -471,12 +470,7 @@ impl Render for SettingsWindow {
                         .page(self.terminal_page(cx))
                         .page(
                             SettingPage::new("更新")
-                                .default_open(matches!(
-                                    crate::updates::model(cx).read(cx).phase,
-                                    crate::updates::Phase::Available
-                                        | crate::updates::Phase::Ready
-                                        | crate::updates::Phase::Downloading(_)
-                                ))
+                                .default_open(crate::updates::model(cx).read(cx).phase.has_update())
                                 .group(SettingGroup::new().item(SettingItem::new(
                                     "在线更新",
                                     update_field(self.app_root.clone()),
@@ -539,50 +533,132 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
     let automatic = entity.clone();
     let installing = entity.clone();
     let install_command = if cfg!(target_os = "linux") {
-        update
-            .package
-            .as_ref()
-            .map(|path| updater::linux::manual_command(path))
+        update.package().map(updater::linux::manual_command)
     } else {
         None
     };
-    let is_download = matches!(update.phase, Phase::Available | Phase::Failed(_))
-        && update.release.is_some()
-        && !update.manual;
-    v_flex().gap_2().w_full()
+    let is_download = matches!(
+        update.phase,
+        Phase::Available(updates::UpdateOffer::Signed(_))
+    );
+    v_flex()
+        .gap_2()
+        .w_full()
         .child(format!("当前版本：{}", env!("CARGO_PKG_VERSION")))
         .child(update.status())
-        .when(!matches!(update.phase, Phase::Disabled) && !update.notice.is_empty(), |view| view.child(update.notice.clone()))
-        .child(Switch::new("update-automatic").checked(update.automatic).label("自动检查更新").on_click(move |enabled, _, cx| automatic.update(cx, |update, cx| update.set_automatic(*enabled, cx))))
-        .child(h_flex().gap_2()
-            .child(Button::new("check-update").label("检查更新").disabled(update.busy() || matches!(update.phase, Phase::Disabled | Phase::Ready)).on_click(move |_, _, cx| checking.update(cx, |update, cx| update.check(cx))))
-            .child(Button::new("update-release-page").label("发布页").on_click(|_, _, cx| cx.open_url(updater::DOWNLOAD_PAGE))))
-        .when(is_download, |view| view.child(Button::new("download-update").label("下载更新").on_click(move |_, _, cx| downloading.update(cx, |update, cx| update.download(cx)))))
-        .when(matches!(update.phase, Phase::Downloading(_)), |view| view.child(Button::new("cancel-update-download").label("取消下载").on_click(move |_, _, cx| cancelling.update(cx, |update, cx| update.cancel_download(cx)))))
-        .when(update.phase == Phase::Ready, |view| view.child(Button::new("install-update").label(if cfg!(windows) { "重启并更新" } else { "打开系统安装器" }).on_click(move |_, window, cx| {
-            let Ok((transfers, preview)) = root.read_with(cx, |root, cx| (root._transfers.read(cx).active_count(), root.preview_window)) else { return; };
-            let dirty = AppRoot::preview_has_pending_changes(preview, cx);
-            if transfers > 0 || dirty {
-                window.push_notification(gpui_kit::component::notification::Notification::warning("请先完成文件传输，并保存或关闭预览中的改动，再安装更新"), cx);
-                return;
-            }
-            let prompt = window.prompt(gpui::PromptLevel::Warning, "安装更新", Some("更新需要重新启动应用。所有终端连接与 X11 会话将中断，本地终端进程无法恢复。是否继续？"), &["继续", "取消"], cx);
-            let installing = installing.clone();
-            let root = root.clone();
-            cx.spawn(async move |cx| {
-                if prompt.await.ok() != Some(0) { return; }
-                let allowed = root.update(cx, |root, cx| root._transfers.read(cx).active_count() == 0 && !AppRoot::preview_has_pending_changes(root.preview_window, cx)).unwrap_or(false);
-                if !allowed {
-                    installing.update(cx, |update, cx| { update.notice = "任务状态已改变，请完成传输并保存改动后重试".into(); cx.notify(); });
-                    return;
-                }
-                installing.update(cx, |update, cx| match update.install_package(cx) {
-                    Ok(true) => cx.quit(),
-                    Ok(false) => {},
-                    Err(error) => { update.notice = format!("安装更新失败：{error:#}"); cx.notify(); }
-                });
-            }).detach();
-        })))
-        .when_some(install_command, |view, command| view.child(Button::new("copy-update-install-command").label("复制安装命令").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone())))))
-        .when_some(update.release.as_ref(), |view, release| view.child(div().text_sm().child(release.notes.clone())))
+        .when(
+            !matches!(update.phase, Phase::Disabled) && !update.notice.is_empty(),
+            |view| view.child(update.notice.clone()),
+        )
+        .child(
+            Switch::new("update-automatic")
+                .checked(update.automatic)
+                .label("自动检查更新")
+                .on_click(move |enabled, _, cx| {
+                    automatic.update(cx, |update, cx| update.set_automatic(*enabled, cx))
+                }),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("check-update")
+                        .label("检查更新")
+                        .disabled(
+                            update.busy()
+                                || matches!(update.phase, Phase::Disabled | Phase::Ready { .. }),
+                        )
+                        .on_click(move |_, _, cx| {
+                            checking.update(cx, |update, cx| update.check(cx))
+                        }),
+                )
+                .child(
+                    Button::new("update-release-page")
+                        .label("发布页")
+                        .on_click(|_, _, cx| cx.open_url(updater::DOWNLOAD_PAGE)),
+                ),
+        )
+        .when(is_download, |view| {
+            view.child(
+                Button::new("download-update")
+                    .label("下载更新")
+                    .on_click(move |_, _, cx| {
+                        downloading.update(cx, |update, cx| update.download(cx))
+                    }),
+            )
+        })
+        .when(matches!(update.phase, Phase::Downloading { .. }), |view| {
+            view.child(
+                Button::new("cancel-update-download")
+                    .label("取消下载")
+                    .on_click(move |_, _, cx| {
+                        cancelling.update(cx, |update, cx| update.cancel_download(cx))
+                    }),
+            )
+        })
+        .when(matches!(update.phase, Phase::Ready { .. }), |view| {
+            view.child(
+                Button::new("install-update")
+                    .label(if cfg!(windows) {
+                        "重启并更新"
+                    } else {
+                        "打开系统安装器"
+                    })
+                    .on_click(move |_, window, cx| {
+                        let task = installing.update(cx, |update, cx| update.prepare_install(cx));
+                        let Some(task) = task else {
+                            return;
+                        };
+                        let installing = installing.clone();
+                        let root = root.clone();
+                        window
+                            .spawn(cx, async move |cx| {
+                                let recovery = installing.clone();
+                                let prepared = task.await;
+                                if let Err(error) = cx.update(|window, cx| match prepared {
+                                    Ok(prepared) => {
+                                        crate::exit_coordinator::request_with_completion(
+                                            root,
+                                            window,
+                                            cx,
+                                            "安装更新",
+                                            Box::new(move |cx| prepared.install(cx)),
+                                            Box::new(move |cx| {
+                                                installing.update(cx, |update, cx| {
+                                                    update.finish_preparing(None, cx)
+                                                })
+                                            }),
+                                        )
+                                    }
+                                    Err(error) => installing.update(cx, |update, cx| {
+                                        update.finish_preparing(
+                                            Some(format!("安装准备失败：{error:#}")),
+                                            cx,
+                                        )
+                                    }),
+                                }) {
+                                    gpui::AsyncApp::update(cx, |cx| {
+                                        recovery.update(cx, |update, cx| {
+                                            update.finish_preparing(None, cx)
+                                        })
+                                    });
+                                    log::debug!("安装更新窗口已关闭：{error}");
+                                }
+                            })
+                            .detach();
+                    }),
+            )
+        })
+        .when_some(install_command, |view, command| {
+            view.child(
+                Button::new("copy-update-install-command")
+                    .label("复制安装命令")
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()))
+                    }),
+            )
+        })
+        .when_some(update.release(), |view, release| {
+            view.child(div().text_sm().child(release.notes.clone()))
+        })
 }

@@ -13,6 +13,39 @@ unsafe extern "C" {
     fn alacrterm_sparkle_allow_restart();
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Idle,
+    Checking,
+    Available,
+    Downloading,
+    WaitingRestart,
+    Failed,
+    Deferred,
+}
+impl State {
+    pub fn from_code(code: i32) -> Self {
+        match code {
+            1 => Self::Checking,
+            2 => Self::Available,
+            3 => Self::Downloading,
+            4 => Self::WaitingRestart,
+            5 => Self::Failed,
+            6 => Self::Deferred,
+            _ => Self::Idle,
+        }
+    }
+    pub fn busy(self) -> bool {
+        matches!(self, Self::Checking | Self::Downloading)
+    }
+    pub fn has_update(self) -> bool {
+        matches!(
+            self,
+            Self::Available | Self::Downloading | Self::WaitingRestart | Self::Deferred
+        )
+    }
+}
+
 pub fn start(automatic: bool) -> Result<()> {
     #[cfg(sparkle)]
     if unsafe { alacrterm_sparkle_start(automatic) } {
@@ -76,5 +109,23 @@ pub fn allow_restart() {
     #[cfg(sparkle)]
     unsafe {
         alacrterm_sparkle_allow_restart();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::State;
+    #[test]
+    fn native_states_distinguish_active_work_from_deferred_and_completed_cycles() {
+        assert!(State::from_code(1).busy());
+        assert!(State::from_code(3).busy());
+        assert!(State::from_code(3).has_update());
+        for code in [2, 4, 6] {
+            assert!(State::from_code(code).has_update());
+            assert!(!State::from_code(code).busy());
+        }
+        for code in [0, 5, 99] {
+            assert!(!State::from_code(code).has_update());
+        }
     }
 }

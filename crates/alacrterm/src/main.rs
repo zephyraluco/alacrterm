@@ -17,6 +17,7 @@ mod components;
 mod config;
 mod dialog;
 use util::format;
+mod exit_coordinator;
 mod keymap;
 mod pane_layout;
 mod preview_cache;
@@ -45,7 +46,6 @@ use gpui_kit::{
     component::{
         ActiveTheme as _, Root, ThemeMode, TitleBar, WindowExt as _,
         button::{Button, ButtonVariants as _},
-        dialog::DialogFooter,
         dock::{DockArea, DockEvent, TabGroup},
         h_flex,
         notification::Notification,
@@ -164,6 +164,8 @@ fn main() {
                 |window, cx| {
                     let root = cx.new(|cx| AppRoot::new(window, cx));
                     #[cfg(target_os = "macos")]
+                    exit_coordinator::attach_native(root.downgrade(), window, cx);
+                    #[cfg(target_os = "macos")]
                     updates::attach_sparkle_guard(root.downgrade(), window, cx);
                     root.update(cx, |root, cx| root.sync_active_context(window, cx));
                     let close_guard = root.downgrade();
@@ -180,7 +182,6 @@ fn main() {
             .expect("failed to open window");
         });
     platform::shutdown_wayx();
-    updates::finish_handoff();
 }
 
 /// 应用根视图（只存共享状态）。
@@ -248,121 +249,6 @@ struct ActiveContext {
 }
 
 impl AppRoot {
-    fn close_after_pending_transfers(
-        &mut self,
-        cancel: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if cancel {
-            self._transfers
-                .update(cx, |manager, cx| manager.cancel_all(cx));
-        }
-        if self._transfers.read(cx).active_count() == 0 {
-            self.finish_main_close(window, cx);
-        } else {
-            self.close_when_transfers_finish = true;
-        }
-    }
-
-    fn finish_main_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_when_transfers_finish = false;
-        if Self::preview_has_pending_changes(self.preview_window, cx) {
-            window.push_notification(
-                Notification::warning("预览文件仍在保存或有未保存的改动,请先在预览窗口处理"),
-                cx,
-            );
-            return;
-        }
-        let root = cx.weak_entity();
-        window.defer(cx, move |window, cx| {
-            let Ok((active, preview)) = root.read_with(cx, |root, cx| {
-                (root._transfers.read(cx).active_count(), root.preview_window)
-            }) else {
-                return;
-            };
-            if active == 0 && !Self::preview_has_pending_changes(preview, cx) {
-                window.remove_window();
-            }
-        });
-    }
-
-    fn should_close(root: &WeakEntity<Self>, window: &mut Window, cx: &mut App) -> bool {
-        let Ok((active, preview)) = root.read_with(cx, |root, cx| {
-            (root._transfers.read(cx).active_count(), root.preview_window)
-        }) else {
-            return true;
-        };
-        if Self::preview_has_pending_changes(preview, cx) {
-            window.push_notification(
-                Notification::warning("预览文件仍在保存或有未保存的改动,请先在预览窗口处理"),
-                cx,
-            );
-            return false;
-        }
-        if close_after_transfers(active, true) {
-            return true;
-        }
-        if !window.has_active_dialog(cx) {
-            let returning = root.clone();
-            let dismissed = root.clone();
-            let waiting = root.clone();
-            let cancelling = root.clone();
-            window.open_dialog(cx, move |dialog, _window, _cx| {
-                let returning = returning.clone();
-                let dismissed = dismissed.clone();
-                let waiting = waiting.clone();
-                let cancelling = cancelling.clone();
-                dialog
-                    .title("传输尚未完成")
-                    .w(px(420.))
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(format!("仍有 {active} 项传输在运行。")),
-                    )
-                    .footer(
-                        DialogFooter::new()
-                            .child(Button::new("transfer-exit-back").label("返回").on_click(
-                                move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    let _ = returning.update(cx, |root, _| {
-                                        root.close_when_transfers_finish = false
-                                    });
-                                },
-                            ))
-                            .child(
-                                Button::new("transfer-exit-cancel")
-                                    .label("取消传输并退出")
-                                    .on_click(move |_, window, cx| {
-                                        window.close_dialog(cx);
-                                        let _ = cancelling.update(cx, |root, cx| {
-                                            root.close_after_pending_transfers(true, window, cx);
-                                        });
-                                    }),
-                            )
-                            .child(
-                                Button::new("transfer-exit-wait")
-                                    .label("等待完成")
-                                    .primary()
-                                    .on_click(move |_, window, cx| {
-                                        window.close_dialog(cx);
-                                        let _ = waiting.update(cx, |root, cx| {
-                                            root.close_after_pending_transfers(false, window, cx);
-                                        });
-                                    }),
-                            ),
-                    )
-                    .on_cancel(move |_, _, cx| {
-                        let _ = dismissed
-                            .update(cx, |root, _| root.close_when_transfers_finish = false);
-                        true
-                    })
-            });
-        }
-        false
-    }
-
     /// 点击终端之外时把焦点从终端拿走。
     fn on_background_mouse_down(
         &mut self,
