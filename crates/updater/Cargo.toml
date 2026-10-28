@@ -11,7 +11,8 @@ serde_json.workspace = true
 semver = { version = "1", features = ["serde"] }
 sha2 = "0.10"
 minisign-verify = "0.2"
-reqwest = { version = "0.13", features = ["blocking"] }
+reqwest = "0.13"
+tokio = { version = "1", features = ["rt", "time", "macros"] }
 dirs.workspace = true
 util.workspace = true
 

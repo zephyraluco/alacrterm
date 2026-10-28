@@ -6184,9 +6184,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
- "futures-util",
  "h2",
  "http",
  "http-body",
@@ -8367,6 +8365,7 @@ dependencies = [
  "sha2 0.10.9",
  "sysinfo 0.39.6",
  "tempfile",
+ "tokio",
  "util",
 ]
 
