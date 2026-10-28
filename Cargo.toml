@@ -11,6 +11,7 @@ members = [
     "crates/session",
     "crates/transfer",
     "crates/updater",
+    "crates/update_helper",
 ]
 
 [workspace.package]

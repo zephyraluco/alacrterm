@@ -15,6 +15,9 @@ reqwest = { version = "0.13", features = ["blocking"] }
 dirs.workspace = true
 util.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+sysinfo.workspace = true
+
 [dev-dependencies]
 minisign = "0.7"
 tempfile = "3"

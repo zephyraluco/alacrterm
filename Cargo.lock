@@ -222,6 +222,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "alacrterm-update-helper"
+version = "0.1.0"
+dependencies = [
+ "updater",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8355,6 +8362,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sysinfo 0.39.6",
  "tempfile",
  "util",
 ]

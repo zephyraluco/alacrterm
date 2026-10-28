@@ -26,6 +26,10 @@ impl Feed {
     }
 
     pub fn check(&self, url: &str, keys: &[String]) -> Result<Manifest> {
+        self.check_signed(url, keys).map(|(manifest, _)| manifest)
+    }
+
+    pub fn check_signed(&self, url: &str, keys: &[String]) -> Result<(Manifest, Vec<u8>)> {
         let mut bytes = Vec::new();
         self.client
             .get(url)
@@ -34,7 +38,7 @@ impl Feed {
             .take(1024 * 1024 + 1)
             .read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 1024 * 1024, "更新清单过大");
-        manifest::open(&bytes, keys)
+        Ok((manifest::open(&bytes, keys)?, bytes))
     }
 
     pub fn download(

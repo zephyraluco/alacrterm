@@ -64,6 +64,7 @@ def main():
         (work / 'Applications').symlink_to('/Applications')
         run('hdiutil', 'create', '-volname', 'Alacrterm', '-srcfolder', work, '-ov', '-format', 'UDZO', dist / f'{name}.dmg')
     else:
+        shutil.copy2(ROOT / 'target/release/alacrterm-update-helper.exe', payload / 'alacrterm-update-helper.exe')
         for file in (ROOT / 'assets/windows/conpty').iterdir():
             if file.is_file():
                 shutil.copy2(file, payload / file.name)

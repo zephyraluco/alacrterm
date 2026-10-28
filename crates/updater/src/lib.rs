@@ -1,6 +1,7 @@
 //! Signed release metadata and downloads, independent of application windows.
 pub mod download;
 pub mod manifest;
+pub mod windows;
 
 use anyhow::{Context as _, Result};
 use std::path::PathBuf;
