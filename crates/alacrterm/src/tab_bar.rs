@@ -21,6 +21,7 @@ use gpui_kit::{
         ActiveTheme as _, IconNamed as _, Placement, Sizable as _, h_flex,
         button::{Button, ButtonVariants as _},
         menu::{DropdownMenu as _, PopupMenuItem},
+        TITLE_BAR_HEIGHT,
         dock::{
             BasePanelView, DockArea, DockAreaRenderer, DockContext, DockSkin, DragPanel,
             DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext, TabGroupRenderer,
@@ -31,7 +32,7 @@ use gpui_kit::{
 use crate::AppRoot;
 use crate::assets::IconName;
 
-const TAB_BAR_HEIGHT: Pixels = px(32.);
+const TAB_BAR_HEIGHT: Pixels = TITLE_BAR_HEIGHT;
 const TAB_WIDTH: Pixels = px(200.);
 const TAB_PADDING_X: Pixels = px(8.);
 const TAB_GAP: Pixels = px(6.);
@@ -277,6 +278,7 @@ impl TerminalTabBar {
         let bar = h_flex()
             .w_full()
             .h(TAB_BAR_HEIGHT)
+            .when(group.is_zoomed(), |bar| bar.h_full())
             .bg(bar_bg)
             // 焦点落在标签栏/工具按钮上时的 key context（默认 keymap 未使用，留给用户）。
             .key_context(crate::keymap::DOCK_CONTEXT)
@@ -287,16 +289,18 @@ impl TerminalTabBar {
                     .min_w_0()
                     .h_full()
                     .overflow_hidden()
-                    // 栏底线。
-                    .child(
-                        div()
-                            .absolute()
-                            .bottom_0()
-                            .left_0()
-                            .w_full()
-                            .h(px(1.))
-                            .bg(border),
-                    )
+                    // Zoom 的整行底线由根标题栏统一绘制。
+                    .when(!group.is_zoomed(), |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .w_full()
+                                .h(px(1.))
+                                .bg(border),
+                        )
+                    })
                     .child(
                         h_flex()
                             .size_full()

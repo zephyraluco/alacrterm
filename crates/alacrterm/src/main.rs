@@ -28,7 +28,7 @@ use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Styled as _,
     Subscription, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions, div,
-    px, size,
+    prelude::FluentBuilder as _, px, size,
 };
 use gpui_kit::{
     QuitMode,
@@ -581,7 +581,12 @@ impl Render for AppRoot {
                     .id("app-root-zoomed")
                     .size_full()
                     .bg(cx.theme().background)
-                    .child(TitleBar::new().child(tabs))
+                    .child(
+                        TitleBar::new()
+                            .bg(cx.theme().tab_bar)
+                            .when(!cfg!(target_os = "macos"), |bar| bar.pl_0())
+                            .child(tabs),
+                    )
                     .child(
                         div().flex_1().min_h_0().w_full().overflow_hidden()
                             .child(self.dock.clone()),
