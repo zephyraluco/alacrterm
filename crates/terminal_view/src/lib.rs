@@ -604,11 +604,22 @@ impl TerminalView {
         }
     }
     fn accept_suggestion(&mut self, cx: &mut gpui::Context<Self>) {
+        self.accept_suggestion_for_key(false, cx);
+    }
+
+    /// False leaves Enter to the normal terminal key encoding and submission path.
+    fn accept_suggestion_for_key(&mut self, enter: bool, cx: &mut gpui::Context<Self>) -> bool {
         let content = self
             .terminal
             .as_ref()
             .map(|terminal| terminal.read(cx).last_content());
-        match self.completion.accept(content) {
+        let acceptance = if enter {
+            self.completion.accept_enter(content)
+        } else {
+            self.completion.accept(content)
+        };
+        match acceptance {
+            completion_controller::Acceptance::Submit => return false,
             completion_controller::Acceptance::Refresh => self.schedule_suggestions(false, cx),
             completion_controller::Acceptance::Insert { bytes, retrigger } => {
                 if let Some(terminal) = &self.terminal {
@@ -621,6 +632,7 @@ impl TerminalView {
             completion_controller::Acceptance::None => {}
         }
         cx.notify();
+        true
     }
 
     fn on_key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut gpui::Context<Self>) {
@@ -679,9 +691,10 @@ impl TerminalView {
                 return;
             }
             completion_controller::PopupKey::Accept => {
-                self.accept_suggestion(cx);
-                cx.stop_propagation();
-                return;
+                if self.accept_suggestion_for_key(key == "enter", cx) {
+                    cx.stop_propagation();
+                    return;
+                }
             }
             completion_controller::PopupKey::Dismiss => {
                 self.completion.dismiss();
