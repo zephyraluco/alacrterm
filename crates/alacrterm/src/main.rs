@@ -46,7 +46,7 @@ use gpui_kit::{
 use sidebar_panel::files::FilesState;
 use sidebar_panel::sessions::SessionsState;
 use sidebar_panel::Sidebar;
-use tab_bar::TerminalDockSkin;
+use tab_bar::{TerminalDockSkin, TerminalTabBar};
 use terminal_panel::TabPane;
 use transfer_manager::{TransferDone, TransferManager};
 
@@ -185,6 +185,7 @@ struct AppRoot {
     /// 终端会话的 dock。
     dock: Entity<DockArea>,
     _dock_sub: Subscription,
+    zoom_tab_bar: TerminalTabBar,
     /// dock 布局变化订阅。
     dock_layout_sub: Option<Subscription>,
     /// 下一个新建会话的标签组（用一次即清空）。
@@ -401,6 +402,7 @@ impl AppRoot {
             close_when_transfers_finish: false,
             dock,
             _dock_sub: dock_sub,
+            zoom_tab_bar: TerminalTabBar::new(cx.weak_entity()),
             dock_layout_sub: None,
             pending_session_group: None,
             settings_window: None,
@@ -567,13 +569,25 @@ impl AppRoot {
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.dock.read(cx).is_zoomed() {
-            return div()
-                .id("app-root-zoomed")
-                .size_full()
-                .bg(cx.theme().background)
-                .child(self.dock.clone())
-                .into_any_element();
+        if let Some(node) = self.dock.read(cx).zoomed_group() {
+            let group = self.tabs.iter()
+                .filter_map(|tab| tab.read(cx).group())
+                .filter_map(|group| group.upgrade())
+                .find(|group| group.read(cx).node() == node);
+            if let Some(group) = group {
+                let context = group.read(cx).context(cx);
+                let tabs = self.zoom_tab_bar.render_title_bar(&context, window, cx);
+                return v_flex()
+                    .id("app-root-zoomed")
+                    .size_full()
+                    .bg(cx.theme().background)
+                    .child(TitleBar::new().child(tabs))
+                    .child(
+                        div().flex_1().min_h_0().w_full().overflow_hidden()
+                            .child(self.dock.clone()),
+                    )
+                    .into_any_element();
+            }
         }
 
         // 主体：侧边栏 | 中间列。

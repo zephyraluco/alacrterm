@@ -18,7 +18,7 @@ use gpui::{
 use gpui_kit::{
     base::ResizeHandleContext,
     component::{
-        ActiveTheme as _, IconNamed as _, Placement, Sizable as _, TitleBar, h_flex,
+        ActiveTheme as _, IconNamed as _, Placement, Sizable as _, h_flex,
         button::{Button, ButtonVariants as _},
         menu::{DropdownMenu as _, PopupMenuItem},
         dock::{
@@ -155,7 +155,7 @@ impl TabBarState {
     }
 }
 
-struct TerminalTabBar {
+pub(crate) struct TerminalTabBar {
     state: Rc<TabBarState>,
 }
 
@@ -176,6 +176,61 @@ impl TabGroupRenderer for TerminalTabBar {
     }
 
     fn render_tab_bar(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        if group.is_zoomed() {
+            return div().into_any_element();
+        }
+        self.render_title_bar(group, window, cx)
+    }
+
+    /// 内容区：缓存 + 铺满。
+    fn render_active_panel(
+        &self,
+        panel: AnyView,
+        _: &TabGroupContext,
+        _: &mut Window,
+        _: &mut App,
+    ) -> AnyElement {
+        div()
+            .id("tab-content")
+            .overflow_y_scroll()
+            .overflow_x_hidden()
+            .flex_1()
+            .child(panel.cached(StyleRefinement::default().absolute().size_full()))
+            .into_any_element()
+    }
+
+    /// 拖拽落点预览块。
+    fn render_drop_indicator(
+        &self,
+        indicator: DropIndicator,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let to = indicator.to();
+        Some(
+            div()
+                .absolute()
+                .left(to.origin().x)
+                .top(to.origin().y)
+                .w(to.size().width)
+                .h(to.size().height)
+                .bg(cx.theme().tokens.drop_target)
+                .into_any_element(),
+        )
+    }
+}
+
+impl TerminalTabBar {
+    pub(crate) fn new(root: WeakEntity<AppRoot>) -> Self {
+        Self { state: Rc::new(TabBarState::new(root)) }
+    }
+
+    pub(crate) fn render_title_bar(
         &self,
         group: &TabGroupContext,
         window: &mut Window,
@@ -294,52 +349,10 @@ impl TabGroupRenderer for TerminalTabBar {
                         ),
                 )
             });
-        if group.is_zoomed() {
-            TitleBar::new().child(bar).into_any_element()
-        } else {
-            bar.into_any_element()
-        }
+        bar.into_any_element()
     }
 
-    /// 内容区：缓存 + 铺满。
-    fn render_active_panel(
-        &self,
-        panel: AnyView,
-        _: &TabGroupContext,
-        _: &mut Window,
-        _: &mut App,
-    ) -> AnyElement {
-        div()
-            .id("tab-content")
-            .overflow_y_scroll()
-            .overflow_x_hidden()
-            .flex_1()
-            .child(panel.cached(StyleRefinement::default().absolute().size_full()))
-            .into_any_element()
-    }
 
-    /// 拖拽落点预览块。
-    fn render_drop_indicator(
-        &self,
-        indicator: DropIndicator,
-        _: &mut Window,
-        cx: &mut App,
-    ) -> Option<AnyElement> {
-        let to = indicator.to();
-        Some(
-            div()
-                .absolute()
-                .left(to.origin().x)
-                .top(to.origin().y)
-                .w(to.size().width)
-                .h(to.size().height)
-                .bg(cx.theme().tokens.drop_target)
-                .into_any_element(),
-        )
-    }
-}
-
-impl TerminalTabBar {
     fn split_button(&self, group: &TabGroupContext, cx: &mut App) -> AnyElement {
         let Some(panel) = group.active_panel() else {
             return div().into_any_element();
