@@ -9,7 +9,11 @@ fn main() {
             updater::windows::run(std::path::Path::new(&path)).map_err(|error| format!("{error:#}"))
         });
     if let Err(error) = result {
-        if let Ok(folder) = updater::data_dir() {
+        if let Some(folder) = std::env::args_os().nth(1).and_then(|path| {
+            std::path::PathBuf::from(path)
+                .parent()
+                .map(std::path::Path::to_owned)
+        }) {
             if let Err(logging) = std::fs::create_dir_all(&folder)
                 .and_then(|()| std::fs::write(folder.join("helper-error.log"), &error))
             {

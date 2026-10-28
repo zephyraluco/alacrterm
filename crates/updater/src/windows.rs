@@ -76,14 +76,100 @@ pub fn prepare(envelope: Vec<u8>, package: PathBuf, current: Version) -> Result<
         executable,
         from: current,
     };
-    let release = request.verified_release(&crate::trusted_keys())?;
-    let folder = crate::cache_dir()?.join(format!("install-{}", release.version));
-    std::fs::create_dir_all(&folder)?;
+    request.verified_release(&crate::trusted_keys())?;
+    let folder = create_job(&crate::data_dir()?)?;
     let copied_helper = folder.join("alacrterm-update-helper.exe");
     std::fs::copy(helper, &copied_helper)?;
     let plan = folder.join("request.json");
     util::atomic_file::write(&plan, &serde_json::to_vec(&request)?)?;
     Ok(plan)
+}
+
+fn create_job(data: &Path) -> Result<PathBuf> {
+    let jobs = data.join("jobs");
+    std::fs::create_dir_all(&jobs)?;
+    Ok(tempfile::Builder::new()
+        .prefix("install-")
+        .tempdir_in(jobs)?
+        .keep())
+}
+
+#[cfg(any(windows, test))]
+fn installation_lock(data: &Path, executable: &Path) -> Result<std::fs::File> {
+    use sha2::{Digest as _, Sha256};
+    let identity = executable
+        .canonicalize()
+        .unwrap_or_else(|_| executable.to_owned());
+    let identity = identity
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let name = format!("install-{:x}.lock", Sha256::digest(identity.as_bytes()));
+    std::fs::create_dir_all(data)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(data.join(name))?;
+    file.try_lock().context("此安装目录已有更新助手正在运行")?;
+    Ok(file)
+}
+
+/// The application stays alive until the helper has verified its request and acquired the lock.
+#[cfg(windows)]
+pub struct Handoff {
+    child: std::process::Child,
+    plan: PathBuf,
+    committed: bool,
+}
+#[cfg(windows)]
+impl Handoff {
+    pub fn commit(mut self) -> Result<()> {
+        ensure!(
+            self.child.try_wait()?.is_none(),
+            "更新助手已退出，请重新准备安装"
+        );
+        util::atomic_file::write(&self.plan.with_file_name("commit"), b"install")?;
+        self.committed = true;
+        Ok(())
+    }
+}
+#[cfg(windows)]
+impl Drop for Handoff {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn prepare_handoff(envelope: Vec<u8>, package: PathBuf, current: Version) -> Result<Handoff> {
+    let plan = prepare(envelope, package, current)?;
+    let child = start(&plan)?;
+    let mut handoff = Handoff {
+        child,
+        plan,
+        committed: false,
+    };
+    let started = std::time::Instant::now();
+    loop {
+        if handoff.plan.with_file_name("ready").is_file() {
+            return Ok(handoff);
+        }
+        if let Some(status) = handoff.child.try_wait()? {
+            let error = std::fs::read_to_string(handoff.plan.with_file_name("helper-error.log"))
+                .unwrap_or_else(|_| format!("退出码 {status}"));
+            anyhow::bail!("更新助手启动失败：{error}");
+        }
+        ensure!(
+            started.elapsed() < std::time::Duration::from_secs(120),
+            "更新助手启动确认超时"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 #[cfg(windows)]
@@ -128,9 +214,19 @@ pub fn run(plan: &Path) -> Result<()> {
     let request: InstallRequest = serde_json::from_slice(&fs::read(plan)?)?;
     let release = request.verified_release(&crate::trusted_keys())?;
     let directory = request.executable.parent().context("缺少安装目录")?;
-    let log_folder = crate::data_dir()?;
-    fs::create_dir_all(&log_folder)?;
+    let log_folder = plan.parent().context("缺少更新任务目录")?;
+    let _lock = installation_lock(&crate::data_dir()?, &request.executable)?;
+    fs::create_dir_all(log_folder)?;
     let result_path = log_folder.join("result.json");
+    util::atomic_file::write(&log_folder.join("ready"), b"ready")?;
+    let ready = Instant::now();
+    while !log_folder.join("commit").is_file() {
+        ensure!(
+            ready.elapsed() < Duration::from_secs(180),
+            "应用未确认更新，交接已取消"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let mut system = System::new();
     let waiting = Instant::now();
     // Wait for every instance and owned WayX process, rather than only the requesting PID.
@@ -195,6 +291,43 @@ pub fn run(plan: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installation_lock_is_enforced_across_processes() {
+        const CHILD_DIRECTORY: &str = "ALACRTERM_TEST_INSTALL_LOCK";
+        if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
+            let directory = PathBuf::from(directory);
+            assert!(installation_lock(&directory, &directory.join("alacrterm.exe")).is_err());
+            return;
+        }
+        let folder = tempfile::tempdir().unwrap();
+        let _lock = installation_lock(folder.path(), &folder.path().join("alacrterm.exe")).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "windows::tests::installation_lock_is_enforced_across_processes",
+            ])
+            .env(CHILD_DIRECTORY, folder.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn jobs_are_unique_and_lock_excludes_other_helpers_until_released() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_ne!(
+            create_job(temp.path()).unwrap(),
+            create_job(temp.path()).unwrap()
+        );
+        let exe = temp.path().join("alacrterm.exe");
+        let first = installation_lock(temp.path(), &exe).unwrap();
+        assert!(installation_lock(temp.path(), &exe).is_err());
+        // A different installation can update independently.
+        assert!(installation_lock(temp.path(), &temp.path().join("other/alacrterm.exe")).is_ok());
+        drop(first);
+        assert!(installation_lock(temp.path(), &exe).is_ok());
+    }
+
     #[test]
     fn process_waiting_matches_case_and_extended_paths_without_matching_other_installs() {
         let executable = Path::new("C:/Users/Alice/Alacrterm/alacrterm.exe");
