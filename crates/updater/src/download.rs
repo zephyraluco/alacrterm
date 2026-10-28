@@ -19,6 +19,7 @@ impl Feed {
         Ok(Self {
             client: Client::builder()
                 .user_agent(concat!("Alacrterm/", env!("CARGO_PKG_VERSION")))
+                .https_only(true)
                 .connect_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_secs(30 * 60))
                 .build()?,
@@ -125,6 +126,7 @@ impl Feed {
             }
             file.sync_all()?;
         }
+        ensure!(!cancel.load(Ordering::Relaxed), "下载已取消");
         if let Err(error) = verify(&part, &release.asset) {
             // Incomplete files remain resumable; a full but corrupt package must be redownloaded.
             if have == release.asset.size {

@@ -5,22 +5,74 @@ on:
 permissions:
   contents: read
 jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Validate stable tag and update signing configuration
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          ALACRTERM_UPDATE_PUBLIC_KEYS: ${{ vars.ALACRTERM_UPDATE_PUBLIC_KEYS }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os
+          spec = importlib.util.spec_from_file_location('release', 'scripts/packaging/release.py')
+          release = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(release)
+          release.version_for_tag(os.environ['RELEASE_TAG'])
+          required = ['ALACRTERM_UPDATE_PUBLIC_KEYS', 'SPARKLE_PUBLIC_KEY', 'MINISIGN_SECRET_KEY', 'SPARKLE_PRIVATE_KEY', 'APPLE_CERTIFICATE_P12', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_SIGNING_IDENTITY', 'APPLE_API_KEY_P8', 'APPLE_API_KEY_ID', 'APPLE_API_ISSUER']
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              raise SystemExit('Missing release configuration: ' + ', '.join(missing))
+          PY
+  checks:
+    needs: validate
+    uses: ./.github/workflows/test.yml
   package:
+    needs: checks
     uses: ./.github/workflows/package.yml
+    with:
+      release: true
+    secrets: inherit
   release:
     needs: package
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8.0.2
         with:
           pattern: installer-*
           merge-multiple: true
           path: dist
-      - name: Publish GitHub Release
+      - name: Install metadata signing tool
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Generate release notes and signed update feeds
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          ALACRTERM_UPDATE_PUBLIC_KEYS: ${{ vars.ALACRTERM_UPDATE_PUBLIC_KEYS }}
+        run: |
+          gh api --method POST "repos/$GH_REPO/releases/generate-notes" -f "tag_name=$RELEASE_TAG" --jq .body > "$RUNNER_TEMP/release-notes.md"
+          python3 scripts/packaging/release.py --tag "$RELEASE_TAG" --repository "$GH_REPO" --notes "$RUNNER_TEMP/release-notes.md"
+      - name: Publish complete GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$RELEASE_TAG" --draft=false --latest

@@ -62,7 +62,7 @@ def main():
         frameworks = app / 'Contents/Frameworks'
         frameworks.mkdir()
         shutil.copytree(framework_dir / 'Sparkle.framework', frameworks / 'Sparkle.framework', symlinks=True)
-        info = {'CFBundleExecutable': binary, 'CFBundleIdentifier': 'com.alacrterm.app', 'CFBundleName': 'Alacrterm', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': version, 'CFBundleVersion': version, 'NSHighResolutionCapable': True, 'SUFeedURL': 'https://github.com/zephyraluco/alacrterm/releases/latest/download/appcast.xml', 'SUEnableAutomaticChecks': True, 'SUAutomaticallyUpdate': False}
+        info = {'CFBundleExecutable': binary, 'CFBundleIdentifier': 'com.alacrterm.app', 'CFBundleName': 'Alacrterm', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': version, 'CFBundleVersion': version, 'LSMinimumSystemVersion': '12.0', 'NSHighResolutionCapable': True, 'SUFeedURL': 'https://github.com/zephyraluco/alacrterm/releases/latest/download/appcast.xml', 'SUEnableAutomaticChecks': True, 'SUAutomaticallyUpdate': False}
         public_key = os.environ.get('SPARKLE_PUBLIC_KEY')
         if public_key:
             info['SUPublicEDKey'] = public_key
@@ -73,10 +73,18 @@ def main():
             run('codesign', '--force', '--deep', '--sign', '-', app)
         else:
             framework = frameworks / 'Sparkle.framework'
+            for executable in app.rglob('*'):
+                if executable.is_file() and not executable.is_symlink():
+                    description = subprocess.check_output(['file', '-b', str(executable)], text=True)
+                    if 'Mach-O' in description:
+                        signing = ['codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity]
+                        if framework in executable.parents:
+                            signing.append('--preserve-metadata=identifier,entitlements')
+                        run(*signing, executable)
             nested = [*framework.rglob('*.xpc'), *framework.rglob('*.app')]
             for bundle in sorted(nested, key=lambda path: len(path.parts), reverse=True):
                 if not bundle.is_symlink():
-                    run('codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity, bundle)
+                    run('codesign', '--force', '--options', 'runtime', '--timestamp', '--preserve-metadata=identifier,entitlements', '--sign', identity, bundle)
             # Autoupdate is a standalone helper executable in Sparkle's framework.
             autoupdate = framework / 'Versions/B/Autoupdate'
             if autoupdate.is_file():
