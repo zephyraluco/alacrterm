@@ -6,3 +6,5 @@ publish.workspace = true
 
 [dependencies]
 updater = { path = "../updater" }
+
+util = { workspace = true, features = ["logging"] }

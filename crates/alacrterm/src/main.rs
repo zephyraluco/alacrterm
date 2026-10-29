@@ -133,16 +133,28 @@ mod close_tests {
 }
 
 fn main() {
+    let logging = std::sync::Arc::new(std::sync::Mutex::new(Some(util::logging::init(
+        "alacrterm",
+    ))));
+    let quit_logging = logging.clone();
     #[cfg(windows)]
     platform::initialize();
 
     gpui_kit::application()
         .with_assets(assets::Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
-        .run(|cx: &mut App| {
-            cx.on_app_quit(|_| {
+        .run(move |cx: &mut App| {
+            cx.on_app_quit(move |_| {
                 platform::shutdown_wayx();
-                async {}
+                let guard = quit_logging
+                    .lock()
+                    .ok()
+                    .and_then(|mut logging| logging.take());
+                // AppKit may exit without returning from the event loop. Flush after
+                // GPUI releases its windows, while normal Rust main teardown remains a fallback.
+                async move {
+                    drop(guard);
+                }
             })
             .detach();
             gpui_kit::init(cx);

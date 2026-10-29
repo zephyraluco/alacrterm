@@ -1,6 +1,8 @@
 pub mod atomic_file;
 pub mod file_cache;
 pub mod format;
+#[cfg(feature = "logging")]
+pub mod logging;
 pub mod paths;
 pub mod rel_path;
 pub mod resource_registry;

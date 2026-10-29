@@ -1,7 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
-fn main() {
+fn main() -> std::process::ExitCode {
+    let _logging = util::logging::init("alacrterm-update-helper");
     let result = std::env::args_os()
         .nth(1)
         .ok_or_else(|| "缺少更新请求文件".to_owned())
@@ -20,8 +21,9 @@ fn main() {
                 eprintln!("{logging}: {error}");
             }
         }
-        std::process::exit(1);
+        return std::process::ExitCode::FAILURE;
     }
+    std::process::ExitCode::SUCCESS
 }
 
 #[cfg(not(windows))]
