@@ -1,96 +1,209 @@
-# Crate boundaries
+# Alacrterm 架构
 
-The application is being refactored in independently verified stages. Configuration
-formats, shell behavior and UI interactions remain compatible throughout.
+Alacrterm 是基于 Rust、GPUI 和 gpui-kit 的桌面终端，支持本地 Shell、SSH、SFTP 文件管理、X11 转发和在线升级。终端模拟使用 `alacritty_terminal`。本文描述当前代码的职责与运行方式；构建入口见 [CI 与打包](../scripts/packaging/README.md)。
 
-| Crate | Responsibility |
+## 模块与依赖
+
+工作区包含 11 个 crate。应用层负责组装能力与交互策略，下层不依赖应用入口。
+
+| Crate | 职责与主要入口 |
 | --- | --- |
-| alacrterm | Application entry, windows, layout, UI adapters and event handling |
-| settings | UI-independent configuration models, defaults and persistence |
-| platform | Platform initialization and bundled WayX service |
-| session | Saved session data and connection request policy |
-| transfer | Transfer state, progress and cancellation |
-| terminal_view | Terminal rendering, input and completion interaction |
-| terminal | Emulator, PTY and shell integration |
-| ssh | SSH, SFTP and authenticated X11 forwarding |
-| util | Reusable tools without application or UI dependencies |
+| `alacrterm` | `main.rs` 启动与 `AppRoot`；窗口、Dock 布局、侧边栏、对话框、配置适配、补全提供器、升级 UI |
+| `terminal_view` | `TerminalView` 的输入、焦点、IME、补全交互；`TerminalElement` 的网格布局与绘制 |
+| `terminal` | `Terminal` 实体、模拟器状态、本地 PTY/SSH 后端适配、协议事件、目录和命令状态 |
+| `ssh` | russh 连接、认证、主机密钥、远端 PTY、辅助命令连接、SFTP 和 X11 信道 |
+| `settings` | 无 UI 的配置模型、校验、路径选择、偏好持久化、按键与配色解析 |
+| `session` | 保存的会话与文件夹、稳定 ID、树编辑、序列化和连接请求数据 |
+| `transfer` | 传输任务标识、进度、取消与完成状态；实际网络传输由 `ssh` 执行 |
+| `platform` | Windows ConPTY 初始化；WayX 进程、就绪检测、退出及显示端点管理 |
+| `updater` | 更新元数据校验、下载、安装准备、平台安装接口及 Sparkle 桥接 |
+| `alacrterm-update-helper` | Windows 独立更新进程，在主程序退出后验证并启动安装程序 |
+| `util` | 原子写入、缓存、资源监视、日志基础设施、路径与 Shell 等通用工具 |
 
-Dependencies point towards lower-level capabilities; libraries must not depend on
-alacrterm. GPUI globals and conversion to rendering types belong to UI adapters.
-Session identifiers, terminal processes and SSH protocol state retain their
-existing owners rather than introducing competing lifecycle state machines.
+```mermaid
+flowchart TD
+    A[alacrterm：应用与 UI 策略] --> V[terminal_view]
+    A --> C[settings / session / transfer]
+    A --> P[platform]
+    A --> U[updater]
+    V --> T[terminal]
+    T --> S[ssh]
+    H[Windows update helper] --> U
+    A --> X[util]
+```
 
-## Validation baseline
+图中展示主要职责链，完整依赖以各 crate 的 `Cargo.toml` 为准。`terminal` 本身使用 GPUI 实体，不是完全脱离 UI 执行环境的模拟器库；`ssh` 不依赖 GPUI，跨执行器通过命令和事件通道通信。
 
-Before extraction, workspace cargo check passes and all 49 application tests pass.
-The terminal crate has previously documented hyperlink/path test failures; a full
-workspace test pass is not claimed. Native Windows/macOS checks require their
-platform toolchains and cannot be replaced by Linux checks.
+## 启动与应用生命周期
 
-Stages: settings, platform, session, transfer, utility/dependency cleanup. Each
-stage receives targeted tests and workspace compilation before its own commit.
+`crates/alacrterm/src/main.rs` 初始化日志，Windows 在创建首个 PTY 前初始化 ConPTY，然后启动 GPUI 应用。应用注册嵌入资源、主题、按键、配置与共享模型，创建主窗口和 `AppRoot`。
 
-## Implemented ownership
+`AppRoot` 持有工作区布局与跨组件状态，协调当前终端上下文、会话列表、文件管理器、传输面板、设置窗口和更新入口。组件通过实体句柄、事件和观察订阅协作；后台结果返回应用执行器后才修改 UI。
 
-- `settings` owns app/terminal file models, completion policy, configuration path
-  selection, preference persistence and tolerant keymap parsing. Palette loaders
-  validate resources for the generic registry; they do not perform GUI operations. It depends only
-  on serde/serde_json and general utilities. The existing `config/*.json` formats
-  and executable-directory → repository fallback are unchanged. Saving terminal
-  preferences preserves palette and unknown fields.
-- `session` owns saved records/folders, stable IDs, insert/edit/remove/move rules,
-  serialization and connection requests. The sidebar owns selection, expanded
-  rows and GPUI notifications. Live terminal/SSH state and reconnect remain in
-  the existing backend and view; session does not introduce another state machine.
-- `transfer` owns active transfer identities, progress and cancellation. Cancelled
-  workers remain visible until completion. The application's transfer adapter
-  receives worker events and forwards UI updates; SSH owns the actual SFTP worker.
-- `platform` owns ConPTY initialization, WayX processes, readiness, shutdown and
-  display generation endpoints. `ssh` owns forwarding cookies and X11 channel
-  authentication. Application controls call platform directly.
-- `util` owns a reusable file cache with shared leases, process locks and stale
-  cleanup, byte formatting, JSON comment stripping and existing path/shell tools.
-  Cache roots and GPUI global registration remain application policy. A cache root
-  must be dedicated to the caller, because startup removes stale instance folders.
+`exit_coordinator.rs` 统一处理退出和安装前的保护：检查已连接终端、进行中的传输与未保存预览，并在继续操作前重新核对状态。macOS 的原生退出路径也接入协调器。最终退出时停止 WayX，并释放日志写入守卫以刷新缓冲。
 
-`alacrterm` retains settings/theme rendering adapters, file/preview UI workflows,
-window state, focus, layout, dialogs and event dispatch. Rendering-specific types
-such as colors, pixels and font weights remain in terminal_view/GPUI adapters.
+## 布局、标签与焦点
 
-## Verification after extraction
+- `main.rs` 组装标题栏、左右面板、中央终端区及全局底部状态栏。`status_bar.rs` 承载面板切换和当前会话相关操作。
+- gpui-kit 的 `DockArea` / `TabGroup` 管理终端标签组与停靠分屏；`tab_bar.rs` 提供应用自己的标签栏外观、拖动、工具栏与焦点策略。
+- `terminal_panel.rs` 的 `TabPane` 管理标签内容和终端视图；`pane_layout.rs` 另有标签内部的二叉分屏树。Dock 标签组与标签内部格子是两个层级，不能用同一个索引或焦点状态代替。
+- 标签栏工具只在当前活动组显示。点击 `+` 打开 gpui-kit 菜单，可选择本地终端或保存的会话；菜单展开时保留该组的工具栏，避免菜单抢走焦点后入口消失。选择完成时才设置新终端的目标组。
+- 保存的会话菜单包含折叠文件夹中的记录，仅快照名称和 ID；点击后按稳定 ID 解析最新会话数据。
+- Zoom 放大一个终端标签组，隐藏外围工作区并将标签栏放到标题栏位置。保留组内标签左右重排，禁止通过拖动创建其他 Dock 组。它不改变终端进程，也不等同于操作系统全屏。
+- 标题栏拖动、标签拖动、终端内容框选有独立的命中和事件处理；只有从终端内部开始的拖动才触发终端框选。
 
-- Workspace all-target compilation and library Clippy performance checks pass.
-- Settings, session, transfer, util, terminal_view and application tests pass;
-  tests moved with the code, so application test counts decrease accordingly.
-- Configuration preservation, stable session editing and drag paths, transfer
-  cancellation and stale worker progress have focused coverage.
-- SSH protocol roundtrips and X11 authentication tests pass. Actual bundled WayX
-  restart/startup-cancellation and concurrent-session X11 tests also pass on Linux.
-- Xvfb GUI regression covers local terminals, saved SSH sessions, local/remote
-  project completion, middle-word insertion and password-input isolation.
+## 终端运行与渲染
 
-Windows/macOS native execution still requires validation on their respective hosts.
+### 数据流
 
-## Generic resource hot reload
+```text
+键盘 / IME / 粘贴 → TerminalView → Terminal → 本地 PTY 或 SSH
+本地 PTY / SSH 输出 → VT 解析与协议事件 → Terminal 状态与快照
+Terminal 通知 → TerminalView 重绘 → TerminalElement 布局、绘制
+```
 
-`util::resource_registry` provides a framework-independent resource store and
-`DirectoryWatch`. Resources are keyed by ID and shared with `Arc`; external JSON
-files override embedded defaults. A failed file load retains its last valid
-resource, deletion restores defaults, and duplicate file IDs reject the scan.
-`PartialEq` suppresses updates for semantically identical contents.
+`TerminalTarget` 区分本地与 SSH。`TerminalBackend` 统一写入、调整尺寸和关闭接口：本地由 Alacritty PTY 事件循环驱动；远端由 russh 连接提供字节流，不启动本地 `ssh` 子进程。`LaunchOptions` 注入 Shell 准备、SSH 会话准备、X11 目标和自定义 OSC 解码器，具体脚本由应用层持有。
 
-DirectoryWatch establishes the native notify watch before scanning, merges events
-with a 150ms debounce, and reads/parses on a worker thread. Its private bounded
-channel bridges results to the UI; it is not a public subscription system.
-Dropping the watch closes delivery, wakes the worker and releases its native watch.
+`ssh` 使用独立线程中的 Tokio 运行时。远端输出按块发送并受待消费字节额度约束，最后一个消费者释放数据后归还额度；断开关闭等待，避免输出积压阻塞退出。终端侧批量消费已就绪事件并合并通知，远端 VT 解析目前仍在 UI 执行路径上。协议响应、标题、剪贴板等解析器事件需要及时处理，不能只刷新网格。
 
-`alacrterm::resource_registry` is a thin GPUI Global adapter with `global`,
-`global_mut`, `register_defaults`, `get`, `entries` and `watch_dir`. Replacing a
-watch cancels the old task and closes the old watcher; generation checks discard
-obsolete deliveries. No new crate or GPUI dependency in util/settings is needed.
+终端状态与进程/连接生命周期归 `terminal` 和后端所有。视图持有订阅、输入状态和光标任务；重连替换网络任务并清理旧的定时状态。不得在 `session` 的保存记录中复制一套实时连接状态。
 
-The color registry uses the first existing external directory in application path
-order, plus the six embedded defaults. Settings candidates come from the registry,
-including new files. AppRoot observes the global and reapplies only the selected
-resource's changed colors across tabs and splits. Font/completion state and the
-saved choice are preserved; watcher events never save preferences.
+### 输入与绘制
+
+GPUI 先派发匹配上下文的 Action，再进入终端按键处理。`Terminal` 键上下文用于区分复制、滚动等应用操作和应编码后发送给 Shell 的输入；默认绑定来自 `assets/keymaps/default-*.json`。
+
+`TerminalElement` 使用终端快照绘制背景、文本、块字符、选择区、链接与光标，并提供 IME 定位。交互产生的内部事件在同步阶段处理，因此 `TerminalView` 同时观察终端通知，保证拖选和滚动及时重绘。
+
+输出或相关状态变化更新快照，纯光标闪烁复用已有内容；可见行缓存复用未变化的布局。网格按设备像素对齐，备用屏幕或最新内容占满底行时采用底部锚定，将不足一行的余量放到顶部，减少调整窗口大小时的抖动。同步更新协议有超时结束机制，防止远端未关闭更新区间导致画面长期停住。
+
+### 补全
+
+`terminal_view` 管理补全会话、选择、弹窗及输入替换，应用层 `completion/` 实现 `CompletionService`，提供命令、历史、参数、路径与项目候选。即时候选与后台查询分开，后台结果通过代次/上下文检查防止覆盖更新输入。远端目录查询通过 SFTP，避免向交互式命令行插入查询命令。初始补全与已输入命令完全匹配时，Enter 可直接交给终端执行。
+
+## Shell 集成与 SSH
+
+应用层 `shell_integration/` 使用 `include_str!` 将 `scripts/shell_integration/` 脚本编译进程序，安装包不需要额外的脚本目录。
+
+本地 Bash、Zsh、PowerShell 会话将脚本写入会话专属临时目录，通过 `--rcfile`、`ZDOTDIR` 或 `-File` 加载，保留原有启动配置。临时资源由 PTY 生命周期持有，结束后释放；自定义 Shell 参数会跳过本地注入。
+
+远端集成先尝试设置会话激活环境变量，再通过辅助 SSH 连接执行安装脚本。Bash/Zsh 脚本持久化到远端 `~/.local/share/alacrterm/shell/`，对应启动配置增加加载入口；版本与 Shell 类型清单用于判断是否更新。入口只在带激活标记的交互式会话加载，不把安装命令输入交互终端。环境变量被服务器拒绝或安装失败时继续普通登录。`ALACRTERM_SHELL_INTEGRATION=0` 禁用注入，远端还受设置开关控制。
+
+脚本通过 OSC 上报命令阶段、工作目录、Shell 类型和可用命令，`protocol.rs` 解码应用扩展，终端核心处理标准生命周期与目录线索。未启用集成时仍可利用远端已有的 OSC 输出和目录线索，但信息完整程度取决于 Shell。
+
+SSH 认证支持 agent、密钥与配置的密码。默认主机密钥策略对未知主机请求用户确认并保存到 `known_hosts`，已知主机密钥变化时拒绝连接。`SshFs` 按需建立 SFTP 连接，独立于交互终端的数据流。
+
+## 文件管理、预览与传输
+
+`sidebar_panel/sessions.rs` 负责会话树的 UI 选择和展开状态，`session` 负责数据编辑与保存。稳定 ID 用于跨对话框、移动和重命名定位记录，树路径用于当次结构操作。
+
+`sidebar_panel/files.rs` 负责当前文件系统、目录、选择及加载状态，本地使用文件系统接口，远端使用 `SshFs`。工具栏与路径输入框固定，文件列表单独滚动；文件夹单击选择、双击跳转。路径输入支持候选，跳转失败时保留输入、清空列表并提示错误。
+
+`preview_window.rs` 与 `preview_cache.rs` 管理文件预览、编辑和临时资源。远端预览通过缓存下载，保存后回传；未保存内容参与退出保护。`transfer_manager.rs` 将 SSH 传输事件适配到 `transfer` 状态模型与 UI。取消请求不立即删除任务，等待工作线程结束后再完成收尾。
+
+## 配置、资源与日志
+
+### 用户配置
+
+发布构建的配置只从系统用户目录读写，不回退到安装或源码目录：
+
+| 平台 | 配置目录 |
+| --- | --- |
+| Windows | `%APPDATA%\Alacrterm`，即 Roaming |
+| macOS | `~/Library/Application Support/Alacrterm` |
+| Linux | `$XDG_CONFIG_HOME/alacrterm`，默认 `~/.config/alacrterm` |
+
+主要文件为 `app.json`、`terminal.json`、`sessions.json`、可选 `keymap.json` 和独立的 `update.json`。Debug 构建使用仓库根目录下被 Git 忽略的 `config/`，不与发布配置互相回退。首次保存创建目录，不自动迁移旧配置。
+
+`SettingsStore` 按字段合并，保留未知字段；损坏 JSON 不直接覆盖。配置与会话使用同目录临时文件和原子替换，保存错误返回调用方；终端数值配置集中校验。安装包不携带用户配置。
+
+### 资源
+
+SVG 图标和默认按键通过 `rust-embed` 提供；Shell 脚本通过 `include_str!` 嵌入。`assets/app-icon.ico` 用于 Windows 可执行文件及安装器，并转换为 Linux PNG 和 macOS ICNS；Windows 安装目录无需另放 ICO。
+
+全局主题和终端配色位于 `themes/global`、`themes/terminal`。外部资源覆盖内置默认；`util::resource_registry` 管理资源与目录监听，应用的 `resource_registry.rs` 提供 GPUI 适配。无效修改保留最后有效资源，删除恢复默认；后台解析与去抖后回到 UI 应用结果，旧代次通知被丢弃。偏好和资源是两类数据，资源热更新不反向保存用户偏好。
+
+### 日志
+
+保留现有 `log::*` 调用，`tracing-log` 桥接到 tracing subscriber，`tracing-appender` 异步写文件。直接 `eprintln!` 仍只输出 stderr，不被桥接捕获。
+
+| 平台 | 日志目录 |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\Alacrterm\logs` |
+| macOS | `~/Library/Logs/Alacrterm` |
+| Linux | `$XDG_STATE_HOME/alacrterm/logs`，默认 `~/.local/state/alacrterm/logs` |
+
+按 UTC 日期滚动，保留当天及之前六天，无文件大小或总容量上限；启动和每小时清理匹配的日志文件。文件区分应用/helper、构建类型、PID 与启动标识。默认应用 INFO、依赖 WARN，`RUST_LOG` 可覆盖；现有 DEBUG 日志可能包含终端输入与远端命令。写入队列满时可能丢事件，目录不可用则回退 stderr；正常退出刷新，强制终止不保证尾部日志落盘。
+
+## 平台插件与 X11
+
+源码按平台分类，安装包只携带目标平台插件，并去掉平台目录层级：
+
+```text
+源码：plugins/windows/wayx-windows-x64/ → 安装：plugins/wayx-windows-x64/
+源码：plugins/windows/conpty/           → 安装：plugins/conpty/
+源码：plugins/linux/wayx-linux-x64/     → 安装：plugins/wayx-linux-x64/
+源码：plugins/macos/wayx-macos-arm64/    → 安装：plugins/wayx-macos-arm64/
+```
+
+这些路径相对于主可执行文件目录；macOS 位于应用包的 `Contents/MacOS` 下。运行时兼容安装布局与源码布局。WayX 可通过 `WAYX_RUNTIME_DIR` 指定运行目录。
+
+Windows 的 `conpty.dll` 与 `OpenConsole.exe` 配套放在 `plugins/conpty`，初始化时设置 DLL 查找路径；也兼容旧版主程序同级文件。找不到可用捆绑后端时退回系统 ConPTY。Inno Setup 升级会删除旧的根目录 ConPTY 文件和 `plugins/windows`。
+
+`platform::Wayx` 管理 X Server 进程、就绪、显示号与启动代次，防止取消启动后旧任务重新恢复运行。`alacrterm::x11` 将显示端点适配给 SSH，`ssh::x11` 负责转发请求、cookie 验证及信道转发。WayX 相关许可保留在 [wayx-LICENSE](wayx-LICENSE)。
+
+## 在线升级
+
+`alacrterm::updates` 为设置页和普通标题栏提供共享模型。`Phase` 将签名版本、下载进度或包路径直接放入对应状态；安装前校验与准备在后台执行。标题栏发现更新后显示入口，点击弹出当前版本/可用版本对话框，提供取消和立刻更新；Zoom 不显示该入口。
+
+Windows/Linux 发布构建在启用自动检查时启动后约 30 秒检查，之后每六小时检查；下载由用户触发。Debug 不在线检查。取消会中断网络等待或哈希校验，未完成下载可用于恢复。缺少可信公钥时不执行在线升级，提供手动下载入口。
+
+| 平台 | 更新链路 |
+| --- | --- |
+| Windows | minisign 签名 JSON → 校验版本、大小和 SHA-256 → 下载 Inno 安装器 → 独立 helper 准备并确认 → 应用获准退出 → helper 等待应用/WayX 结束 → 静默安装并重启 |
+| macOS | Sparkle 2.10.1 标准 UI 与安装器，Rust/Objective-C 桥接；EdDSA 校验更新 ZIP，Developer ID 签名与公证保护发布应用 |
+| Linux deb | 验证签名元数据及 deb，打开可用的系统安装工具；否则显示安全引用路径的 `sudo apt install` 命令，由系统处理提权与依赖，安装后手动重启 |
+
+Windows 每次安装使用唯一任务目录、按安装位置隔离的跨进程锁，以及 ready/commit 握手。主程序只在 helper 准备就绪且退出获准后提交安装；取消时清理未提交 helper。helper 再次独立验证，结果写入任务目录，应用下次启动读取。安装失败不承诺自动回滚。
+
+macOS 使用 Sparkle 原生流程，不使用 `sparklers`。推迟重启回调与原生退出路径接入退出协调器；跳过、取消、关闭和更新周期结束会清理临时状态。应用不会自行覆盖 macOS 应用包或 Linux 系统目录。
+
+### 发布配置与流水线
+
+`.github/workflows/` 仅编排命令和调用脚本；打包、签名与发布实现位于 `scripts/packaging/`，Python 回归测试位于 `scripts/test/`。
+
+- `test`：分支 push、PR，以及复用调用；先 fmt/Clippy，再 Linux、Windows、macOS 并行运行指定 crate 测试。
+- `package`：分支 push、PR，以及复用调用；生成 Linux x64 deb、Windows x64 Inno 安装器、macOS ARM64 DMG/更新 ZIP，产物保留七天。
+- `release`：tag 触发；校验稳定版本 tag 与应用版本相符及签名配置完整，依次调用检查、打包、生成签名更新源，先上传草稿 Release，再发布为 latest。
+
+GitHub Repository Variables：`ALACRTERM_UPDATE_PUBLIC_KEYS` 为一个或多个 minisign 公钥 Base64 行，`SPARKLE_PUBLIC_KEY` 为 Sparkle 公钥。两者分别服务 JSON 更新源和 Sparkle 更新包，不是同一套密钥。
+
+GitHub Repository Secrets：
+
+| 名称 | 内容 |
+| --- | --- |
+| `MINISIGN_SECRET_KEY` / `MINISIGN_PASSWORD` | 完整 minisign 私钥文件及密码；无密码密钥可留空密码 |
+| `SPARKLE_PRIVATE_KEY` | Sparkle 导出的私钥 Base64 文本 |
+| `APPLE_CERTIFICATE_P12` / `APPLE_CERTIFICATE_PASSWORD` | Base64 Developer ID Application 证书与私钥导出、导出密码 |
+| `APPLE_SIGNING_IDENTITY` | 完整 Developer ID Application 身份 |
+| `APPLE_API_KEY_P8` | Base64 公证 API 私钥 |
+| `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` | 公证 API key ID 与 issuer ID |
+
+私钥不入仓库。Apple 临时凭据在打包后清理；分支包使用临时签名，正式 macOS 发布要求 Developer ID 签名、公证及 Sparkle 签名。Windows 安装器目前未做 Authenticode 签名。轮换更新密钥需先发布同时信任新密钥的版本，再切换后续签名。
+
+更新入口固定为 GitHub Releases latest 下的 `update.json` / `appcast.xml`；包 URL 指向具体版本。保留 macOS bundle ID `com.alacrterm.app` 与 Windows `AppId=Alacrterm`，避免破坏后续升级。
+
+## 验证与维护边界
+
+常用本地检查与 CI 保持一致：
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util
+python -m unittest discover -s scripts/test -p 'test_*.py'
+bash scripts/test/test_sparkle_state.sh
+```
+
+修改能力模块时补充对应 crate 的定向验证，例如 `settings`、`session`、`ssh`、`transfer` 或 `platform`。需要宿主显示与实际 WayX 的测试可能默认忽略，不能把跳过视为已验证。上述命令也不代表整个 workspace 的所有测试已覆盖。
+
+Linux 检查不能替代 Windows ConPTY/Inno 或 macOS AppKit/Sparkle 原生验证。布局、焦点、拖动和菜单需要 GUI 回归；在线升级需要真实签名与前后两个版本的安装演练，覆盖取消、损坏包、多实例、路径含空格、未保存文件及用户配置保留。

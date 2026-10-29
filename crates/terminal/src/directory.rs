@@ -33,7 +33,7 @@
 //! PAM 会话 —— 换成 `exec` 后 MOTD(`Welcome to Ubuntu …` / 定制横幅)与 `Last login`
 //! 全部消失(真机对比验证过)。对远端 shell 动手脚会改变用户的登录环境,代价太大;
 //! 所以这里只读不发。想让远端发**精确**的 OSC 7 的用户,自己在 `~/.bashrc` 里加一行
-//! (`PROMPT_COMMAND`)即可,见 `docs/terminal-architecture.md` §5.4。
+//! (`PROMPT_COMMAND`)即可；应用的自动注入见 `docs/architecture.md`「Shell 集成与 SSH」。
 
 /// 一条「终端现在在哪个目录」的线索。
 #[derive(Debug, PartialEq, Eq)]

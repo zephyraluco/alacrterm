@@ -1262,7 +1262,7 @@ impl Element for TerminalElement {
                 // padding 加在网格**顶部**，否则顶端固定（同 zed 上游 prepaint，那边
                 // 整段包在 `TerminalMode::Standalone` 里）。锚定条件见下：ALT_SCREEN，
                 // 或停在最新内容且视口最后一行被占用 —— 后者不能省，否则短内容时余量
-                // 会随窗口高度上下移动。详见 `docs/terminal-view-rendering.md` §3.2.1。
+                // 会随窗口高度上下移动。见 `docs/architecture.md`「终端运行与渲染」。
                 {
                     let should_anchor_to_bottom = {
                         let content = self.terminal.read(cx).last_content();
