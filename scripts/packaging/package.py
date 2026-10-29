@@ -144,13 +144,12 @@ def main():
         (work / 'Applications').symlink_to('/Applications')
         run('hdiutil', 'create', '-volname', 'Alacrterm', '-srcfolder', work, '-ov', '-format', 'UDZO', dist / f'{name}.dmg')
     else:
-        shutil.copy2(ROOT / 'assets/app-icon.ico', payload / 'app-icon.ico')
         shutil.copy2(ROOT / 'target/release/alacrterm-update-helper.exe', payload / 'alacrterm-update-helper.exe')
         for file in (ROOT / 'assets/windows/conpty').iterdir():
             if file.is_file():
                 shutil.copy2(file, payload / file.name)
         compiler = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Inno Setup 6/ISCC.exe'
-        run(compiler, f'/DAppVersion={version}', f'/DSourceDir={payload}', f'/DOutputDir={dist}', f'/DOutputName={name}-setup', ROOT / 'scripts/packaging/windows.iss')
+        run(compiler, f'/DAppVersion={version}', f'/DSourceDir={payload}', f'/DAppIcon={ROOT / "assets/app-icon.ico"}', f'/DOutputDir={dist}', f'/DOutputName={name}-setup', ROOT / 'scripts/packaging/windows.iss')
     for file in dist.iterdir():
         if file.suffix in {'.deb', '.dmg', '.exe', '.zip'}:
             digest = hashlib.file_digest(file.open('rb'), 'sha256').hexdigest()

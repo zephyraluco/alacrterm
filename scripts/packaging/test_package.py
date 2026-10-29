@@ -53,7 +53,8 @@ class PackagingTests(unittest.TestCase):
                         self.assertEqual(len(list((payload / 'themes' / group).glob('*.json'))), count)
                     if system == 'Windows':
                         self.assertTrue((payload / 'alacrterm-update-helper.exe').is_file())
-                        self.assertEqual((payload / 'app-icon.ico').read_bytes(), (ROOT / 'assets/app-icon.ico').read_bytes())
+                        self.assertFalse((payload / 'app-icon.ico').exists())
+                        self.assertIn(f'/DAppIcon={root / "assets/app-icon.ico"}', commands.call_args.args)
                         self.assertEqual(str(commands.call_args.args[-1]), str(root / 'scripts/packaging/windows.iss'))
                     if system == 'Linux':
                         desktop = (root / 'target/package' / key / 'usr/share/applications/alacrterm.desktop').read_text()
