@@ -8,7 +8,7 @@ The package version comes from `crates/alacrterm/Cargo.toml`; update it before t
 
 The application icon comes from `assets/app-icon.ico`. Windows embeds it in the executable and uses it for the installer; Linux installs its original PNG frames in the hicolor icon theme; macOS packages those frames as `Contents/Resources/app-icon.icns`. Keep the 128px and 256px PNG frames when replacing the ICO.
 
-Branch/PR macOS packages use ad-hoc signing; tag releases require Developer ID signing, notarization and Sparkle upgrade signatures. Windows installers are not Authenticode signed. Release publishing waits for checks, tests and all three packages to succeed. See [online update setup](../../docs/architecture.md#在线升级) for required public keys, secrets and native acceptance checks.
+All macOS packages use ad-hoc signing without Developer ID signing or notarization; tag releases still require Sparkle upgrade signatures. macOS may block the first launch; after attempting to open the app, allow it in System Settings → Privacy & Security. Windows installers are not Authenticode signed. Release publishing waits for checks, tests and all three packages to succeed. See [online update setup](../../docs/architecture.md#在线升级) for required public keys, secrets and native acceptance checks.
 
 Release-build user configuration (`app.json`, `terminal.json`, `sessions.json`, optional `keymap.json`) is stored exclusively in the system user configuration directory:
 

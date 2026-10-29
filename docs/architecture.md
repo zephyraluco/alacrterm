@@ -160,7 +160,7 @@ Windows/Linux 发布构建在启用自动检查时启动后约 30 秒检查，�
 | 平台 | 更新链路 |
 | --- | --- |
 | Windows | minisign 签名 JSON → 校验版本、大小和 SHA-256 → 下载 Inno 安装器 → 独立 helper 准备并确认 → 应用获准退出 → helper 等待应用/WayX 结束 → 静默安装并重启 |
-| macOS | Sparkle 2.10.1 标准 UI 与安装器，Rust/Objective-C 桥接；EdDSA 校验更新 ZIP，Developer ID 签名与公证保护发布应用 |
+| macOS | Sparkle 2.10.1 标准 UI 与安装器，Rust/Objective-C 桥接；EdDSA 校验更新 ZIP，应用使用 ad-hoc 临时签名，不做 Developer ID 签名或公证 |
 | Linux deb | 验证签名元数据及 deb，打开可用的系统安装工具；否则显示安全引用路径的 `sudo apt install` 命令，由系统处理提权与依赖，安装后手动重启 |
 
 Windows 每次安装使用唯一任务目录、按安装位置隔离的跨进程锁，以及 ready/commit 握手。主程序只在 helper 准备就绪且退出获准后提交安装；取消时清理未提交 helper。helper 再次独立验证，结果写入任务目录，应用下次启动读取。安装失败不承诺自动回滚。
@@ -183,12 +183,8 @@ GitHub Repository Secrets：
 | --- | --- |
 | `MINISIGN_SECRET_KEY` / `MINISIGN_PASSWORD` | 完整 minisign 私钥文件及密码；无密码密钥可留空密码 |
 | `SPARKLE_PRIVATE_KEY` | Sparkle 导出的私钥 Base64 文本 |
-| `APPLE_CERTIFICATE_P12` / `APPLE_CERTIFICATE_PASSWORD` | Base64 Developer ID Application 证书与私钥导出、导出密码 |
-| `APPLE_SIGNING_IDENTITY` | 完整 Developer ID Application 身份 |
-| `APPLE_API_KEY_P8` | Base64 公证 API 私钥 |
-| `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` | 公证 API key ID 与 issuer ID |
 
-私钥不入仓库。Apple 临时凭据在打包后清理；分支包使用临时签名，正式 macOS 发布要求 Developer ID 签名、公证及 Sparkle 签名。Windows 安装器目前未做 Authenticode 签名。轮换更新密钥需先发布同时信任新密钥的版本，再切换后续签名。
+私钥不入仓库。所有 macOS 包均使用 ad-hoc 临时签名，不要求付费 Apple 开发者账号，也不做 Developer ID 签名或公证；正式发布仍要求 Sparkle 更新包签名。首次打开可能被 Gatekeeper 拦截，尝试打开后可在“系统设置 → 隐私与安全性”中允许打开。Windows 安装器目前未做 Authenticode 签名。轮换更新密钥需先发布同时信任新密钥的版本，再切换后续签名。
 
 更新入口固定为 GitHub Releases latest 下的 `update.json` / `appcast.xml`；包 URL 指向具体版本。保留 macOS bundle ID `com.alacrterm.app` 与 Windows `AppId=Alacrterm`，避免破坏后续升级。
 

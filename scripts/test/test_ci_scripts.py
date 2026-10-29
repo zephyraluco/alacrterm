@@ -14,17 +14,14 @@ class WorkflowScriptTests(unittest.TestCase):
         required = [
             'ALACRTERM_UPDATE_PUBLIC_KEYS', 'SPARKLE_PUBLIC_KEY',
             'MINISIGN_SECRET_KEY', 'SPARKLE_PRIVATE_KEY',
-            'APPLE_CERTIFICATE_P12', 'APPLE_CERTIFICATE_PASSWORD',
-            'APPLE_SIGNING_IDENTITY', 'APPLE_API_KEY_P8',
-            'APPLE_API_KEY_ID', 'APPLE_API_ISSUER',
         ]
         env = dict.fromkeys(required, 'fixture')
         env['RELEASE_TAG'] = 'v0.1.0'
         script = ROOT / 'scripts/packaging/validate_release.py'
         with patch.dict(os.environ, env, clear=True):
             runpy.run_path(str(script), run_name='__main__')
-            del os.environ['APPLE_API_KEY_P8']
-            with self.assertRaisesRegex(SystemExit, 'Missing release configuration: APPLE_API_KEY_P8'):
+            del os.environ['SPARKLE_PRIVATE_KEY']
+            with self.assertRaisesRegex(SystemExit, 'Missing release configuration: SPARKLE_PRIVATE_KEY'):
                 runpy.run_path(str(script), run_name='__main__')
 
     def test_apple_credentials_are_decoded_and_exported(self):

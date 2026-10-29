@@ -43,7 +43,7 @@ def appcast(dist, version, base, notes):
     filename = f'alacrterm-{version}-macos-arm64.app.zip'
     package = dist / filename
     signature = json.loads((dist / 'sparkle-signature.json').read_text(encoding='utf-8'))
-    # The signature is produced on macOS after signing and notarizing the final app bundle.
+    # The signature is produced on macOS from the final app bundle ZIP.
     if signature['length'] != package.stat().st_size or len(base64.b64decode(signature['signature'], validate=True)) != 64:
         raise ValueError('Sparkle signature metadata does not match the upgrade package')
     rss = ET.Element('rss', {'version': '2.0'})
