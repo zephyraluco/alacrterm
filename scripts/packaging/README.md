@@ -6,7 +6,7 @@
 
 The package version comes from `crates/alacrterm/Cargo.toml`; update it before tagging (recommended tag: `v<version>`). Build manually with `cargo build --release --locked -p alacrterm`, then `python scripts/packaging/package.py` on the matching OS/architecture. Python 3.11+ is required. Windows needs Inno Setup 6; macOS needs Xcode command-line tools; Linux needs dpkg-deb. Global themes and terminal palettes are installed beside the executable under `themes/global` and `themes/terminal`; bundled WayX runtime files and Windows ConPTY files are included.
 
-macOS packages are ad-hoc signed, not Developer ID signed or notarized. Windows installers are not Authenticode signed. Publishing does not imply platform trust certification. Release publishing waits for all three packages to succeed.
+Branch/PR macOS packages use ad-hoc signing; tag releases require Developer ID signing, notarization and Sparkle upgrade signatures. Windows installers are not Authenticode signed. Release publishing waits for checks, tests and all three packages to succeed. See [online update setup](../../docs/updates.md) for required public keys, secrets and native acceptance checks.
 
 Release-build user configuration (`app.json`, `terminal.json`, `sessions.json`, optional `keymap.json`) is stored exclusively in the system user configuration directory:
 

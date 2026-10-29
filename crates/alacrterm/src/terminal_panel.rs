@@ -521,6 +521,14 @@ impl TabPane {
         self.focused_view().read(cx).is_connected(cx)
     }
 
+    pub(crate) fn connected_views(&self, cx: &App) -> Vec<EntityId> {
+        self.panes
+            .iter()
+            .filter(|pane| pane.read(cx).is_connected(cx))
+            .map(Entity::entity_id)
+            .collect()
+    }
+
     /// 把渲染参数推给本页所有格子。
     pub(crate) fn set_render_settings(&mut self, settings: Arc<RenderSettings>, cx: &mut App) {
         let options =

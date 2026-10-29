@@ -10,6 +10,8 @@ members = [
     "crates/platform",
     "crates/session",
     "crates/transfer",
+    "crates/updater",
+    "crates/update_helper",
 ]
 
 [workspace.package]
