@@ -168,8 +168,9 @@ macOS 打包需要先准备 Sparkle 并设置上述框架路径。产物输出�
 - [Zed](https://github.com/zed-industries/zed)：终端视图实现与交互设计参考。
 - [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) 与 [gpui-kit](https://github.com/longbridge/gpui-kit)：窗口、渲染与界面组件。
 - [Alacritty](https://github.com/alacritty/alacritty)：终端模拟核心。
-- [russh](https://github.com/Eugeny/russh)：SSH 协议实现。
-- [WayX](https://github.com/zephyraluco/WayX)：X Server 集成，许可见 [wayx-LICENSE](docs/wayx-LICENSE)。
-- [Sparkle](https://github.com/sparkle-project/Sparkle)：macOS 在线升级。
 
-README 的组织方式参考 [Paseo](https://github.com/getpaseo/paseo)。
+## 许可证
+
+Alacrterm 以 [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) 发布。
+
+使用的 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) 与 [gpui-kit](https://github.com/longbridge/gpui-kit) 同为 Apache-2.0 许可。

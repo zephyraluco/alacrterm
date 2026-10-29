@@ -168,8 +168,9 @@ Run the relevant checks before submitting code. For changes to window interactio
 - [Zed](https://github.com/zed-industries/zed): Reference for terminal view implementation and interaction design.
 - [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) and [gpui-kit](https://github.com/longbridge/gpui-kit): Windowing, rendering, and UI components.
 - [Alacritty](https://github.com/alacritty/alacritty): Terminal emulation core.
-- [russh](https://github.com/Eugeny/russh): SSH implementation.
-- [WayX](https://github.com/zephyraluco/WayX): X Server integration; see [wayx-LICENSE](docs/wayx-LICENSE).
-- [Sparkle](https://github.com/sparkle-project/Sparkle): macOS updates.
 
-README organization inspired by [Paseo](https://github.com/getpaseo/paseo).
+## License
+
+Alacrterm is distributed under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
+[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) and [gpui-kit](https://github.com/longbridge/gpui-kit) are likewise licensed under Apache-2.0.
