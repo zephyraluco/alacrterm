@@ -6,6 +6,7 @@ unsafe extern "C" {
     fn alacrterm_sparkle_start(automatic: bool) -> bool;
     fn alacrterm_sparkle_check();
     fn alacrterm_sparkle_automatic(enabled: bool);
+    fn alacrterm_sparkle_version() -> *const std::ffi::c_char;
     fn alacrterm_sparkle_status() -> *const std::ffi::c_char;
     fn alacrterm_sparkle_state() -> i32;
     fn alacrterm_sparkle_changed() -> bool;
@@ -68,6 +69,19 @@ pub fn set_automatic(enabled: bool) {
     }
     #[cfg(not(sparkle))]
     let _ = enabled;
+}
+pub fn available_version() -> Option<String> {
+    #[cfg(sparkle)]
+    unsafe {
+        let text = alacrterm_sparkle_version();
+        if !text.is_null() {
+            let value = std::ffi::CStr::from_ptr(text).to_string_lossy();
+            if !value.is_empty() {
+                return Some(value.into_owned());
+            }
+        }
+    }
+    None
 }
 pub fn status() -> String {
     #[cfg(sparkle)]

@@ -1,6 +1,5 @@
 //! One update model shared by settings and every application window.
 use gpui::{App, AppContext as _, Context, Entity, Global, Task};
-#[cfg(not(target_os = "macos"))]
 use semver::Version;
 use std::{
     path::PathBuf,
@@ -40,6 +39,29 @@ pub(crate) enum Phase {
 }
 
 impl Phase {
+    pub(crate) fn available_version(&self) -> Option<String> {
+        match self {
+            Phase::Available(UpdateOffer::Signed(update))
+            | Phase::Downloading { update, .. }
+            | Phase::Ready { update, .. }
+            | Phase::Preparing { update, .. } => Some(update.release.version.to_string()),
+            Phase::Available(UpdateOffer::Manual(version)) => Some(version.to_string()),
+            #[cfg(any(target_os = "macos", test))]
+            Phase::Native(state) if state.has_update() => updater::macos::available_version(),
+            _ => None,
+        }
+    }
+
+    fn title_bar_label(&self) -> &'static str {
+        match self {
+            Self::Downloading { .. } => "下载中",
+            Self::Preparing { .. } => "准备中",
+            #[cfg(any(target_os = "macos", test))]
+            Self::Native(updater::macos::State::Downloading) => "下载中",
+            _ => "可升级",
+        }
+    }
+
     pub(crate) fn has_update(&self) -> bool {
         match self {
             Self::Available(_)
@@ -61,7 +83,7 @@ pub(crate) struct SignedRelease {
 #[derive(Clone, Debug)]
 pub(crate) enum UpdateOffer {
     Signed(SignedRelease),
-    Manual,
+    Manual(Version),
 }
 
 pub(crate) enum PreparedInstall {
@@ -420,7 +442,7 @@ impl Updates {
                     match result {
                         Ok((Offer::Current, _)) => self.phase = Phase::Current,
                         Ok((Offer::Manual(version), _)) => {
-                            self.phase = Phase::Available(UpdateOffer::Manual);
+                            self.phase = Phase::Available(UpdateOffer::Manual(version.clone()));
                             self.notice = format!("升级到 {version} 需要手动下载安装");
                         }
                         Ok((Offer::Update(release), envelope)) => {
@@ -473,6 +495,10 @@ impl Updates {
                 _ => break,
             }
         }
+    }
+
+    pub(crate) fn available_version(&self) -> Option<String> {
+        self.phase.available_version()
     }
 
     pub(crate) fn release(&self) -> Option<&Release> {
@@ -538,6 +564,70 @@ impl Updates {
     }
 }
 
+/// Prepare on a worker, then recheck application exit conditions on the UI thread.
+/// `continue_installation` lets a dismissed dialog cancel its installation intent.
+pub(crate) fn install_package(
+    root: gpui::WeakEntity<crate::AppRoot>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+    continue_installation: impl FnOnce(bool, &mut gpui::Window, &mut App) -> bool + 'static,
+) {
+    let installing = model(cx);
+    let Some(task) = installing.update(cx, |update, cx| update.prepare_install(cx)) else {
+        return;
+    };
+    window
+        .spawn(cx, async move |cx| {
+            let recovery = installing.clone();
+            let prepared = task.await;
+            if let Err(error) = cx.update(|window, cx| {
+                let proceed = continue_installation(prepared.is_ok(), window, cx);
+                match prepared {
+                    Ok(prepared) if proceed => {
+                        crate::exit_coordinator::request_with_completion(
+                            root,
+                            window,
+                            cx,
+                            "安装更新",
+                            Box::new(move |window, cx| {
+                                prepared.install(cx)?;
+                                #[cfg(target_os = "linux")]
+                                {
+                                    use gpui_kit::component::{
+                                        WindowExt as _, notification::Notification,
+                                    };
+                                    window.push_notification(
+                                        Notification::info(model(cx).read(cx).notice.clone()),
+                                        cx,
+                                    );
+                                }
+                                #[cfg(not(target_os = "linux"))]
+                                let _ = window;
+                                Ok(())
+                            }),
+                            Box::new(move |_, cx| {
+                                installing
+                                    .update(cx, |update, cx| update.finish_preparing(None, cx))
+                            }),
+                        );
+                    }
+                    Ok(_) => installing.update(cx, |update, cx| update.finish_preparing(None, cx)),
+                    Err(error) => {
+                        installing.update(cx, |update, cx| {
+                            update.finish_preparing(Some(format!("安装准备失败：{error:#}")), cx)
+                        });
+                    }
+                }
+            }) {
+                gpui::AsyncApp::update(cx, |cx| {
+                    recovery.update(cx, |update, cx| update.finish_preparing(None, cx))
+                });
+                log::debug!("安装更新窗口已关闭：{error}");
+            }
+        })
+        .detach();
+}
+
 impl Drop for Updates {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
@@ -546,19 +636,26 @@ impl Drop for Updates {
 
 impl gpui::Render for Updates {
     fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        use gpui::{ParentElement as _, Styled as _, prelude::FluentBuilder as _};
-        use gpui_kit::component::{Sizable as _, button::Button};
-        let visible = self.phase.has_update();
-        gpui::div().when(visible, |view| {
-            view.child(
-                Button::new("update-status")
-                    .small()
-                    .h(crate::status_bar::STATUS_BAR_ITEM_HEIGHT)
-                    .label(self.status())
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::actions::OpenSettings), cx)
-                    }),
-            )
+        use gpui::{InteractiveElement as _, ParentElement as _, prelude::FluentBuilder as _};
+        use gpui_kit::component::{
+            Sizable as _,
+            button::{Button, ButtonVariants as _},
+        };
+        gpui::div().when(self.phase.has_update(), |view| {
+            view.occlude()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new("update-status")
+                        .ghost()
+                        .small()
+                        .icon(crate::assets::IconName::Download)
+                        .label(self.phase.title_bar_label())
+                        .tooltip(self.status())
+                        .accessibility_label("打开软件更新")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::actions::OpenUpdateDialog), cx)
+                        }),
+                )
         })
     }
 }
@@ -617,6 +714,75 @@ pub(crate) fn attach_sparkle_guard(
 
 #[cfg(test)]
 mod tests {
+    use super::{Phase, UpdateOffer};
+    use semver::Version;
+
+    #[test]
+    fn title_bar_entry_tracks_update_availability_and_native_completion() {
+        for phase in [
+            Phase::Disabled,
+            Phase::Idle,
+            Phase::Checking,
+            Phase::Current,
+            Phase::Failed("offline".into()),
+        ] {
+            assert!(!phase.has_update());
+        }
+        let available = Phase::Available(UpdateOffer::Manual(Version::new(0, 2, 0)));
+        assert!(available.has_update());
+        assert_eq!(available.title_bar_label(), "可升级");
+        for state in [
+            updater::macos::State::Available,
+            updater::macos::State::WaitingRestart,
+            updater::macos::State::Deferred,
+        ] {
+            let phase = Phase::Native(state);
+            assert!(phase.has_update());
+            assert_eq!(phase.title_bar_label(), "可升级");
+        }
+        assert_eq!(
+            Phase::Native(updater::macos::State::Downloading).title_bar_label(),
+            "下载中"
+        );
+        assert!(!Phase::Native(updater::macos::State::Idle).has_update());
+    }
+
+    #[test]
+    fn upgrade_version_is_available_for_manual_and_all_package_states() {
+        let update = super::SignedRelease {
+            release: updater::manifest::Release {
+                version: Version::new(2, 3, 4),
+                notes: String::new(),
+                asset: updater::manifest::Asset {
+                    url: "https://example.com/update.deb".into(),
+                    size: 5,
+                    sha256: "0".repeat(64),
+                    kind: updater::manifest::PackageKind::Deb,
+                },
+            },
+            envelope: vec![],
+        };
+        for phase in [
+            Phase::Available(UpdateOffer::Signed(update.clone())),
+            Phase::Downloading {
+                update: update.clone(),
+                percent: 42,
+            },
+            Phase::Ready {
+                update: update.clone(),
+                package: "/tmp/update.deb".into(),
+            },
+            Phase::Preparing {
+                update,
+                package: "/tmp/update.deb".into(),
+            },
+            Phase::Available(UpdateOffer::Manual(Version::new(2, 3, 4))),
+        ] {
+            assert_eq!(phase.available_version().as_deref(), Some("2.3.4"));
+        }
+        assert!(Phase::Current.available_version().is_none());
+    }
+
     #[test]
     fn sparkle_guard_uses_the_window_async_context_on_every_test_platform() {
         let _: fn(gpui::WeakEntity<crate::AppRoot>, &mut gpui::Window, &mut gpui::App) =

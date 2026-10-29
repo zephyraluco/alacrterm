@@ -4,3 +4,5 @@ mod connection;
 mod folder;
 pub(crate) mod host_key;
 pub(crate) mod name;
+
+pub(crate) mod update;

@@ -24,6 +24,7 @@ actions!(
         // 会话 / 设置
         NewLocalTerminal,
         OpenSettings,
+        OpenUpdateDialog,
         // 会话 / 标签
         CloseActiveSession,
         NextSession,
@@ -190,6 +191,13 @@ impl AppRoot {
         cx.on_action(move |_: &OpenSettings, cx: &mut App| {
             Self::defer_after_update(settings_root.clone(), cx, |this, window, cx| {
                 this.open_settings_window(window, cx)
+            });
+        });
+
+        let update_dialog_root = root.clone();
+        cx.on_action(move |_: &OpenUpdateDialog, cx: &mut App| {
+            Self::defer_after_update(update_dialog_root.clone(), cx, |_this, window, cx| {
+                crate::dialog::update::open(cx.weak_entity(), window, cx)
             });
         });
 

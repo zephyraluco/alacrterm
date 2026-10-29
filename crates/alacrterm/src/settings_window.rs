@@ -1,4 +1,4 @@
-//! 独立窗口形式的「设置」界面：两页（主题 / 终端），入口 [`AppRoot::open_settings_window`]。
+//! 独立窗口形式的「设置」界面：主题 / 终端 / 更新，入口 [`AppRoot::open_settings_window`]。
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -57,22 +57,23 @@ impl SettingsWindow {
     fn theme_page(&self, cx: &App) -> SettingPage {
         SettingPage::new("主题")
             .icon(Icon::new(IconName::Moon))
-            .default_open(!crate::updates::model(cx).read(cx).phase.has_update())
             .group(
-                SettingGroup::new()
-                    .item(
-                        SettingItem::new("深色主题", theme_mode_switch())
-                            .description("切换深色 / 浅色界面主题；终端配色在「终端」页单独选择。"),
-                    )
-                    .item(
-                        SettingItem::new("深色模式配色", theme_dropdown(cx, ThemeMode::Dark))
-                            .description("深色模式下用哪套主题；默认「跟随 gpui-kit」用内置配色。"),
-                    )
-                    .item(
-                        SettingItem::new("浅色模式配色", theme_dropdown(cx, ThemeMode::Light))
-                            .description("同上，作用于浅色模式。主题文件在 themes/global/ 下，改完即刻热重载。"),
-                    ),
-            )
+            SettingGroup::new()
+                .item(
+                    SettingItem::new("深色主题", theme_mode_switch())
+                        .description("切换深色 / 浅色界面主题；终端配色在「终端」页单独选择。"),
+                )
+                .item(
+                    SettingItem::new("深色模式配色", theme_dropdown(cx, ThemeMode::Dark))
+                        .description("深色模式下用哪套主题；默认「跟随 gpui-kit」用内置配色。"),
+                )
+                .item(
+                    SettingItem::new("浅色模式配色", theme_dropdown(cx, ThemeMode::Light))
+                        .description(
+                            "同上，作用于浅色模式。主题文件在 themes/global/ 下，改完即刻热重载。",
+                        ),
+                ),
+        )
     }
 
     /// 「终端」页。
@@ -468,14 +469,9 @@ impl Render for SettingsWindow {
                     Settings::new("app-settings")
                         .page(self.theme_page(cx))
                         .page(self.terminal_page(cx))
-                        .page(
-                            SettingPage::new("更新")
-                                .default_open(crate::updates::model(cx).read(cx).phase.has_update())
-                                .group(SettingGroup::new().item(SettingItem::new(
-                                    "在线更新",
-                                    update_field(self.app_root.clone()),
-                                ))),
-                        ),
+                        .page(SettingPage::new("更新").group(SettingGroup::new().item(
+                            SettingItem::new("在线更新", update_field(self.app_root.clone())),
+                        ))),
                 ),
             )
         // 覆盖层由 gpui-kit `Root` 渲染。
@@ -531,7 +527,6 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
     let downloading = entity.clone();
     let cancelling = entity.clone();
     let automatic = entity.clone();
-    let installing = entity.clone();
     let install_command = if cfg!(target_os = "linux") {
         update.package().map(updater::linux::manual_command)
     } else {
@@ -605,47 +600,7 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
                         "打开系统安装器"
                     })
                     .on_click(move |_, window, cx| {
-                        let task = installing.update(cx, |update, cx| update.prepare_install(cx));
-                        let Some(task) = task else {
-                            return;
-                        };
-                        let installing = installing.clone();
-                        let root = root.clone();
-                        window
-                            .spawn(cx, async move |cx| {
-                                let recovery = installing.clone();
-                                let prepared = task.await;
-                                if let Err(error) = cx.update(|window, cx| match prepared {
-                                    Ok(prepared) => {
-                                        crate::exit_coordinator::request_with_completion(
-                                            root,
-                                            window,
-                                            cx,
-                                            "安装更新",
-                                            Box::new(move |_, cx| prepared.install(cx)),
-                                            Box::new(move |_, cx| {
-                                                installing.update(cx, |update, cx| {
-                                                    update.finish_preparing(None, cx)
-                                                })
-                                            }),
-                                        )
-                                    }
-                                    Err(error) => installing.update(cx, |update, cx| {
-                                        update.finish_preparing(
-                                            Some(format!("安装准备失败：{error:#}")),
-                                            cx,
-                                        )
-                                    }),
-                                }) {
-                                    gpui::AsyncApp::update(cx, |cx| {
-                                        recovery.update(cx, |update, cx| {
-                                            update.finish_preparing(None, cx)
-                                        })
-                                    });
-                                    log::debug!("安装更新窗口已关闭：{error}");
-                                }
-                            })
-                            .detach();
+                        updates::install_package(root.clone(), window, cx, |_, _, _| true);
                     }),
             )
         })

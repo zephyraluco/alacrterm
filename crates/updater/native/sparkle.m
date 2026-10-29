@@ -5,6 +5,7 @@
 #import <dispatch/dispatch.h>
 
 static SPUStandardUpdaterController *controller;
+static NSString *availableVersion = @"";
 static NSString *statusText = @"尚未检查更新";
 static void (^pendingInstallation)(void);
 static bool restartRequested;
@@ -28,6 +29,7 @@ static void updateStatus(NSString *text, int state) {
     return YES;
 }
 - (void)updater:(SPUUpdater *)updater didFindValidUpdate:(SUAppcastItem *)item {
+    availableVersion = item.displayVersionString;
     updateStatus([NSString stringWithFormat:@"发现新版本 %@", item.displayVersionString], 2);
 }
 - (void)updaterDidNotFindUpdate:(SPUUpdater *)updater error:(NSError *)error {
@@ -110,6 +112,7 @@ void alacrterm_sparkle_check(void) {
 void alacrterm_sparkle_automatic(bool enabled) {
     controller.updater.automaticallyChecksForUpdates = enabled;
 }
+const char *alacrterm_sparkle_version(void) { return availableVersion.UTF8String; }
 const char *alacrterm_sparkle_status(void) { return statusText.UTF8String; }
 int alacrterm_sparkle_state(void) { return updateState; }
 bool alacrterm_sparkle_changed(void) { bool value = changed; changed = false; return value; }

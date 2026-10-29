@@ -675,6 +675,7 @@ impl Render for AppRoot {
                                 .text_color(cx.theme().secondary_foreground)
                                 .child("Alacrterm"),
                         )
+                        .child(updates::model(cx))
                         .child(self.wayx_button(cx))
                         .child(
                             div()

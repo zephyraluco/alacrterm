@@ -32,42 +32,39 @@ pub(super) fn status_bar(
     SidebarView::ALL
         .into_iter()
         .filter(|view| view.visible_with(files_enabled))
-        .fold(
-            new_status_bar().child(crate::updates::model(cx)),
-            |bar, view| {
-                let (state, selected) = match view {
-                    SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
-                    SidebarView::Files => (right.downgrade(), right.read(cx).panel_visible(cx)),
-                };
-                let button = Button::new(view.id())
-                    .ghost()
-                    .small()
-                    .h(STATUS_BAR_ITEM_HEIGHT)
-                    .w(STATUS_BAR_ITEM_HEIGHT)
-                    .icon(view.icon())
-                    .tooltip(view.tooltip())
-                    .tooltip_placement(Placement::Top)
-                    .accessibility_label(view.tooltip())
-                    .selected(selected)
-                    .on_click(move |_, _, cx| {
-                        let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
-                    });
-                match view {
-                    SidebarView::Sessions => bar.left(
-                        h_flex()
-                            .items_center()
-                            .child(button)
-                            .child(separator(&cx.theme().border)),
-                    ),
-                    SidebarView::Files => bar.right(
-                        h_flex()
-                            .items_center()
-                            .child(separator(&cx.theme().border))
-                            .child(button),
-                    ),
-                }
-            },
-        )
+        .fold(new_status_bar(), |bar, view| {
+            let (state, selected) = match view {
+                SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
+                SidebarView::Files => (right.downgrade(), right.read(cx).panel_visible(cx)),
+            };
+            let button = Button::new(view.id())
+                .ghost()
+                .small()
+                .h(STATUS_BAR_ITEM_HEIGHT)
+                .w(STATUS_BAR_ITEM_HEIGHT)
+                .icon(view.icon())
+                .tooltip(view.tooltip())
+                .tooltip_placement(Placement::Top)
+                .accessibility_label(view.tooltip())
+                .selected(selected)
+                .on_click(move |_, _, cx| {
+                    let _ = state.update(cx, |sidebar, cx| sidebar.toggle_view(view, cx));
+                });
+            match view {
+                SidebarView::Sessions => bar.left(
+                    h_flex()
+                        .items_center()
+                        .child(button)
+                        .child(separator(&cx.theme().border)),
+                ),
+                SidebarView::Files => bar.right(
+                    h_flex()
+                        .items_center()
+                        .child(separator(&cx.theme().border))
+                        .child(button),
+                ),
+            }
+        })
         .into_any_element()
 }
 
