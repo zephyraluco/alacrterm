@@ -173,7 +173,7 @@ macOS 使用 Sparkle 原生流程，不使用 `sparklers`。推迟重启回调�
 
 - `test`：分支 push、PR，以及复用调用；先 fmt/Clippy，再 Linux、Windows、macOS 并行运行指定 crate 测试。
 - `package`：分支 push、PR，以及复用调用；生成 Linux x64 deb、Windows x64 Inno 安装器、macOS ARM64 DMG/更新 ZIP，产物保留七天。
-- `release`：tag 触发；校验稳定版本 tag 与应用版本相符及签名配置完整，依次调用检查、打包、生成签名更新源，先上传草稿 Release，再发布为 latest。
+- `release`：tag 触发；校验稳定版本 tag 与应用版本相符及签名配置完整，等待同一 commit SHA 的分支 push test、package 工作流均成功（最多一小时，失败立即阻止发布），再重新打包、生成签名更新源，先上传草稿 Release，再发布为 latest。
 
 GitHub Repository Variables：`ALACRTERM_UPDATE_PUBLIC_KEYS` 为一个或多个 minisign 公钥 Base64 行，`SPARKLE_PUBLIC_KEY` 为 Sparkle 公钥。两者分别服务 JSON 更新源和 Sparkle 更新包，不是同一套密钥。
 

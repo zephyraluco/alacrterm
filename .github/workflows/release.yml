@@ -19,7 +19,19 @@ jobs:
         run: python3 scripts/packaging/validate_release.py
   checks:
     needs: validate
-    uses: ./.github/workflows/test.yml
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Wait for branch test and package workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: bash scripts/packaging/wait_for_ci.sh
   package:
     needs: checks
     uses: ./.github/workflows/package.yml
