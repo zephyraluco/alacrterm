@@ -33,7 +33,7 @@ fn preload(dir: &Path) -> bool {
 
 /// conpty 目录的候选位置。
 fn candidate_dirs(exe_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+    let mut dirs = vec![exe_dir.join("plugins/conpty")];
     for up in 2..=3 {
         if let Some(root) = exe_dir.ancestors().nth(up) {
             dirs.push(root.join("plugins/windows/conpty"));
@@ -55,7 +55,7 @@ pub fn ensure() {
         return;
     };
 
-    if preload(&exe_dir) {
+    if exe_dir.join("OpenConsole.exe").is_file() && preload(&exe_dir) {
         log::info!("conpty: 使用 exe 同级的 conpty.dll（Windows Terminal ConPTY）");
         return;
     }
@@ -72,7 +72,7 @@ pub fn ensure() {
     }
 
     let message = "conpty: 未找到 Windows Terminal 的 conpty.dll（应在 exe 同级或 \
-                   plugins/windows/conpty/），退回系统 ConPTY：窗口缩到极小再放大时可能丢失上方内容";
+                   plugins/conpty/ 或源码 plugins/windows/conpty/），退回系统 ConPTY：窗口缩到极小再放大时可能丢失上方内容";
     log::warn!("{message}");
     eprintln!("[conpty] {message}");
 }

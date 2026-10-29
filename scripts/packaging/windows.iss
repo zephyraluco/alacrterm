@@ -14,6 +14,9 @@ SetupIconFile={#AppIcon}
 UninstallDisplayIcon={app}\alacrterm.exe
 [InstallDelete]
 Type: files; Name: "{app}\app-icon.ico"
+Type: files; Name: "{app}\conpty.dll"
+Type: files; Name: "{app}\OpenConsole.exe"
+Type: filesandordirs; Name: "{app}\plugins\windows"
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 [Icons]

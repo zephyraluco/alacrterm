@@ -79,7 +79,7 @@ def main():
     shutil.copy2(ROOT / 'target/release' / binary, payload / binary)
     shutil.copytree(ROOT / 'themes', payload / 'themes')
     runtime = {'Linux': 'linux/wayx-linux-x64', 'Darwin': 'macos/wayx-macos-arm64', 'Windows': 'windows/wayx-windows-x64'}[system]
-    shutil.copytree(ROOT / 'plugins' / runtime, payload / 'plugins' / runtime)
+    shutil.copytree(ROOT / 'plugins' / runtime, payload / 'plugins' / Path(runtime).name)
     if system == 'Linux':
         for size, image in icon_images(ROOT / 'assets/app-icon.ico').items():
             icons = work / f'usr/share/icons/hicolor/{size}x{size}/apps'
@@ -145,9 +145,7 @@ def main():
         run('hdiutil', 'create', '-volname', 'Alacrterm', '-srcfolder', work, '-ov', '-format', 'UDZO', dist / f'{name}.dmg')
     else:
         shutil.copy2(ROOT / 'target/release/alacrterm-update-helper.exe', payload / 'alacrterm-update-helper.exe')
-        for file in (ROOT / 'plugins/windows/conpty').iterdir():
-            if file.is_file():
-                shutil.copy2(file, payload / file.name)
+        shutil.copytree(ROOT / 'plugins/windows/conpty', payload / 'plugins/conpty')
         compiler = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Inno Setup 6/ISCC.exe'
         run(compiler, f'/DAppVersion={version}', f'/DSourceDir={payload}', f'/DAppIcon={ROOT / "assets/app-icon.ico"}', f'/DOutputDir={dist}', f'/DOutputName={name}-setup', ROOT / 'scripts/packaging/windows.iss')
     for file in dist.iterdir():

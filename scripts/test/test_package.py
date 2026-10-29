@@ -51,14 +51,16 @@ class PackagingTests(unittest.TestCase):
                     with patch.object(package.platform, 'system', return_value=system), patch.object(package.platform, 'machine', return_value=machine), patch.object(package, 'run') as commands, patch.object(Path, 'symlink_to'), patch.dict(os.environ, {'SPARKLE_FRAMEWORK_DIR': str(framework.parent), 'SPARKLE_PUBLIC_KEY': 'public-test-key', 'APPLE_SIGNING_IDENTITY': '-'}, clear=True):
                         package.main()
                     payload = root / 'target/package' / key / subfolder
-                    self.assertTrue((payload / 'plugins' / runtime / 'bin').is_dir())
+                    self.assertTrue((payload / 'plugins' / Path(runtime).name / 'bin').is_dir())
+                    self.assertFalse((payload / 'plugins' / runtime.split('/')[0]).exists())
                     for group, count in [('global', 21), ('terminal', 6)]:
                         self.assertEqual(len(list((payload / 'themes' / group).glob('*.json'))), count)
                     if system == 'Windows':
                         self.assertTrue((payload / 'alacrterm-update-helper.exe').is_file())
                         self.assertFalse((payload / 'app-icon.ico').exists())
                         for name in ['conpty.dll', 'OpenConsole.exe']:
-                            self.assertEqual((payload / name).read_bytes(), b'conpty fixture')
+                            self.assertEqual((payload / 'plugins/conpty' / name).read_bytes(), b'conpty fixture')
+                            self.assertFalse((payload / name).exists())
                         self.assertIn(f'/DAppIcon={root / "assets/app-icon.ico"}', commands.call_args.args)
                         self.assertEqual(str(commands.call_args.args[-1]), str(root / 'scripts/packaging/windows.iss'))
                     if system == 'Linux':

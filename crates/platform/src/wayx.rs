@@ -316,10 +316,10 @@ fn runtime_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("WAYX_RUNTIME_DIR") {
         return Ok(path.into());
     }
-    let name = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "linux/wayx-linux-x64",
-        ("macos", "aarch64") => "macos/wayx-macos-arm64",
-        ("windows", "x86_64") => "windows/wayx-windows-x64",
+    let (platform, name) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => ("linux", "wayx-linux-x64"),
+        ("macos", "aarch64") => ("macos", "wayx-macos-arm64"),
+        ("windows", "x86_64") => ("windows", "wayx-windows-x64"),
         (os, arch) => bail!("没有打包 {os}/{arch} 的 WayX，请通过 WAYX_RUNTIME_DIR 指定运行包"),
     };
     let executable = std::env::current_exe()?;
@@ -330,9 +330,13 @@ fn runtime_dir() -> Result<PathBuf> {
         .chain(cwd.ancestors())
         .chain(Path::new(env!("CARGO_MANIFEST_DIR")).ancestors())
     {
-        let path = base.join("plugins").join(name);
-        if path.join("bin").is_dir() {
-            return Ok(path);
+        for path in [
+            base.join("plugins").join(name),
+            base.join("plugins").join(platform).join(name),
+        ] {
+            if path.join("bin").is_dir() {
+                return Ok(path);
+            }
         }
     }
     bail!("找不到 plugins/{name}；请随应用分发 plugins 目录或设置 WAYX_RUNTIME_DIR")
