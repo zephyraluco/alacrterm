@@ -39,7 +39,10 @@ class PackagingTests(unittest.TestCase):
                 shutil.copy2(ROOT / 'crates/alacrterm/Cargo.toml', root / 'crates/alacrterm/Cargo.toml')
                 shutil.copytree(ROOT / 'themes', root / 'themes')
                 (root / 'plugins' / runtime / 'bin').mkdir(parents=True)
-                (root / 'assets/windows/conpty').mkdir(parents=True)
+                (root / 'plugins/windows/conpty').mkdir(parents=True)
+                (root / 'assets').mkdir()
+                for name in ['conpty.dll', 'OpenConsole.exe']:
+                    (root / 'plugins/windows/conpty' / name).write_bytes(b'conpty fixture')
                 shutil.copy2(ROOT / 'assets/app-icon.ico', root / 'assets/app-icon.ico')
                 framework = root / 'sparkle/Sparkle.framework'
                 framework.mkdir(parents=True)
@@ -54,6 +57,8 @@ class PackagingTests(unittest.TestCase):
                     if system == 'Windows':
                         self.assertTrue((payload / 'alacrterm-update-helper.exe').is_file())
                         self.assertFalse((payload / 'app-icon.ico').exists())
+                        for name in ['conpty.dll', 'OpenConsole.exe']:
+                            self.assertEqual((payload / name).read_bytes(), b'conpty fixture')
                         self.assertIn(f'/DAppIcon={root / "assets/app-icon.ico"}', commands.call_args.args)
                         self.assertEqual(str(commands.call_args.args[-1]), str(root / 'scripts/packaging/windows.iss'))
                     if system == 'Linux':

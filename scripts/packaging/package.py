@@ -145,7 +145,7 @@ def main():
         run('hdiutil', 'create', '-volname', 'Alacrterm', '-srcfolder', work, '-ov', '-format', 'UDZO', dist / f'{name}.dmg')
     else:
         shutil.copy2(ROOT / 'target/release/alacrterm-update-helper.exe', payload / 'alacrterm-update-helper.exe')
-        for file in (ROOT / 'assets/windows/conpty').iterdir():
+        for file in (ROOT / 'plugins/windows/conpty').iterdir():
             if file.is_file():
                 shutil.copy2(file, payload / file.name)
         compiler = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Inno Setup 6/ISCC.exe'

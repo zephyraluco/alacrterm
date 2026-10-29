@@ -36,9 +36,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y cmake clang libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libvulkan-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libasound2-dev
       - name: Prepare Sparkle
         if: runner.os == 'macOS'
-        run: |
-          python3 scripts/packaging/fetch_sparkle.py
-          echo "SPARKLE_FRAMEWORK_DIR=$GITHUB_WORKSPACE/target/sparkle" >> "$GITHUB_ENV"
+        run: bash scripts/packaging/prepare_sparkle.sh
       - name: Import Apple signing credentials
         if: runner.os == 'macOS' && inputs.release
         env:
@@ -48,32 +46,9 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          python3 - <<'PY'
-          import base64, os
-          from pathlib import Path
-          root = Path(os.environ['RUNNER_TEMP'])
-          for name, output in [('APPLE_CERTIFICATE_P12', 'certificate.p12'), ('APPLE_API_KEY_P8', 'notary.p8')]:
-              path = root / output
-              path.write_bytes(base64.b64decode(os.environ[name], validate=True))
-              path.chmod(0o600)
-          with open(os.environ['GITHUB_ENV'], 'a') as env:
-              for name in ['APPLE_SIGNING_IDENTITY', 'APPLE_NOTARY_KEY_ID', 'APPLE_NOTARY_ISSUER']:
-                  value = os.environ[name]
-                  if '\n' in value or '\r' in value:
-                      raise ValueError('Invalid signing configuration')
-                  env.write(f'{name}={value}\n')
-              env.write(f'APPLE_NOTARY_KEY={root / "notary.p8"}\n')
-          PY
-          SIGNING_PASSWORD=$(openssl rand -hex 32)
-          security create-keychain -p "$SIGNING_PASSWORD" "$RUNNER_TEMP/alacrterm-signing.keychain-db"
-          security set-keychain-settings -lut 21600 "$RUNNER_TEMP/alacrterm-signing.keychain-db"
-          security unlock-keychain -p "$SIGNING_PASSWORD" "$RUNNER_TEMP/alacrterm-signing.keychain-db"
-          security import "$RUNNER_TEMP/certificate.p12" -k "$RUNNER_TEMP/alacrterm-signing.keychain-db" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$SIGNING_PASSWORD" "$RUNNER_TEMP/alacrterm-signing.keychain-db"
-          security list-keychains -d user -s "$RUNNER_TEMP/alacrterm-signing.keychain-db" "$HOME/Library/Keychains/login.keychain-db"
+        run: bash scripts/packaging/import_apple_signing.sh
       - name: Packaging regression tests
-        run: python -m unittest discover -s scripts/packaging -p 'test_*.py'
+        run: python -m unittest discover -s scripts/test -p 'test_*.py'
       - name: Build
         run: cargo build --release --locked -p alacrterm -p alacrterm-update-helper
       - name: Create installer
@@ -85,9 +60,7 @@ jobs:
         run: python3 scripts/packaging/sign_sparkle.py
       - name: Remove Apple signing credentials
         if: always() && runner.os == 'macOS' && inputs.release
-        run: |
-          security delete-keychain "$RUNNER_TEMP/alacrterm-signing.keychain-db" || true
-          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/notary.p8"
+        run: bash scripts/packaging/remove_apple_signing.sh
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: installer-${{ matrix.platform }}

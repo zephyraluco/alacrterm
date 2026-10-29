@@ -22,18 +22,7 @@ jobs:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          python3 - <<'PY'
-          import importlib.util, os
-          spec = importlib.util.spec_from_file_location('release', 'scripts/packaging/release.py')
-          release = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(release)
-          release.version_for_tag(os.environ['RELEASE_TAG'])
-          required = ['ALACRTERM_UPDATE_PUBLIC_KEYS', 'SPARKLE_PUBLIC_KEY', 'MINISIGN_SECRET_KEY', 'SPARKLE_PRIVATE_KEY', 'APPLE_CERTIFICATE_P12', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_SIGNING_IDENTITY', 'APPLE_API_KEY_P8', 'APPLE_API_KEY_ID', 'APPLE_API_ISSUER']
-          missing = [name for name in required if not os.environ.get(name)]
-          if missing:
-              raise SystemExit('Missing release configuration: ' + ', '.join(missing))
-          PY
+        run: python3 scripts/packaging/validate_release.py
   checks:
     needs: validate
     uses: ./.github/workflows/test.yml
@@ -65,14 +54,10 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
           ALACRTERM_UPDATE_PUBLIC_KEYS: ${{ vars.ALACRTERM_UPDATE_PUBLIC_KEYS }}
-        run: |
-          gh api --method POST "repos/$GH_REPO/releases/generate-notes" -f "tag_name=$RELEASE_TAG" --jq .body > "$RUNNER_TEMP/release-notes.md"
-          python3 scripts/packaging/release.py --tag "$RELEASE_TAG" --repository "$GH_REPO" --notes "$RUNNER_TEMP/release-notes.md"
+        run: bash scripts/packaging/generate_release_feeds.sh
       - name: Publish complete GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --notes-file "$RUNNER_TEMP/release-notes.md"
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+        run: bash scripts/packaging/publish_release.sh

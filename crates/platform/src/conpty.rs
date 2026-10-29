@@ -36,11 +36,11 @@ fn candidate_dirs(exe_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for up in 2..=3 {
         if let Some(root) = exe_dir.ancestors().nth(up) {
-            dirs.push(root.join("assets/windows/conpty"));
+            dirs.push(root.join("plugins/windows/conpty"));
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        dirs.push(cwd.join("assets/windows/conpty"));
+        dirs.push(cwd.join("plugins/windows/conpty"));
     }
     dirs
 }
@@ -72,7 +72,7 @@ pub fn ensure() {
     }
 
     let message = "conpty: 未找到 Windows Terminal 的 conpty.dll（应在 exe 同级或 \
-                   assets/windows/conpty/），退回系统 ConPTY：窗口缩到极小再放大时可能丢失上方内容";
+                   plugins/windows/conpty/），退回系统 ConPTY：窗口缩到极小再放大时可能丢失上方内容";
     log::warn!("{message}");
     eprintln!("[conpty] {message}");
 }

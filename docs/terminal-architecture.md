@@ -1000,8 +1000,8 @@ graph LR
 
 本仓库随包分发 `conpty.dll` + `OpenConsole.exe`:
 
-- 二进制在 `assets/windows/conpty/{conpty.dll,OpenConsole.exe}`;
-- `main()` 在**建第一个 PTY 之前**调 `conpty_backend::ensure()`:exe 同级有 `conpty.dll` 就全路径预加载(发行形态),否则用 `SetDllDirectoryW` 把仓库 `assets/windows/conpty/` 加进搜索路径;都没有则告警退回系统 ConPTY;
+- 二进制在 `plugins/windows/conpty/{conpty.dll,OpenConsole.exe}`;
+- `main()` 在**建第一个 PTY 之前**调 `conpty_backend::ensure()`:exe 同级有 `conpty.dll` 就全路径预加载(发行形态),否则用 `SetDllDirectoryW` 把仓库 `plugins/windows/conpty/` 加进搜索路径;都没有则告警退回系统 ConPTY;
 - 预加载让后续按基名的 `LoadLibraryW` 命中同一模块(加载器按模块名去重),不受 PATH 影响。
 
 

@@ -60,7 +60,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked -p updater -p alacrterm-update-helper -p alacrterm -p terminal_view
 cc -Wall -Wextra -Werror crates/updater/native/sparkle_state_test.c -o /tmp/sparkle-state-test
 /tmp/sparkle-state-test
-python -m unittest discover -s scripts/packaging -p 'test_*.py'
+python -m unittest discover -s scripts/test -p 'test_*.py'
 ```
 
 For a macOS build, run `python3 scripts/packaging/fetch_sparkle.py`, set `SPARKLE_FRAMEWORK_DIR` to the absolute `target/sparkle` directory, then build. The packaging script consumes `SPARKLE_PUBLIC_KEY` and optional Apple signing/notarization environment variables. A non-bundled development process is not an update target.
