@@ -200,6 +200,7 @@ dependencies = [
  "anyhow",
  "cc",
  "dirs 7.0.0",
+ "embed-resource",
  "futures",
  "gpui-kit",
  "gpui-pre",

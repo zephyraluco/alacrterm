@@ -159,6 +159,7 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    app_id: Some("alacrterm".into()),
                     ..TitleBar::window_options()
                 },
                 |window, cx| {

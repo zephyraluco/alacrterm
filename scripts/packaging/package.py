@@ -6,6 +6,7 @@ import platform
 import plistlib
 import shutil
 import subprocess
+import struct
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +24,31 @@ def normalize_permissions(root):
             path.chmod(0o755)
         elif path.is_file():
             path.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
+
+
+def icon_images(source):
+    """Reuse the ICO's original PNG frames; no image-conversion dependency is needed."""
+    data = source.read_bytes()
+    reserved, kind, count = struct.unpack_from('<HHH', data)
+    if reserved != 0 or kind != 1:
+        raise ValueError('Expected an ICO application icon')
+    images = {}
+    for index in range(count):
+        width, height, _, _, _, _, length, offset = struct.unpack_from('<BBBBHHII', data, 6 + index * 16)
+        width, height = width or 256, height or 256
+        frame = data[offset:offset + length]
+        if width == height and frame.startswith(b'\x89PNG\r\n\x1a\n'):
+            images[width] = frame
+    if not {128, 256}.issubset(images):
+        raise ValueError('Application ICO must contain 128px and 256px PNG images')
+    return images
+
+
+def write_icns(source, destination):
+    images = icon_images(source)
+    chunks = b''.join(kind + struct.pack('>I', len(images[size]) + 8) + images[size]
+                      for size, kind in [(128, b'ic07'), (256, b'ic08')])
+    destination.write_bytes(b'icns' + struct.pack('>I', len(chunks) + 8) + chunks)
 
 
 def main():
@@ -55,6 +81,10 @@ def main():
     runtime = {'Linux': 'linux/wayx-linux-x64', 'Darwin': 'macos/wayx-macos-arm64', 'Windows': 'windows/wayx-windows-x64'}[system]
     shutil.copytree(ROOT / 'plugins' / runtime, payload / 'plugins' / runtime)
     if system == 'Linux':
+        for size, image in icon_images(ROOT / 'assets/app-icon.ico').items():
+            icons = work / f'usr/share/icons/hicolor/{size}x{size}/apps'
+            icons.mkdir(parents=True)
+            (icons / 'alacrterm.png').write_bytes(image)
         control = work / 'DEBIAN'
         control.mkdir()
         (control / 'control').write_text(f'Package: alacrterm\nVersion: {version}\nArchitecture: amd64\nMaintainer: Alacrterm contributors\nDepends: libfontconfig1, libfreetype6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libegl1, libvulkan1, libxcb1, libxcb-shape0, libxcb-xfixes0, libasound2t64, libssl3t64\nDescription: Terminal and SSH client\n', encoding='utf-8')
@@ -63,15 +93,18 @@ def main():
         (launch / 'alacrterm').symlink_to('../lib/alacrterm/alacrterm')
         desktop = work / 'usr/share/applications'
         desktop.mkdir(parents=True)
-        (desktop / 'alacrterm.desktop').write_text('[Desktop Entry]\nType=Application\nName=Alacrterm\nExec=alacrterm\nTerminal=false\nCategories=System;TerminalEmulator;\n', encoding='utf-8')
+        (desktop / 'alacrterm.desktop').write_text('[Desktop Entry]\nType=Application\nName=Alacrterm\nExec=alacrterm\nIcon=alacrterm\nStartupWMClass=alacrterm\nTerminal=false\nCategories=System;TerminalEmulator;\n', encoding='utf-8')
         normalize_permissions(work)
         run('dpkg-deb', '--root-owner-group', '--build', work, dist / f'{name}.deb')
     elif system == 'Darwin':
+        resources = app / 'Contents/Resources'
+        resources.mkdir()
+        write_icns(ROOT / 'assets/app-icon.ico', resources / 'app-icon.icns')
         framework_dir = Path(os.environ['SPARKLE_FRAMEWORK_DIR'])
         frameworks = app / 'Contents/Frameworks'
         frameworks.mkdir()
         shutil.copytree(framework_dir / 'Sparkle.framework', frameworks / 'Sparkle.framework', symlinks=True)
-        info = {'CFBundleExecutable': binary, 'CFBundleIdentifier': 'com.alacrterm.app', 'CFBundleName': 'Alacrterm', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': version, 'CFBundleVersion': version, 'LSMinimumSystemVersion': '12.0', 'NSHighResolutionCapable': True, 'SUFeedURL': 'https://github.com/zephyraluco/alacrterm/releases/latest/download/appcast.xml', 'SUEnableAutomaticChecks': True, 'SUAutomaticallyUpdate': False}
+        info = {'CFBundleExecutable': binary, 'CFBundleIdentifier': 'com.alacrterm.app', 'CFBundleName': 'Alacrterm', 'CFBundleIconFile': 'app-icon.icns', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': version, 'CFBundleVersion': version, 'LSMinimumSystemVersion': '12.0', 'NSHighResolutionCapable': True, 'SUFeedURL': 'https://github.com/zephyraluco/alacrterm/releases/latest/download/appcast.xml', 'SUEnableAutomaticChecks': True, 'SUAutomaticallyUpdate': False}
         public_key = os.environ.get('SPARKLE_PUBLIC_KEY')
         if public_key:
             info['SUPublicEDKey'] = public_key
@@ -111,6 +144,7 @@ def main():
         (work / 'Applications').symlink_to('/Applications')
         run('hdiutil', 'create', '-volname', 'Alacrterm', '-srcfolder', work, '-ov', '-format', 'UDZO', dist / f'{name}.dmg')
     else:
+        shutil.copy2(ROOT / 'assets/app-icon.ico', payload / 'app-icon.ico')
         shutil.copy2(ROOT / 'target/release/alacrterm-update-helper.exe', payload / 'alacrterm-update-helper.exe')
         for file in (ROOT / 'assets/windows/conpty').iterdir():
             if file.is_file():

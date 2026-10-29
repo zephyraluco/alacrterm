@@ -40,6 +40,7 @@ class PackagingTests(unittest.TestCase):
                 shutil.copytree(ROOT / 'themes', root / 'themes')
                 (root / 'plugins' / runtime / 'bin').mkdir(parents=True)
                 (root / 'assets/windows/conpty').mkdir(parents=True)
+                shutil.copy2(ROOT / 'assets/app-icon.ico', root / 'assets/app-icon.ico')
                 framework = root / 'sparkle/Sparkle.framework'
                 framework.mkdir(parents=True)
                 (framework / 'fixture').write_bytes(b'framework')
@@ -52,10 +53,21 @@ class PackagingTests(unittest.TestCase):
                         self.assertEqual(len(list((payload / 'themes' / group).glob('*.json'))), count)
                     if system == 'Windows':
                         self.assertTrue((payload / 'alacrterm-update-helper.exe').is_file())
+                        self.assertEqual((payload / 'app-icon.ico').read_bytes(), (ROOT / 'assets/app-icon.ico').read_bytes())
                         self.assertEqual(str(commands.call_args.args[-1]), str(root / 'scripts/packaging/windows.iss'))
+                    if system == 'Linux':
+                        desktop = (root / 'target/package' / key / 'usr/share/applications/alacrterm.desktop').read_text()
+                        self.assertIn('Icon=alacrterm\n', desktop)
+                        icon = root / 'target/package' / key / 'usr/share/icons/hicolor/256x256/apps/alacrterm.png'
+                        self.assertEqual(icon.read_bytes(), package.icon_images(ROOT / 'assets/app-icon.ico')[256])
                     if system == 'Darwin':
                         app = payload.parent
                         info = plistlib.loads((app / 'Info.plist').read_bytes())
+                        self.assertEqual(info['CFBundleIconFile'], 'app-icon.icns')
+                        icon = (app / 'Resources/app-icon.icns').read_bytes()
+                        self.assertEqual(icon[:4], b'icns')
+                        self.assertEqual(int.from_bytes(icon[4:8], 'big'), len(icon))
+                        self.assertIn(package.icon_images(ROOT / 'assets/app-icon.ico')[256], icon)
                         self.assertEqual(info['SUPublicEDKey'], 'public-test-key')
                         self.assertTrue(info['SUFeedURL'].endswith('/appcast.xml'))
                         self.assertTrue((app / 'Frameworks/Sparkle.framework/fixture').is_file())

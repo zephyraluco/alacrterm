@@ -10,6 +10,7 @@ OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
 Compression=lzma2
 SolidCompression=yes
+SetupIconFile={#SourceDir}\app-icon.ico
 UninstallDisplayIcon={app}\alacrterm.exe
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
