@@ -13,17 +13,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Axis, Context, Div, DragMoveEvent, Empty, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div, relative,
+    Anchor, AnyElement, App, AppContext as _, Axis, Context, Div, DragMoveEvent, Empty, Entity,
+    EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    relative,
 };
 use gpui_kit::component::{
-    button::Button,
+    Icon, Sizable as _,
+    button::{Button, ButtonVariants as _},
     dock::{
         BasePanel, DockPlacement, InsertTarget, Panel, PanelControl, PanelEvent, PanelId, TabGroup,
         panel_handle,
     },
     h_flex,
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     resizable::resize_handle,
     v_flex,
 };
@@ -31,11 +34,11 @@ use terminal::{SessionId, SshFs, TerminalTarget};
 use terminal_view::{RenderSettings, TerminalView};
 
 use crate::AppRoot;
-use crate::actions::NewLocalTerminal;
 use crate::assets::IconName;
 use crate::config;
 use crate::dialog::host_key;
 use crate::pane_layout::{Dir, Layout, ratio_at};
+use crate::sidebar_panel::sessions::SessionMenuEntry;
 
 pub(crate) use session::SessionRequest;
 use session::SessionTarget;
@@ -777,6 +780,118 @@ impl BasePanel for TabPane {
     }
 }
 
+impl TabPane {
+    pub(crate) fn new_terminal_menu(
+        &self,
+        on_open_change: impl Fn(&bool, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        let root = self.root.clone();
+        let group = self.group.clone();
+        Button::new("new-terminal")
+            .icon(IconName::Plus)
+            .tooltip("新建终端")
+            .xsmall()
+            .ghost()
+            .tab_stop(false)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
+                let local_root = root.clone();
+                let local_group = group.clone();
+                let menu = menu
+                    .item(
+                        PopupMenuItem::new("本地终端")
+                            .icon(IconName::SquareTerminal)
+                            .on_click(move |_, _, cx| {
+                                let group = local_group.clone();
+                                AppRoot::defer_after_update(
+                                    local_root.clone(),
+                                    cx,
+                                    move |root, window, cx| {
+                                        root.set_pending_session_group(group);
+                                        root.spawn_terminal(window, cx);
+                                    },
+                                );
+                            }),
+                    )
+                    .separator();
+                let entries = root
+                    .read_with(cx, |root, cx| root.sessions.read(cx).menu_entries())
+                    .unwrap_or_default();
+                if entries.is_empty() {
+                    return menu.label("暂无已保存会话");
+                }
+                saved_session_menu(
+                    menu.label("已保存的会话"),
+                    &entries,
+                    root.clone(),
+                    group.clone(),
+                    window,
+                    cx,
+                )
+            })
+            .on_open_change(on_open_change)
+            .into_any_element()
+    }
+}
+
+fn saved_session_menu(
+    mut menu: PopupMenu,
+    entries: &[SessionMenuEntry],
+    root: WeakEntity<AppRoot>,
+    group: Option<WeakEntity<TabGroup>>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    for entry in entries {
+        menu = match entry {
+            SessionMenuEntry::Folder { name, children } if !children.is_empty() => {
+                let children = children.clone();
+                let root = root.clone();
+                let group = group.clone();
+                menu.submenu_with_icon(
+                    Some(Icon::new(IconName::Folder)),
+                    name.clone(),
+                    window,
+                    cx,
+                    move |menu, window, cx| {
+                        saved_session_menu(menu, &children, root.clone(), group.clone(), window, cx)
+                    },
+                )
+            }
+            SessionMenuEntry::Folder { name, .. } => menu.item(
+                PopupMenuItem::new(name.clone())
+                    .icon(IconName::Folder)
+                    .disabled(true),
+            ),
+            SessionMenuEntry::Session { id, name } => {
+                let id = *id;
+                let root = root.clone();
+                let group = group.clone();
+                menu.item(
+                    PopupMenuItem::new(name.clone())
+                        .icon(IconName::SquareTerminal)
+                        .on_click(move |_, _, cx| {
+                            let group = group.clone();
+                            AppRoot::defer_after_update(
+                                root.clone(),
+                                cx,
+                                move |root, window, cx| {
+                                    // IDs survive tree edits while the menu is open; resolve fresh parameters at selection time.
+                                    let Some(request) = root.sessions.read(cx).request_by_id(id)
+                                    else {
+                                        return;
+                                    };
+                                    root.set_pending_session_group(group);
+                                    root.spawn_session(request, window, cx);
+                                },
+                            );
+                        }),
+                )
+            }
+        };
+    }
+    menu
+}
+
 impl Panel for TabPane {
     /// 标签上的文字（当前格子的标题）。
     fn tab_name(&self, cx: &App) -> Option<SharedString> {
@@ -793,24 +908,6 @@ impl Panel for TabPane {
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
         None
-    }
-
-    /// 工具栏按钮：新建本地终端（新开一个标签页）。
-    fn toolbar_buttons(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<Vec<Button>> {
-        let root = self.root.clone();
-        let group = self.group.clone();
-        Some(vec![
-            Button::new("new-terminal")
-                .icon(IconName::Plus)
-                .tooltip("新建本地终端")
-                .on_click(move |_, window, cx| {
-                    // 先记下本组，再走 `NewLocalTerminal`。
-                    let group = group.clone();
-                    let root = root.clone();
-                    let _ = root.update(cx, |root, _| root.set_pending_session_group(group));
-                    window.dispatch_action(Box::new(NewLocalTerminal), cx);
-                }),
-        ])
     }
 }
 

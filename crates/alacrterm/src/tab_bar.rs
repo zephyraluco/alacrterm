@@ -29,6 +29,7 @@ use gpui_kit::{
 
 use crate::AppRoot;
 use crate::assets::IconName;
+use crate::terminal_panel::TabPane;
 
 const TAB_BAR_HEIGHT: Pixels = TITLE_BAR_HEIGHT;
 const TAB_WIDTH: Pixels = px(200.);
@@ -121,6 +122,7 @@ struct TabBarState {
     scroll: ScrollHandle,
     last_active: Cell<Option<usize>>,
     hovered: Cell<Option<usize>>,
+    menu_group: Cell<Option<NodeId>>,
     /// 应用根视图。
     root: WeakEntity<AppRoot>,
     group_focus: RefCell<HashMap<NodeId, FocusHandle>>,
@@ -132,6 +134,7 @@ impl TabBarState {
             scroll: ScrollHandle::default(),
             last_active: Cell::new(None),
             hovered: Cell::new(None),
+            menu_group: Cell::new(None),
             root,
             group_focus: RefCell::new(HashMap::new()),
         }
@@ -272,9 +275,22 @@ impl TerminalTabBar {
                 group.is_zoomed()
                     || panel.focus_handle(cx).contains_focused(window, cx)
                     || group_focus.contains_focused(window, cx)
+                    || self.state.menu_group.get() == Some(group.node())
             })
             .and_then(|panel| PanelHandle::of(panel))
-            .and_then(|handle| handle.toolbar_buttons(window, cx));
+            .and_then(|handle| handle.view().downcast::<TabPane>().ok())
+            .map(|pane| {
+                let state = self.state.clone();
+                let node = group.node();
+                pane.read(cx).new_terminal_menu(move |open, _, cx| {
+                    if *open {
+                        state.menu_group.set(Some(node));
+                    } else if state.menu_group.get() == Some(node) {
+                        state.menu_group.set(None);
+                    }
+                    cx.refresh_windows();
+                })
+            });
 
         let (bar_bg, border) = (cx.theme().tab_bar, cx.theme().border);
 
@@ -330,7 +346,7 @@ impl TerminalTabBar {
                             ),
                     ),
             )
-            .when_some(toolbar, |this, buttons| {
+            .when_some(toolbar, |this, menu| {
                 this.child(
                     h_flex()
                         .id("terminal-toolbar")
@@ -343,11 +359,7 @@ impl TerminalTabBar {
                         .gap_1()
                         .border_l_1()
                         .border_color(border)
-                        .children(
-                            buttons
-                                .into_iter()
-                                .map(|b| b.xsmall().ghost().tab_stop(false)),
-                        )
+                        .child(menu)
                         .child(
                             Button::new("zoom-terminal-group")
                                 .xsmall()

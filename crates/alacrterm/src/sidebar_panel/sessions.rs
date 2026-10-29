@@ -29,6 +29,37 @@ struct SessionRow {
     expanded: bool,
 }
 
+/// Menu metadata intentionally excludes connection credentials.
+#[derive(Clone)]
+pub(crate) enum SessionMenuEntry {
+    Folder {
+        name: String,
+        children: Vec<SessionMenuEntry>,
+    },
+    Session {
+        id: u64,
+        name: String,
+    },
+}
+
+impl SessionMenuEntry {
+    fn from_entries(entries: &[SessionEntry]) -> Vec<Self> {
+        entries
+            .iter()
+            .map(|entry| match entry {
+                SessionEntry::Folder(folder) => Self::Folder {
+                    name: folder.name.clone(),
+                    children: Self::from_entries(&folder.children),
+                },
+                SessionEntry::Session(record) => Self::Session {
+                    id: record.id,
+                    name: record.name.clone(),
+                },
+            })
+            .collect()
+    }
+}
+
 /// 「会话」视图的状态。
 pub(crate) struct SessionsState {
     tree: SessionTree,
@@ -127,6 +158,21 @@ impl SessionsState {
 
     fn entry(&self, path: &[usize]) -> Option<&SessionEntry> {
         self.tree.entry(path)
+    }
+
+    pub(crate) fn menu_entries(&self) -> Vec<SessionMenuEntry> {
+        SessionMenuEntry::from_entries(self.tree.entries())
+    }
+
+    pub(crate) fn request_by_id(&self, id: u64) -> Option<SessionRequest> {
+        fn find(entries: &[SessionEntry], id: u64) -> Option<SessionRequest> {
+            entries.iter().find_map(|entry| match entry {
+                SessionEntry::Session(record) if record.id == id => Some(record.request()),
+                SessionEntry::Folder(folder) => find(&folder.children, id),
+                _ => None,
+            })
+        }
+        find(self.tree.entries(), id)
     }
 
     pub(crate) fn record(&self, path: &[usize]) -> Option<SessionRecord> {
@@ -400,4 +446,54 @@ fn session_row_element(
             }
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+    use session::SessionFolder;
+
+    fn record(id: u64, name: &str) -> SessionEntry {
+        SessionEntry::Session(SessionRecord {
+            id,
+            name: name.into(),
+            user: "test".into(),
+            host: "example.invalid".into(),
+            port: 22,
+            password: None,
+        })
+    }
+
+    #[test]
+    fn menu_includes_collapsed_folders_and_resolves_ids_after_tree_changes() {
+        let mut folder = SessionFolder::new(1, "Servers".into());
+        folder.children.push(record(2, "Nested"));
+        let mut state = SessionsState {
+            tree: SessionTree::new(vec![SessionEntry::Folder(folder), record(3, "Root")]),
+            expanded: vec![],
+            selected: None,
+            rows: RowCache::default(),
+        };
+        let entries = state.menu_entries();
+        let SessionMenuEntry::Folder { name, children } = &entries[0] else {
+            panic!("missing folder");
+        };
+        assert_eq!(name, "Servers");
+        assert!(
+            matches!(&children[0], SessionMenuEntry::Session { id: 2, name } if name == "Nested")
+        );
+        assert!(state.tree.move_entry(&[0, 0], &[]).is_some());
+        assert_eq!(
+            state.request_by_id(2).unwrap().name.as_deref(),
+            Some("Nested")
+        );
+        assert_eq!(
+            state.request_by_id(3).unwrap().name.as_deref(),
+            Some("Root")
+        );
+        assert_eq!(state.tree.entry(&[2]).unwrap().id(), 2);
+        state.tree.remove(&[2]);
+        assert!(state.request_by_id(2).is_none());
+        assert!(state.request_by_id(1).is_none());
+    }
 }
