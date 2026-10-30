@@ -7,6 +7,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Validate stable tag and update signing configuration
@@ -24,46 +25,90 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      package_run_id: ${{ steps.resolve.outputs.package_run_id }}
+      rebuild: ${{ steps.resolve.outputs.rebuild }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Wait for branch test and package workflows
+      - name: Resolve successful branch CI and installer artifacts
+        id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_SHA: ${{ github.sha }}
-        run: bash scripts/packaging/wait_for_ci.sh
-  package:
+        run: python3 scripts/packaging/resolve_ci.py
+  rebuild:
     needs: checks
+    if: needs.checks.outputs.rebuild == 'true'
     uses: ./.github/workflows/package.yml
-    with:
-      release: true
-    secrets: inherit
-  release:
-    needs: package
-    runs-on: ubuntu-24.04
+  sign:
+    needs: [checks, rebuild]
+    if: ${{ !cancelled() && needs.checks.result == 'success' && (needs.rebuild.result == 'success' || needs.rebuild.result == 'skipped') }}
+    runs-on: macos-14
+    timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_SHA: ${{ github.sha }}
+      PACKAGE_RUN_ID: ${{ needs.checks.outputs.rebuild == 'true' && github.run_id || needs.checks.outputs.package_run_id }}
+      ALACRTERM_UPDATE_PUBLIC_KEYS: ${{ vars.ALACRTERM_UPDATE_PUBLIC_KEYS }}
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Download and verify exact installer set
+        run: python3 scripts/packaging/download_installers.py
+      - uses: actions/cache@v5
+        with:
+          path: target/sparkle-download
+          key: sparkle-${{ runner.os }}-${{ hashFiles('scripts/packaging/fetch_sparkle.py') }}
+      - name: Prepare Sparkle signing tools
+        run: bash scripts/packaging/prepare_sparkle.sh
+      - name: Sign final Sparkle upgrade ZIP
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: python3 scripts/packaging/sign_sparkle.py
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: release-sparkle-signature
+          path: dist/sparkle-signature.json
+          if-no-files-found: error
+          retention-days: 7
+  release:
+    needs: [checks, sign]
+    if: ${{ !cancelled() && needs.checks.result == 'success' && needs.sign.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: alacrterm-release-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_SHA: ${{ github.sha }}
+      PACKAGE_RUN_ID: ${{ needs.checks.outputs.rebuild == 'true' && github.run_id || needs.checks.outputs.package_run_id }}
+      ALACRTERM_UPDATE_PUBLIC_KEYS: ${{ vars.ALACRTERM_UPDATE_PUBLIC_KEYS }}
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Download and verify exact installer set
+        run: python3 scripts/packaging/download_installers.py
       - uses: actions/download-artifact@v8.0.2
         with:
-          pattern: installer-*
-          merge-multiple: true
+          name: release-sparkle-signature
           path: dist
       - name: Install metadata signing tool
         run: sudo apt-get update && sudo apt-get install -y minisign
       - name: Generate release notes and signed update feeds
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
-          ALACRTERM_UPDATE_PUBLIC_KEYS: ${{ vars.ALACRTERM_UPDATE_PUBLIC_KEYS }}
         run: bash scripts/packaging/generate_release_feeds.sh
       - name: Publish complete GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: bash scripts/packaging/publish_release.sh
