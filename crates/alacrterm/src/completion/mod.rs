@@ -101,6 +101,22 @@ impl CompletionService for CompletionEngine {
         use completion::{Kind, Source};
         let mut item =
             terminal_view::completion_service::rebase_candidate(previous, current, candidate)?;
+        if item.source == Source::History {
+            if current.cursor != current.text.len() {
+                return None;
+            }
+            let index = current
+                .history
+                .iter()
+                .position(|command| command == &item.insert_text)?;
+            item.score = completion_provider::history_score(
+                current.text,
+                &item.insert_text,
+                current.powershell == Some(true),
+                index,
+            )?;
+            return Some(item);
+        }
         let query = if item.source == Source::Filesystem {
             let old = path_suggestions::PathQuery::parse(
                 previous.text,

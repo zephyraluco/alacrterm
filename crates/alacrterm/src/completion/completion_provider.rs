@@ -22,6 +22,28 @@ impl Context<'_> {
             .is_ok()
     }
 }
+/// Prefix-only history matching, with unique recency scores across the cache.
+pub(super) fn history_score(
+    query: &str,
+    command: &str,
+    powershell: bool,
+    index: usize,
+) -> Option<i64> {
+    let folded;
+    let (query, command) = if powershell {
+        folded = (query.to_lowercase(), command.to_lowercase());
+        (folded.0.as_str(), folded.1.as_str())
+    } else {
+        (query, command)
+    };
+    command.starts_with(query).then(|| {
+        if command == query {
+            1500
+        } else {
+            1100 - index.min(999) as i64
+        }
+    })
+}
 #[derive(Clone, Copy)]
 pub(super) enum Provider {
     History,
@@ -56,19 +78,16 @@ impl Provider {
                     .history
                     .iter()
                     .enumerate()
-                    .filter(|(_, command)| command.starts_with(context.text))
-                    .map(|(index, command)| {
-                        Candidate::new(
+                    .filter_map(|(index, command)| {
+                        let score =
+                            history_score(context.text, command, context.powershell, index)?;
+                        Some(Candidate::new(
                             command.clone(),
                             context.text.len(),
                             Kind::History,
                             Source::History,
-                            if command == context.text {
-                                1500
-                            } else {
-                                1100 - (index as i64).min(100)
-                            },
-                        )
+                            score,
+                        ))
                     })
                     .collect(),
             )),

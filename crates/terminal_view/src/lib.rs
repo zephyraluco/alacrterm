@@ -324,6 +324,12 @@ impl TerminalView {
         match event {
             TerminalEvent::ShellHistory(event) => {
                 if self.completion.model.import_history(event.clone()) {
+                    if self.completion.model.has_current_candidates() {
+                        self.suggestion_scroll.scroll_to_item(
+                            self.completion.model.selected,
+                            gpui::ScrollStrategy::Nearest,
+                        );
+                    }
                     cx.notify();
                 }
             }

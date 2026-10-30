@@ -25,6 +25,29 @@ mod behavior {
         state.input(command);
         state.submit();
         state.phase(PromptEvent::Execute);
+        import_command(state, command);
+    }
+    fn import_command(state: &mut Suggestions, command: &str) {
+        use terminal::HistoryEvent;
+        static BATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let batch = BATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.import_history(HistoryEvent::Session("test-shell".into()));
+        state.import_history(HistoryEvent::Begin {
+            session: "test-shell".into(),
+            batch,
+            reset: false,
+        });
+        state.import_history(HistoryEvent::Entry {
+            session: "test-shell".into(),
+            batch,
+            index: 1,
+            command: command.into(),
+        });
+        state.import_history(HistoryEvent::End {
+            session: "test-shell".into(),
+            batch,
+            count: 1,
+        });
     }
     #[test]
     fn exact_commands_remain_visible_rank_first_and_accept_without_execution() {
@@ -101,7 +124,7 @@ mod behavior {
         state.phase(PromptEvent::Prompt);
         state.phase(PromptEvent::Input);
         state.trigger();
-        assert_eq!(texts(&state), ["echo hix"]);
+        assert!(texts(&state).is_empty()); // Keyboard submission alone never records history.
     }
     #[test]
     fn providers_merge_without_starvation_and_keep_selection_on_late_results() {
@@ -256,7 +279,7 @@ mod behavior {
         assert!(state.is_editing());
     }
     #[test]
-    fn only_confirmed_commands_become_history_and_accept_never_submits() {
+    fn only_shell_imported_commands_become_history_and_accept_never_submits() {
         let mut state = state();
         state.input("secret-password");
         state.submit();
@@ -311,7 +334,11 @@ mod behavior {
         state.input("echo partial");
         state.phase(PromptEvent::Input);
         assert!(!state.is_editing());
-        execute(&mut state, " secret-token");
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input(" secret-token");
+        state.submit();
+        state.phase(PromptEvent::Execute);
         state.phase(PromptEvent::Prompt);
         state.phase(PromptEvent::Input);
         state.trigger();
@@ -402,5 +429,129 @@ mod cached_sessions {
         state.context("cwd", "/another");
         state.refilter_cached();
         assert!(state.candidates.is_empty());
+    }
+}
+
+mod imported_history {
+    use super::*;
+    use terminal::HistoryEvent;
+    fn batch(state: &mut Suggestions, id: u64, reset: bool, commands: &[&str]) {
+        state.import_history(HistoryEvent::Session("active".into()));
+        state.import_history(HistoryEvent::Begin {
+            session: "active".into(),
+            batch: id,
+            reset,
+        });
+        for (index, command) in commands.iter().enumerate() {
+            state.import_history(HistoryEvent::Entry {
+                session: "active".into(),
+                batch: id,
+                index: index as u64,
+                command: (*command).into(),
+            });
+        }
+        state.import_history(HistoryEvent::End {
+            session: "active".into(),
+            batch: id,
+            count: commands.len(),
+        });
+    }
+    fn editing(state: &mut Suggestions, shell: &str, text: &str) {
+        state.context("shell", shell);
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.input(text);
+        state.refresh(false);
+    }
+    #[test]
+    fn history_case_matching_is_shell_specific_and_deletion_keeps_recency() {
+        let mut state = state();
+        batch(
+            &mut state,
+            1,
+            true,
+            &["Get-Item old", "Get-Item newest", "_helper real-history"],
+        );
+        editing(&mut state, "posix", "get-i");
+        assert!(state.candidates.is_empty());
+        editing(&mut state, "powershell", "get-it");
+        assert_eq!(
+            state
+                .candidates
+                .iter()
+                .map(|item| item.insert_text.as_str())
+                .collect::<Vec<_>>(),
+            ["Get-Item newest", "Get-Item old"]
+        );
+        state.edit_key("backspace", false);
+        state.refilter_cached();
+        assert_eq!(state.candidates[0].insert_text, "Get-Item newest");
+        editing(&mut state, "posix", "_he");
+        assert_eq!(state.candidates[0].source, Source::History);
+        assert_eq!(state.candidates[0].insert_text, "_helper real-history");
+    }
+    #[test]
+    fn background_imports_preserve_open_selection_paths_and_closed_menu_state() {
+        let mut state = state();
+        batch(&mut state, 1, true, &["cat old-one", "cat old-two"]);
+        editing(&mut state, "posix", "cat o");
+        state.context("cwd", "/tmp");
+        state.refresh(false);
+        let mut path = Candidate::new(
+            "other.txt".into(),
+            state.text.len(),
+            Kind::File,
+            Source::Filesystem,
+            1900,
+        );
+        path.replacement = 4..5;
+        state.merge_candidates(vec![path]);
+        state.selected = state
+            .candidates
+            .iter()
+            .position(|item| item.insert_text == "cat old-one")
+            .unwrap();
+        let revision = state.revision;
+        batch(&mut state, 2, false, &["cat old-three"]);
+        assert_eq!(state.revision, revision); // In-flight path requests remain valid.
+        assert_eq!(state.candidates[state.selected].insert_text, "cat old-one");
+        assert!(
+            state
+                .candidates
+                .iter()
+                .any(|item| item.source == Source::Filesystem)
+        );
+        assert!(
+            state
+                .candidates
+                .iter()
+                .any(|item| item.insert_text == "cat old-three")
+        );
+        state.dismiss();
+        batch(&mut state, 3, false, &["cat old-four"]);
+        assert!(!state.has_current_candidates());
+        state.trigger();
+        assert!(
+            state
+                .candidates
+                .iter()
+                .any(|item| item.insert_text == "cat old-four")
+        );
+    }
+    #[test]
+    fn imported_history_keeps_recent_order_beyond_one_hundred_entries() {
+        let mut state = state();
+        let commands: Vec<_> = (0..200).map(|index| format!("echo {index:04}")).collect();
+        batch(
+            &mut state,
+            1,
+            true,
+            &commands.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        editing(&mut state, "posix", "echo ");
+        assert_eq!(state.candidates[150].insert_text, "echo 0049");
+        state.edit_key("backspace", false);
+        state.refilter_cached();
+        assert_eq!(state.candidates[150].insert_text, "echo 0049");
     }
 }

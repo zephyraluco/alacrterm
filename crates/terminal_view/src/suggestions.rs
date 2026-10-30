@@ -1,4 +1,4 @@
-//! Per-pane, memory-only history suggestions gated by shell lifecycle markers.
+//! Per-pane completion sessions with history imported from the active shell.
 use crate::completion::{Candidate, Kind, rank};
 use terminal::PromptEvent;
 /// A submitted command cannot simultaneously be an editable input line.
@@ -10,9 +10,7 @@ enum InputState {
     Editing {
         menu: MenuState,
     },
-    Submitted {
-        command: Option<String>,
-    },
+    Submitted,
 }
 #[derive(Clone, Copy)]
 enum MenuState {
@@ -81,8 +79,12 @@ impl Suggestions {
         {
             return false;
         }
-        self.revision = self.revision.wrapping_add(1);
-        self.clear_cache();
+        // History changes are not input edits: keep in-flight path requests
+        // valid and retain cached candidates from the other providers.
+        self.cached
+            .retain(|entry| entry.item.source != crate::completion::Source::History);
+        self.candidates
+            .retain(|item| item.source != crate::completion::Source::History);
         if visible {
             self.refresh_in_place(false, false);
             if let Some(index) = self
@@ -310,15 +312,6 @@ impl Suggestions {
             (PromptEvent::Input, InputState::Prompt) => InputState::Editing {
                 menu: MenuState::Ready,
             },
-            (
-                PromptEvent::Execute,
-                InputState::Submitted {
-                    command: Some(command),
-                },
-            ) if self.settings.history => {
-                self.history.record(command);
-                InputState::Inactive
-            }
             _ => InputState::Inactive,
         };
         self.text.clear();
@@ -361,11 +354,7 @@ impl Suggestions {
         self.resume_menu();
     }
     pub fn submit(&mut self) {
-        let command = (self.is_editing()
-            && !self.text.trim().is_empty()
-            && !self.text.starts_with(char::is_whitespace))
-        .then(|| self.text.clone());
-        self.state = InputState::Submitted { command };
+        self.state = InputState::Submitted;
         self.candidates.clear();
     }
     pub fn edit_key(&mut self, key: &str, control: bool) {
