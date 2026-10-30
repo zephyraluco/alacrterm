@@ -43,7 +43,6 @@ __alacrterm_history_collect() {
 }
 __alacrterm_history_sync() {
     [[ ${ALACRTERM_HISTORY_ENABLED:-1} != 0 ]] || return 0
-    [[ -n $__alacrterm_history_pid ]] && kill -0 "$__alacrterm_history_pid" 2>/dev/null && return 0
     local -a keys
     keys=(${(On)${(k)history}})
     local last=${keys[1]:-0} first=${keys[1000]:-${keys[-1]:-1}} mode=append

@@ -316,3 +316,42 @@ fn zsh_imports_loaded_history_and_literal_utf8_without_multiline_fragments() {
             .any(|command| command.contains("multiline-"))
     );
 }
+
+#[test]
+fn commands_executed_during_initial_import_are_queued_without_an_extra_prompt() {
+    for program in bash_programs() {
+        let rc = r#"
+history -c
+history -s 'echo INITIAL_HISTORY'
+. "$ALACRTERM_INTEGRATION_SCRIPT"
+eval "$(declare -f __alacrterm_history_collect | sed '1s/__alacrterm_history_collect/__alacrterm_saved_collect/')"
+__alacrterm_history_collect() { sleep .1; __alacrterm_saved_collect "$@"; }
+"#;
+        let (stdout, _) = run_bash(
+            &program,
+            rc,
+            b"echo QUEUED_FIRST\necho QUEUED_SECOND\nsleep .5\nexit\n",
+        );
+        let events = history_events(&stdout);
+        for expected in [
+            "echo INITIAL_HISTORY",
+            "echo QUEUED_FIRST",
+            "echo QUEUED_SECOND",
+        ] {
+            assert!(events.iter().any(|event| matches!(event, terminal::HistoryEvent::Entry { command, .. } if command == expected)), "{expected}: {events:?}");
+        }
+        let mut active = None;
+        for event in events {
+            match event {
+                terminal::HistoryEvent::Begin { batch, .. } => {
+                    assert!(active.replace(batch).is_none(), "interleaved batches");
+                }
+                terminal::HistoryEvent::End { batch, .. } => {
+                    assert_eq!(active.take(), Some(batch));
+                }
+                _ => {}
+            }
+        }
+        assert!(active.is_none());
+    }
+}

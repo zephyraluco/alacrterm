@@ -12,23 +12,31 @@ __alacrterm_history_emit() {
     [ "${#2}" -le 4096 ] || return 0
     case $2 in ''|*[[:cntrl:]]*) return 0 ;; esac
     case $2 in *[![:space:]]*) ;; *) return 0 ;; esac
-    __alacrterm_history_text=$2
-    __alacrterm_history_hex=
-    while [ -n "$__alacrterm_history_text" ]; do
-        __alacrterm_history_char=${__alacrterm_history_text%"${__alacrterm_history_text#?}"}
-        __alacrterm_history_text=${__alacrterm_history_text#?}
-        # printf's quoted character notation converts a literal byte to a number.
-        printf -v __alacrterm_history_byte '%02x' "'$__alacrterm_history_char"
-        __alacrterm_history_hex=$__alacrterm_history_hex$__alacrterm_history_byte
-    done
+    # Encode in the background with POSIX byte tools. A shell loop per byte
+    # makes large histories exceed the receiver's batch timeout.
+    __alacrterm_history_hex=$(printf '%s' "$2" | command -p od -An -v -tx1 | command -p tr -d ' \n')
     printf '\033]633;History;entry;%s;%s;%s;%s\007' "$__alacrterm_history_session" "$__alacrterm_history_batch" "$1" "$__alacrterm_history_hex"
     __alacrterm_history_count=$((__alacrterm_history_count + 1))
 }
 __alacrterm_history_start() {
-    # One worker per shell. Defer newer changes until the next prompt if busy.
+    # Each worker inherits the accepted history at this prompt. Serialize
+    # transmission behind the preceding worker without blocking the prompt.
     __alacrterm_history_batch=$((__alacrterm_history_batch + 1))
     (
         export LC_ALL=C
+        if [ -n "$__alacrterm_history_pid" ]; then
+            __alacrterm_history_wait=0
+            while kill -0 "$__alacrterm_history_pid" 2>/dev/null; do
+                # A closing shell may leave its completed worker as a zombie
+                # briefly. Do not retain a queued worker indefinitely.
+                if [ "$((__alacrterm_history_wait % 50))" -eq 0 ]; then
+                    case $(command -p ps -p "$__alacrterm_history_pid" -o stat= 2>/dev/null) in *Z*) break ;; esac
+                fi
+                [ "$__alacrterm_history_wait" -lt 1500 ] || exit 0
+                __alacrterm_history_wait=$((__alacrterm_history_wait + 1))
+                sleep .02
+            done
+        fi
         __alacrterm_history_count=0
         printf '\033]633;History;begin;%s;%s;%s\007' "$__alacrterm_history_session" "$__alacrterm_history_batch" "$1"
         __alacrterm_history_collect "$2" "$3"

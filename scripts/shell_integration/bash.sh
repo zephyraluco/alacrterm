@@ -129,7 +129,6 @@ __alacrterm_history_collect() {
 }
 __alacrterm_history_sync() {
     [ -n "${BASH_VERSION-}" ] && [ "${ALACRTERM_HISTORY_ENABLED:-1}" != 0 ] || return 0
-    if [ -n "$__alacrterm_history_pid" ] && kill -0 "$__alacrterm_history_pid" 2>/dev/null; then return 0; fi
     __alacrterm_history_row=$(HISTTIMEFORMAT= builtin history 1)
     [ "$__alacrterm_history_row" != "$__alacrterm_history_anchor" ] || [ -z "$__alacrterm_history_last" ] || return 0
     __alacrterm_history_number=${__alacrterm_history_row#"${__alacrterm_history_row%%[![:space:]]*}"}

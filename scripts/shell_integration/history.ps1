@@ -4,7 +4,7 @@ function global:alacrterm_initialize_history {
     $global:AlacrtermHistoryBatch = 0
     $global:AlacrtermHistorySignature = $null
     $global:AlacrtermHistoryWorker = $null
-    $global:AlacrtermHistoryState = @{}
+    $global:AlacrtermHistoryState = [hashtable]::Synchronized(@{})
     [Console]::Write("$([char]27)]633;History;session;$global:AlacrtermHistorySession$([char]7)")
 }
 function global:alacrterm_history_worker {
@@ -128,16 +128,20 @@ function global:alacrterm_history_worker {
 }
 function global:alacrterm_sync_history {
     if ($env:ALACRTERM_HISTORY_ENABLED -eq '0') { return }
-    if ($global:AlacrtermHistoryWorker) {
-        if (!$global:AlacrtermHistoryWorker.Async.IsCompleted) { return }
-        try { [void]$global:AlacrtermHistoryWorker.PowerShell.EndInvoke($global:AlacrtermHistoryWorker.Async) } catch {}
-        $global:AlacrtermHistoryWorker.PowerShell.Dispose()
+    $previous = $global:AlacrtermHistoryWorker
+    if ($previous -and $previous.Async.IsCompleted) {
+        try { [void]$previous.PowerShell.EndInvoke($previous.Async) } catch {}
+        $previous.PowerShell.Dispose()
+        $previous = $null
         $global:AlacrtermHistoryWorker = $null
     }
     try {
-        $path = (Get-PSReadLineOption).HistorySavePath
-        $file = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
-        $memory = @([Microsoft.PowerShell.PSConsoleReadLine]::GetHistoryItems() | Select-Object -Last 1000 | ForEach-Object { $_.CommandLine })
+        $options = Get-PSReadLineOption
+        $path = if ($options.HistorySaveStyle.ToString() -eq 'SaveNothing') { '' } else { $options.HistorySavePath }
+        $file = if ($path) { Get-Item -LiteralPath $path -ErrorAction SilentlyContinue } else { $null }
+        try {
+            $memory = @([Microsoft.PowerShell.PSConsoleReadLine]::GetHistoryItems() | Select-Object -Last 1000 | ForEach-Object { $_.CommandLine })
+        } catch { $memory = @() } # Older PSReadLine can still import the configured file.
         $hash = [Security.Cryptography.SHA256]::Create()
         try { $digest = [Convert]::ToBase64String($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes(($memory -join "`0")))) } finally { $hash.Dispose() }
         $signature = "$path|$($file.Length)|$($file.LastWriteTimeUtc.Ticks)|$digest"
@@ -145,7 +149,15 @@ function global:alacrterm_sync_history {
         $global:AlacrtermHistorySignature = $signature
         $global:AlacrtermHistoryBatch++
         $worker = [PowerShell]::Create()
-        [void]$worker.AddScript(${function:alacrterm_history_worker}.ToString()).AddArgument($global:AlacrtermHistoryState).AddArgument($path).AddArgument([string[]]$memory).AddArgument($global:AlacrtermHistorySession).AddArgument($global:AlacrtermHistoryBatch)
+        $queued = {
+            param($previous, $body, $state, $path, $memory, $session, $batch)
+            if ($previous) {
+                try { [void]$previous.PowerShell.EndInvoke($previous.Async) } catch {}
+                $previous.PowerShell.Dispose()
+            }
+            & ([scriptblock]::Create($body)) $state $path $memory $session $batch
+        }
+        [void]$worker.AddScript($queued.ToString()).AddArgument($previous).AddArgument(${function:alacrterm_history_worker}.ToString()).AddArgument($global:AlacrtermHistoryState).AddArgument($path).AddArgument([string[]]$memory).AddArgument($global:AlacrtermHistorySession).AddArgument($global:AlacrtermHistoryBatch)
         $global:AlacrtermHistoryWorker = @{ PowerShell = $worker; Async = $worker.BeginInvoke() }
     } catch {
         # PSReadLine/history can be unavailable; keep the native prompt working.
