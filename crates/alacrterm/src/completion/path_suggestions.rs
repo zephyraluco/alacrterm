@@ -89,6 +89,23 @@ fn tokens(input: &str, powershell: bool) -> Option<Vec<Token>> {
     Some(result)
 }
 impl PathQuery {
+    pub fn same_location(&self, other: &Self) -> bool {
+        self.directory == other.directory
+            && self.expand_home == other.expand_home
+            && self.directories_only == other.directories_only
+            && self.quote == other.quote
+            && self.powershell == other.powershell
+            && self.quote_syntax() == other.quote_syntax()
+    }
+    fn quote_syntax(&self) -> Vec<char> {
+        self.input
+            .get(self.replacement.clone())
+            .unwrap_or("")
+            .chars()
+            .filter(|ch| matches!(ch, '\'' | '"' | '\\' | '`'))
+            .collect()
+    }
+
     pub fn parse(input: &str, cursor: usize, powershell: bool) -> Option<Self> {
         let before = input.get(..cursor)?;
         let prefix_words = tokens(before, powershell)?;

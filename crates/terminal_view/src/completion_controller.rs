@@ -46,7 +46,11 @@ pub(super) struct CompletionController {
     tracking: crate::prompt_input::InputTracking,
     generation: u64,
     pub popup_visible: bool,
-    suppress_recovery_popup: bool,
+    pub pending: bool,
+    query_after_recovery: bool,
+    last_insert: bool,
+    last_delete: bool,
+    refilter_after_recovery: bool,
 }
 impl CompletionController {
     pub fn new(settings: SuggestionSettings) -> Self {
@@ -56,17 +60,51 @@ impl CompletionController {
             tracking: Default::default(),
             generation: 0,
             popup_visible: false,
-            suppress_recovery_popup: false,
+            pending: false,
+            query_after_recovery: false,
+            last_insert: false,
+            last_delete: false,
+            refilter_after_recovery: false,
         }
     }
-    pub fn cancel(&mut self) {
-        self.popup_visible = false;
+    fn cancel_query(&mut self) {
+        self.pending = false;
         self.task = Task::ready(());
         self.generation = self.generation.wrapping_add(1);
     }
+    pub fn cancel(&mut self) {
+        self.popup_visible = false;
+        self.cancel_query();
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn finish(&mut self, generation: u64) {
+        if generation != self.generation {
+            return;
+        }
+        self.pending = false;
+        if !self.model.has_current_candidates() {
+            self.model.candidates.clear();
+        }
+    }
+    pub fn input(&mut self, text: &str) {
+        self.last_insert = !text.is_empty();
+        self.last_delete = false;
+        self.query_after_recovery = !self.model.is_editing() && self.tracking.has_anchor();
+        self.model.input(text);
+    }
+    pub fn take_recovery_trigger(&mut self) -> bool {
+        std::mem::take(&mut self.query_after_recovery)
+    }
     /// Only a rendered, current menu owns keys. Shift+Tab always passes through.
     pub fn popup_key(&self, key: &str, unmodified: bool, allowed: bool) -> PopupKey {
-        if !allowed || !unmodified || !self.popup_visible || !self.model.has_current_candidates() {
+        if !allowed
+            || !unmodified
+            || !self.popup_visible
+            || !self.model.has_current_candidates()
+            || (self.model.text.is_empty() && matches!(key, "up" | "down"))
+        {
             return PopupKey::Terminal;
         }
         match key {
@@ -78,22 +116,41 @@ impl CompletionController {
         }
     }
     pub fn begin(&mut self, manual: bool) -> bool {
-        self.cancel();
-        self.suppress_recovery_popup = false;
-        if !manual {
-            self.model.candidates.clear();
+        if manual {
+            self.last_insert = true;
+            self.last_delete = false;
         }
-        self.model.is_editing()
+        self.cancel_query();
+        if !self.model.is_editing() {
+            self.pending = self.query_after_recovery && !self.model.candidates.is_empty();
+            return false;
+        }
+        if !manual && !self.model.settings.automatic {
+            self.popup_visible = false;
+            return false;
+        }
+        self.pending = true;
+        self.model.refresh_in_place(manual, true);
+        true
     }
     pub fn configure(&mut self, settings: SuggestionSettings) {
+        self.last_insert = false;
+        self.last_delete = false;
+        self.refilter_after_recovery = false;
+        self.query_after_recovery = false;
         self.cancel();
         self.model.settings = settings;
+        self.model.clear_cache();
         self.model.dismiss();
         if !settings.history {
             self.model.clear_history();
         }
     }
     pub fn reset_session(&mut self) {
+        self.last_insert = false;
+        self.last_delete = false;
+        self.refilter_after_recovery = false;
+        self.query_after_recovery = false;
         self.cancel();
         self.model.invalidate();
         self.model.add_command("");
@@ -114,6 +171,10 @@ impl CompletionController {
     }
     pub fn on_prompt(&mut self, event: terminal::PromptEvent, generation: u64) -> bool {
         if event != terminal::PromptEvent::Input {
+            self.last_insert = false;
+            self.last_delete = false;
+            self.refilter_after_recovery = false;
+            self.query_after_recovery = false;
             self.cancel();
             self.tracking.reset();
         }
@@ -130,15 +191,44 @@ impl CompletionController {
     /// Right arrow can accept a shell-native autosuggestion, including at EOL.
     /// Re-read the echoed line rather than assuming it only moves the cursor.
     pub fn edit_key(&mut self, key: &str, control: bool) -> bool {
+        self.last_insert = false;
+        self.last_delete = (!control && matches!(key, "backspace" | "delete"))
+            || (control && matches!(key, "w" | "u" | "k"));
+        let visible = self.popup_visible;
+        self.query_after_recovery = false;
+        self.cancel_query();
         self.model.edit_key(key, control);
+        if visible
+            && ((!control && matches!(key, "backspace" | "delete"))
+                || (control && matches!(key, "w" | "u" | "k")))
+        {
+            if self.model.is_editing() {
+                self.model.refilter_cached();
+            } else {
+                self.pending = true;
+                self.refilter_after_recovery = true;
+            }
+        } else {
+            self.popup_visible = false;
+            self.model.dismiss();
+        }
         key == "right" || !self.model.is_editing()
     }
     pub fn request_recovery(&mut self, generation: u64) -> bool {
         if !self.tracking.request(generation, std::time::Instant::now()) {
             return false;
         }
-        self.cancel();
-        self.model.invalidate();
+        let keep_display = self.popup_visible && (self.last_insert || self.last_delete);
+        self.cancel_query();
+        self.query_after_recovery = self.last_insert;
+        self.refilter_after_recovery = keep_display && self.last_delete;
+        if keep_display {
+            self.model.suspend_for_recovery();
+            self.pending = true;
+        } else {
+            self.popup_visible = false;
+            self.model.invalidate();
+        }
         true
     }
     pub fn recovery_due(&self) -> bool {
@@ -152,24 +242,38 @@ impl CompletionController {
             return false;
         };
         self.model.synchronize(text, cursor);
-        if self.suppress_recovery_popup {
+        self.pending = false;
+        if std::mem::take(&mut self.refilter_after_recovery) {
+            self.model.refilter_cached();
+        } else if !self.query_after_recovery {
             self.model.dismiss();
         }
         true
     }
     pub fn submit(&mut self) {
+        self.last_insert = false;
+        self.last_delete = false;
+        self.refilter_after_recovery = false;
+        self.query_after_recovery = false;
         self.cancel();
         self.model.submit();
         self.tracking.reset();
     }
     pub fn invalidate_input(&mut self) {
+        self.last_insert = false;
+        self.last_delete = false;
+        self.refilter_after_recovery = false;
+        self.query_after_recovery = false;
         self.cancel();
         self.model.invalidate();
         self.tracking.reset();
     }
     pub fn dismiss(&mut self) {
+        self.last_insert = false;
+        self.last_delete = false;
+        self.refilter_after_recovery = false;
+        self.query_after_recovery = false;
         self.cancel();
-        self.suppress_recovery_popup = true;
         self.model.dismiss();
     }
     pub fn accept(&mut self, content: Option<&terminal::Content>) -> Acceptance {
@@ -251,7 +355,8 @@ impl CompletionController {
         {
             return false;
         }
-        self.model.merge_candidates(response.data);
+        self.model.replace_deferred(response.data);
+        self.pending = false;
         true
     }
 }
@@ -606,5 +711,153 @@ mod tests {
         let old = controller.request(false, Backend::Local).unwrap();
         controller.reset_session();
         assert!(!controller.apply(result(old)));
+    }
+    #[test]
+    fn typing_keeps_popup_visible_and_rebases_cached_replacements() {
+        let mut controller = visible_controller();
+        let old = controller.request(false, Backend::Local).unwrap();
+        controller.input("m");
+        assert!(controller.begin(false));
+        assert!(controller.popup_visible && controller.pending);
+        assert!(controller.model.has_current_candidates());
+        assert_eq!(controller.model.candidates[0].replacement, 4..7);
+        assert!(!controller.apply(result(old)));
+        controller.edit_key("backspace", false);
+        assert!(controller.popup_visible && !controller.pending);
+        assert_eq!(controller.model.text, "cat sa");
+        assert_eq!(controller.model.candidates[0].replacement, 4..6);
+    }
+
+    #[test]
+    fn pending_display_is_not_accepted_and_deletion_can_restore_cached_results() {
+        let mut controller = visible_controller();
+        controller.input("z");
+        controller.begin(false);
+        assert!(controller.pending && controller.popup_visible);
+        assert!(!controller.model.has_current_candidates());
+        assert_eq!(
+            controller.popup_key("enter", true, true),
+            PopupKey::Terminal
+        );
+        controller.edit_key("backspace", false);
+        assert!(controller.model.has_current_candidates());
+        assert_eq!(controller.model.candidates[0].label, "sample.txt");
+    }
+
+    #[test]
+    fn deletion_never_queries_providers_and_never_opens_a_closed_menu() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Counting(Arc<AtomicUsize>);
+        impl crate::completion_service::CompletionService for Counting {
+            fn immediate(&self, _: &crate::completion_service::Context<'_>) -> Vec<Candidate> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+            fn deferred(
+                &self,
+                _: &crate::completion_service::Context<'_>,
+                _: Backend,
+                _: bool,
+            ) -> Option<Box<dyn CompletionJob>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+        let mut controller = visible_controller();
+        let count = Arc::new(AtomicUsize::new(0));
+        controller.model.service = Some(Arc::new(Counting(count.clone())));
+        controller.edit_key("backspace", false);
+        assert_eq!(controller.model.text, "cat s");
+        assert!(controller.model.has_current_candidates());
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        controller.popup_visible = false;
+        controller.edit_key("backspace", false);
+        assert!(controller.model.candidates.is_empty());
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn empty_history_keys_and_recovered_history_do_not_request_suggestions() {
+        let mut controller = CompletionController::new(Default::default());
+        controller.model.phase(PromptEvent::Prompt);
+        controller.model.phase(PromptEvent::Input);
+        assert_eq!(controller.popup_key("up", true, true), PopupKey::Terminal);
+        assert_eq!(controller.popup_key("down", true, true), PopupKey::Terminal);
+        controller.model.trigger();
+        controller.model.merge_candidates(vec![Candidate::new(
+            "ls".into(),
+            0,
+            crate::completion::Kind::Command,
+            crate::completion::Source::Shell,
+            1,
+        )]);
+        controller.popup_visible = true;
+        assert_eq!(controller.popup_key("up", true, true), PopupKey::Terminal);
+        assert_eq!(controller.popup_key("down", true, true), PopupKey::Terminal);
+        controller.edit_key("up", false);
+        assert!(!controller.pending && !controller.popup_visible);
+        controller.model.synchronize("echo history".into(), 12);
+        assert!(!controller.take_recovery_trigger());
+        assert!(controller.model.candidates.is_empty());
+        controller.input("x");
+        assert!(controller.begin(false));
+        assert!(controller.pending);
+    }
+
+    #[test]
+    fn automatic_setting_is_respected_but_manual_requests_remain_available() {
+        let mut controller = controller();
+        controller.model.settings.automatic = false;
+        assert!(!controller.begin(false));
+        assert!(!controller.pending);
+        assert!(controller.begin(true));
+    }
+    #[test]
+    fn finishing_an_old_query_cannot_hide_a_new_pending_popup() {
+        let mut controller = visible_controller();
+        let old = controller.generation();
+        controller.input("z");
+        controller.begin(false);
+        controller.finish(old);
+        assert!(controller.pending && !controller.model.candidates.is_empty());
+        controller.finish(controller.generation());
+        assert!(!controller.pending && controller.model.candidates.is_empty());
+    }
+    #[test]
+    fn empty_async_results_remove_cached_display_and_escape_cancels_recovery_intent() {
+        let mut controller = visible_controller();
+        controller.input("m");
+        controller.begin(false);
+        assert!(controller.model.has_current_candidates());
+        let request = controller.request(false, Backend::Local).unwrap();
+        assert!(controller.apply(Response {
+            identity: request.identity,
+            data: Vec::new()
+        }));
+        assert!(!controller.pending && controller.model.candidates.is_empty());
+        controller.query_after_recovery = true;
+        controller.dismiss();
+        assert!(!controller.take_recovery_trigger());
+    }
+    #[test]
+    fn shell_redraw_keeps_the_session_and_respects_the_last_edit_origin() {
+        let mut controller = visible_controller();
+        controller.tracking.capture(&terminal::Content::default());
+        controller.input("m");
+        controller.begin(false);
+        assert!(controller.on_prompt(PromptEvent::Input, 2));
+        assert!(controller.pending && controller.popup_visible);
+        assert!(!controller.model.has_current_candidates());
+        assert!(controller.query_after_recovery);
+        controller.model.synchronize("cat sam".into(), 7);
+        controller.model.refilter_cached();
+        controller.popup_visible = true;
+        controller.edit_key("backspace", false);
+        controller.request_recovery(3);
+        assert!(!controller.query_after_recovery);
+        assert!(controller.refilter_after_recovery);
     }
 }

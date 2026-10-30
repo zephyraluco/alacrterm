@@ -19,6 +19,16 @@ enum MenuState {
     Ready,
     Dismissed,
 }
+struct CachedInput {
+    text: String,
+    cursor: usize,
+    cwd: Option<String>,
+    powershell: Option<bool>,
+}
+struct CachedCandidate {
+    item: Candidate,
+    input: std::sync::Arc<CachedInput>,
+}
 #[derive(Default)]
 pub struct Suggestions {
     pub service: Option<std::sync::Arc<dyn crate::completion_service::CompletionService>>,
@@ -34,6 +44,7 @@ pub struct Suggestions {
     pub powershell: Option<bool>,
     pub candidates: Vec<Candidate>,
     pub selected: usize,
+    cached: Vec<CachedCandidate>,
 }
 impl Suggestions {
     pub fn new(settings: crate::SuggestionSettings) -> Self {
@@ -61,11 +72,29 @@ impl Suggestions {
     pub fn clear_history(&mut self) {
         self.history.clear();
     }
+    pub fn clear_cache(&mut self) {
+        self.cached.clear();
+        self.candidates.clear();
+    }
     pub fn context(&mut self, key: &str, value: &str) {
-        match key {
-            "cwd" => self.cwd = (!value.is_empty()).then(|| value.into()),
-            "shell" => self.powershell = Some(value == "powershell"),
-            _ => {}
+        let changed = match key {
+            "cwd" => {
+                let next = (!value.is_empty()).then(|| value.into());
+                let changed = self.cwd != next;
+                self.cwd = next;
+                changed
+            }
+            "shell" => {
+                let next = Some(value == "powershell");
+                let changed = self.powershell != next;
+                self.powershell = next;
+                changed
+            }
+            _ => false,
+        };
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+            self.clear_cache();
         }
     }
     pub fn can_query(&self) -> bool {
@@ -76,7 +105,142 @@ impl Suggestions {
             && self.candidate_revision == self.revision
             && self.selected < self.candidates.len()
     }
+    fn remember(&mut self, items: &[Candidate]) {
+        if items.is_empty() {
+            return;
+        }
+        let input = std::sync::Arc::new(CachedInput {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            cwd: self.cwd.clone(),
+            powershell: self.powershell,
+        });
+        let mut cached: Vec<_> = items
+            .iter()
+            .cloned()
+            .map(|item| CachedCandidate {
+                item,
+                input: input.clone(),
+            })
+            .collect();
+        cached.append(&mut self.cached);
+        let mut seen = std::collections::HashSet::new();
+        cached.retain(|entry| {
+            seen.insert((
+                entry.item.insert_text.clone(),
+                entry.item.replacement.start,
+                entry.item.source as u8,
+            ))
+        });
+        cached.truncate(4096);
+        self.cached = cached;
+    }
+
+    fn cached_matches(&self) -> Vec<Candidate> {
+        let Some(service) = &self.service else {
+            return Vec::new();
+        };
+        let current = self.provider_context();
+        self.cached
+            .iter()
+            .filter_map(|entry| {
+                let previous = crate::completion_service::Context {
+                    text: &entry.input.text,
+                    cursor: entry.input.cursor,
+                    cwd: entry.input.cwd.as_deref().unwrap_or(""),
+                    powershell: entry.input.powershell,
+                    ..self.provider_context()
+                };
+                service.reuse_candidate(&previous, &current, &entry.item)
+            })
+            .collect()
+    }
+
+    fn replace_candidates(&mut self, mut items: Vec<Candidate>) {
+        let selected = self
+            .candidates
+            .get(self.selected)
+            .map(|item| item.insert_text.clone());
+        rank(&mut items);
+        self.selected = selected
+            .and_then(|text| items.iter().position(|item| item.insert_text == text))
+            .unwrap_or(0);
+        self.candidates = items;
+        self.candidate_revision = self.revision;
+    }
+
+    /// Deletion refilters only the session cache, never calls providers.
+    pub fn refilter_cached(&mut self) {
+        if self.text.is_empty() || !self.can_query() {
+            self.dismiss();
+            return;
+        }
+        self.replace_candidates(self.cached_matches());
+    }
+
+    pub fn refresh_in_place(&mut self, manual: bool, pending: bool) {
+        if !self.can_query() || (!manual && (!self.settings.automatic || self.text.is_empty())) {
+            self.candidates.clear();
+            return;
+        }
+        let immediate = self
+            .service
+            .as_ref()
+            .map(|service| service.immediate(&self.provider_context()))
+            .unwrap_or_default();
+        let mut items = self.cached_matches();
+        // Fresh provider scores/ranges win over reused items with the same insertion.
+        let fresh: std::collections::HashSet<_> = immediate
+            .iter()
+            .map(|item| {
+                (
+                    item.insert_text.clone(),
+                    item.replacement.start,
+                    item.replacement.end,
+                )
+            })
+            .collect();
+        items.retain(|old| {
+            !fresh.contains(&(
+                old.insert_text.clone(),
+                old.replacement.start,
+                old.replacement.end,
+            ))
+        });
+        items.extend(immediate.clone());
+        self.remember(&immediate);
+        if !items.is_empty() || !pending {
+            self.replace_candidates(items);
+        }
+        // When empty and pending, previous display items remain stale and cannot be accepted.
+    }
+
+    pub fn replace_deferred(&mut self, candidates: Vec<Candidate>) {
+        let selected = self
+            .candidates
+            .get(self.selected)
+            .map(|item| item.insert_text.clone());
+        self.candidates.retain(|item| {
+            !matches!(
+                item.source,
+                crate::completion::Source::Filesystem | crate::completion::Source::Project
+            )
+        });
+        self.merge_candidates(candidates);
+        if let Some(index) = selected.and_then(|text| {
+            self.candidates
+                .iter()
+                .position(|item| item.insert_text == text)
+        }) {
+            self.selected = index;
+        }
+    }
     pub fn merge_candidates(&mut self, candidates: Vec<Candidate>) {
+        self.remember(&candidates);
+        if self.candidate_revision != self.revision {
+            self.candidates.clear();
+        }
+        self.candidate_revision = self.revision;
         let selected = self
             .candidates
             .get(self.selected)
@@ -104,6 +268,9 @@ impl Suggestions {
         }
     }
     pub fn phase(&mut self, event: PromptEvent) {
+        if event != PromptEvent::Input {
+            self.cached.clear();
+        }
         self.revision = self.revision.wrapping_add(1);
         if event == PromptEvent::Input && self.is_editing() && self.text.is_empty() {
             return;
@@ -132,8 +299,13 @@ impl Suggestions {
         self.candidates.clear();
     }
     pub fn invalidate(&mut self) {
+        self.cached.clear();
         self.state = InputState::Inactive;
         self.candidates.clear();
+    }
+    pub fn suspend_for_recovery(&mut self) {
+        self.state = InputState::Inactive;
+        self.revision = self.revision.wrapping_add(1);
     }
     pub fn synchronize(&mut self, text: String, cursor: usize) {
         if text.len() > 4096 || text.chars().any(char::is_control) || !text.is_char_boundary(cursor)
@@ -190,6 +362,22 @@ impl Suggestions {
             }
             ("home", false) | ("a", true) => self.cursor = 0,
             ("end", false) | ("e", true) => self.cursor = self.text.len(),
+            ("u", true) if self.powershell != Some(true) => {
+                self.text.drain(..self.cursor);
+                self.cursor = 0;
+            }
+            ("k", true) if self.powershell != Some(true) => {
+                self.text.truncate(self.cursor);
+            }
+            ("w", true) if self.powershell != Some(true) => {
+                let prefix = &self.text[..self.cursor];
+                let end = prefix.trim_end_matches(char::is_whitespace).len();
+                let start = prefix[..end]
+                    .rfind(char::is_whitespace)
+                    .map_or(0, |at| at + prefix[at..].chars().next().unwrap().len_utf8());
+                self.text.drain(start..self.cursor);
+                self.cursor = start;
+            }
             ("backspace", false) if self.cursor > 0 => {
                 let start = self.text[..self.cursor]
                     .char_indices()
@@ -220,6 +408,7 @@ impl Suggestions {
         }
         if let Some(service) = &self.service {
             self.candidates = service.immediate(&self.provider_context());
+            self.remember(&self.candidates.clone());
         }
     }
     pub fn provider_context(&self) -> crate::completion_service::Context<'_> {

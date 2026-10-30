@@ -423,7 +423,7 @@ impl TerminalView {
             }) {
                 self.completion.invalidate_input();
             }
-            self.completion.model.input(text);
+            self.completion.input(text);
             self.schedule_suggestions(false, cx);
             if let Some(terminal) = &self.terminal {
                 terminal.update(cx, |term, _| {
@@ -534,6 +534,12 @@ impl TerminalView {
         if !self.completion.begin(manual) {
             return;
         }
+        self.suggestion_scroll.scroll_to_item(
+            self.completion.model.selected,
+            gpui::ScrollStrategy::Nearest,
+        );
+        cx.notify();
+        let generation = self.completion.generation();
         self.completion.task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(if manual {
@@ -543,12 +549,12 @@ impl TerminalView {
                 })
                 .await;
             let Ok(request) = this.update(cx, |this, cx| {
-                if !this.focused || this.ime_state.is_some() {
+                if !this.focused
+                    || this.ime_state.is_some()
+                    || this.completion.generation() != generation
+                {
                     return None;
                 }
-                this.completion.model.refresh(manual);
-                this.suggestion_scroll
-                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
                 let backend = if this.remote {
                     completion_service::Backend::Remote(this.remote_fs(cx)?)
@@ -560,13 +566,25 @@ impl TerminalView {
                 return;
             };
             let Some(request) = request else {
+                let _ = this.update(cx, |this, cx| {
+                    this.completion.finish(generation);
+                    cx.notify();
+                });
                 return;
             };
             let Some(response) = request.resolve(cx.background_executor().clone()).await else {
+                let _ = this.update(cx, |this, cx| {
+                    this.completion.finish(generation);
+                    cx.notify();
+                });
                 return;
             };
             let _ = this.update(cx, |this, cx| {
                 if this.focused && this.ime_state.is_none() && this.completion.apply(response) {
+                    this.suggestion_scroll.scroll_to_item(
+                        this.completion.model.selected,
+                        gpui::ScrollStrategy::Nearest,
+                    );
                     cx.notify();
                 }
             });
@@ -610,6 +628,7 @@ impl TerminalView {
         if self
             .completion
             .recover_input(terminal.last_content(), terminal.content_generation())
+            && self.completion.take_recovery_trigger()
         {
             self.schedule_suggestions(false, cx);
         }
@@ -631,7 +650,7 @@ impl TerminalView {
         };
         match acceptance {
             completion_controller::Acceptance::Submit => return false,
-            completion_controller::Acceptance::Refresh => self.schedule_suggestions(false, cx),
+            completion_controller::Acceptance::Refresh => self.schedule_suggestions(true, cx),
             completion_controller::Acceptance::Insert { bytes, retrigger } => {
                 if let Some(terminal) = &self.terminal {
                     terminal.update(cx, |terminal, _| terminal.input(bytes.into_bytes()));
@@ -682,7 +701,7 @@ impl TerminalView {
         }
         let control_passthrough =
             control || e.keystroke.modifiers.alt || e.keystroke.modifiers.platform;
-        if control_passthrough {
+        if control_passthrough && !(control && matches!(key, "w" | "u" | "k")) {
             self.completion.dismiss();
             cx.notify();
         }
@@ -722,7 +741,13 @@ impl TerminalView {
         } else if key == "enter" && plain {
             self.completion.submit();
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
-            let refresh_native = self.completion.edit_key(key, control);
+            let refresh_native = self.completion.edit_key(key, control)
+                || e.keystroke.modifiers.alt
+                || e.keystroke.modifiers.platform;
+            self.suggestion_scroll.scroll_to_item(
+                self.completion.model.selected,
+                gpui::ScrollStrategy::Nearest,
+            );
             if refresh_native
                 && self.completion.has_input_anchor()
                 && allowed
@@ -730,9 +755,7 @@ impl TerminalView {
             {
                 self.request_input_recovery(cx);
             }
-            if !control_passthrough {
-                self.schedule_suggestions(false, cx);
-            }
+            cx.notify();
         }
         if let Some(terminal) = &self.terminal {
             // ⚠️ 复制粘贴 / 滚动 / vi 模式不在这里：那些键由 keymap 绑成应用动作

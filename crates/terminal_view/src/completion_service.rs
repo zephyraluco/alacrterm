@@ -39,5 +39,53 @@ pub trait CompletionService: Send + Sync {
             .unwrap_or("")
             .into()
     }
+    /// Reuse cached results only when the same replacement context still applies.
+    fn reuse_candidate(
+        &self,
+        previous: &Context<'_>,
+        current: &Context<'_>,
+        candidate: &Candidate,
+    ) -> Option<Candidate> {
+        let item = rebase_candidate(previous, current, candidate)?;
+        let query = current.text.get(item.replacement.start..current.cursor)?;
+        let matches = if current.powershell == Some(true) {
+            item.insert_text
+                .to_lowercase()
+                .starts_with(&query.to_lowercase())
+        } else {
+            item.insert_text.starts_with(query)
+        };
+        matches.then_some(item)
+    }
     fn reset(&self) {}
+}
+
+/// A candidate can only move across an edit inside its original replacement range.
+pub fn rebase_candidate(
+    previous: &Context<'_>,
+    current: &Context<'_>,
+    candidate: &Candidate,
+) -> Option<Candidate> {
+    if previous.cwd != current.cwd || previous.powershell != current.powershell {
+        return None;
+    }
+    let range = &candidate.replacement;
+    if !(range.start..=range.end).contains(&previous.cursor) {
+        return None;
+    }
+    let prefix = previous.text.get(..range.start)?;
+    let suffix = previous.text.get(range.end..)?;
+    if !current.text.starts_with(prefix) || !current.text.ends_with(suffix) {
+        return None;
+    }
+    let end = current.text.len().checked_sub(suffix.len())?;
+    if range.start > end
+        || !(range.start..=end).contains(&current.cursor)
+        || !current.text.is_char_boundary(end)
+    {
+        return None;
+    }
+    let mut item = candidate.clone();
+    item.replacement = range.start..end;
+    Some(item)
 }
