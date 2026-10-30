@@ -118,7 +118,7 @@ SSH 认证支持 agent、密钥与配置的密码。默认主机密钥策略对�
 
 ### 资源
 
-SVG 图标和默认按键通过 `rust-embed` 提供；Shell 脚本通过 `include_str!` 嵌入。`assets/app-icon.ico` 用于 Windows 可执行文件及安装器；预生成的 `assets/app-icon-128.png`、`app-icon-256.png` 和 `app-icon.icns` 分别用于 Linux 与 macOS，打包直接复制。替换 ICO 后手动运行 `python scripts/packaging/generate_icons.py` 更新并提交派生文件；Windows 安装目录无需另放 ICO。
+SVG 图标和默认按键通过 `rust-embed` 提供；Shell 脚本通过 `include_str!` 嵌入。`assets/app-icon.svg` 为图标单一真源，派生的 `app-icon.ico` 用于 Windows 可执行文件及安装器；预生成的 `assets/app-icon-128.png`、`app-icon-256.png` 和 `app-icon.icns` 分别用于 Linux 与 macOS，打包直接复制。修改 SVG 后安装 `scripts/packaging/requirements-icons.txt` 中的手动生成依赖，运行 `python scripts/packaging/generate_icons.py` 更新并提交派生文件；Windows 安装目录无需另放 ICO。
 
 全局主题和终端配色位于 `themes/global`、`themes/terminal`。外部资源覆盖内置默认；`util::resource_registry` 管理资源与目录监听，应用的 `resource_registry.rs` 提供 GPUI 适配。无效修改保留最后有效资源，删除恢复默认；后台解析与去抖后回到 UI 应用结果，旧代次通知被丢弃。偏好和资源是两类数据，资源热更新不反向保存用户偏好。
 
