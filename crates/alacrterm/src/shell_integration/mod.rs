@@ -65,6 +65,9 @@ mod tests;
 mod script_tests;
 
 #[cfg(test)]
+mod powershell_tests;
+
+#[cfg(test)]
 mod resource_tests {
     use super::*;
     #[test]

@@ -48,7 +48,10 @@ pub(crate) fn prepare(
             include_str!("../../../../scripts/shell_integration/history.sh")
         )
     } else {
-        contents.to_owned()
+        format!(
+            "{}\n{contents}",
+            include_str!("../../../../scripts/shell_integration/history.ps1")
+        )
     };
     std::fs::write(&script, contents.replace("\r\n", "\n"))?;
     env.insert(

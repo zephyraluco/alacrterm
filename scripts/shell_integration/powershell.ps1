@@ -9,6 +9,7 @@ function global:prompt {
     if ($signature -ne $global:AlacrtermInventorySignature -or ([DateTime]::UtcNow - $global:AlacrtermLastRefresh).TotalSeconds -ge 30) {
         alacrterm_refresh_completions
     }
+    alacrterm_sync_history
     $alacrtermCwd = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath
     if ($alacrtermCwd -match '[\x00-\x1f]') { $alacrtermCwd = '' }
     [Console]::Write("$([char]27)]633;AlacrtermCwd;$alacrtermCwd$([char]7)")
@@ -34,5 +35,6 @@ function global:alacrterm_refresh_completions {
     $global:AlacrtermInventorySignature = "$env:PATH|$((Get-ChildItem Function:).Name -join ',')|$((Get-Alias).Name -join ',')"
     $global:AlacrtermLastRefresh = [DateTime]::UtcNow
 }
+alacrterm_initialize_history
 alacrterm_refresh_completions
 [Console]::Write("$([char]27)]633;AlacrtermShell;powershell$([char]7)")
