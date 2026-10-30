@@ -28,8 +28,16 @@ fn installation(version: &str, scripts: ShellIntegration, shells_file: &str) -> 
             "../../../../scripts/shell_integration/install.sh"
         ))),
         quote(version),
-        quote(&lf(scripts.bash)),
-        quote(&lf(scripts.zsh)),
+        quote(&lf(&format!(
+            "{}\n{}",
+            include_str!("../../../../scripts/shell_integration/history.sh"),
+            scripts.bash
+        ))),
+        quote(&lf(&format!(
+            "{}\n{}",
+            include_str!("../../../../scripts/shell_integration/history.sh"),
+            scripts.zsh
+        ))),
         quote(&lf(include_str!(
             "../../../../scripts/shell_integration/loader.sh"
         ))),
@@ -37,7 +45,9 @@ fn installation(version: &str, scripts: ShellIntegration, shells_file: &str) -> 
     )
 }
 
-pub(super) struct RemoteIntegration;
+pub(super) struct RemoteIntegration {
+    pub history_enabled: bool,
+}
 impl SessionSetup for RemoteIntegration {
     fn prepare<'a>(
         &'a self,
@@ -46,7 +56,18 @@ impl SessionSetup for RemoteIntegration {
         Box::pin(async move {
             let mut activated = None;
             for variable in ["ALACRTERM_REMOTE_INTEGRATION", "LC_ALACRTERM_INTEGRATION"] {
-                match session.set_env(variable, "1", Duration::from_secs(2)).await {
+                match session
+                    .set_env(
+                        variable,
+                        if self.history_enabled {
+                            "1"
+                        } else {
+                            "1-no-history"
+                        },
+                        Duration::from_secs(2),
+                    )
+                    .await
+                {
                     Ok(true) => {
                         activated = Some(variable);
                         break;
@@ -192,7 +213,10 @@ mod tests {
             assert_eq!(std::fs::read(&rc).unwrap(), before);
             assert_eq!(
                 std::fs::read_to_string(dir.join("bash.sh")).unwrap(),
-                "# updated\n"
+                format!(
+                    "{}\n# updated\n",
+                    include_str!("../../../../scripts/shell_integration/history.sh")
+                )
             );
             assert_eq!(
                 std::fs::read_to_string(dir.join("version")).unwrap(),
@@ -210,7 +234,10 @@ mod tests {
             );
             assert_eq!(
                 std::fs::read_to_string(dir.join("bash.sh")).unwrap(),
-                "# updated\n"
+                format!(
+                    "{}\n# updated\n",
+                    include_str!("../../../../scripts/shell_integration/history.sh")
+                )
             );
         }
         #[test]

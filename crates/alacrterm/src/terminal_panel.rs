@@ -175,8 +175,7 @@ impl AppRoot {
         let handler = target
             .is_ssh()
             .then(|| host_key::host_key_prompt_handler(root));
-        let options =
-            crate::shell_integration::launch_options(settings.suggestions.remote_integration);
+        let options = crate::shell_integration::launch_options(settings.suggestions);
         let view = cx.new(|cx| {
             let mut view = TerminalView::new(
                 working_directory,
@@ -540,8 +539,7 @@ impl TabPane {
 
     /// 把渲染参数推给本页所有格子。
     pub(crate) fn set_render_settings(&mut self, settings: Arc<RenderSettings>, cx: &mut App) {
-        let options =
-            crate::shell_integration::launch_options(settings.suggestions.remote_integration);
+        let options = crate::shell_integration::launch_options(settings.suggestions);
         for view in &self.panes {
             view.update(cx, |view, cx| {
                 view.set_launch_options(options.clone(), cx);

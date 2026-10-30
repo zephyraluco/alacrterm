@@ -196,3 +196,123 @@ fn posix_shell_parses_and_reports_prompt_context_without_fake_execution_events()
         assert!(!text.contains("\x1b]633;C\x07"));
     }
 }
+
+fn history_events(bytes: &[u8]) -> Vec<terminal::HistoryEvent> {
+    bytes
+        .split(|byte| *byte == 7)
+        .filter_map(|part| {
+            let start = part.windows(2).rposition(|bytes| bytes == b"\x1b]")?;
+            match super::protocol::decode(&part[start + 2..])? {
+                terminal::ShellMetadata::History(event) => Some(event),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn bash_imports_real_history_and_syncs_only_accepted_single_line_entries() {
+    use terminal::HistoryEvent;
+    for program in bash_programs() {
+        let (stdout, stderr) = run_bash(&program,
+            "HISTCONTROL=ignorespace\nHISTIGNORE='*IGNORED_BY_POLICY*'\nhistory -c\nhistory -s 'echo imported-old'\nhistory -s $'echo multiline-first\\necho multiline-second'\n",
+            b"sleep .15\n echo PRIVATE_IGNORED_SPACE\necho IGNORED_BY_POLICY\necho incremental-new\nsleep .15\nhistory -c\nsleep .15\nexit\n");
+        let events = history_events(&stdout);
+        let commands: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                HistoryEvent::Entry { command, .. } => Some(command.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            commands.contains(&"echo imported-old"),
+            "{events:?}\n{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(commands.contains(&"echo incremental-new"), "{events:?}");
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.contains("PRIVATE_IGNORED_SPACE")
+                    || command.contains("IGNORED_BY_POLICY")
+                    || command.contains("multiline-"))
+        );
+        assert!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HistoryEvent::Begin { reset: true, .. }))
+                .count()
+                >= 2,
+            "history -c must reset cache: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HistoryEvent::Begin { reset: false, .. }))
+        );
+    }
+}
+
+#[test]
+fn disabling_history_does_not_read_or_transmit_commands() {
+    for program in bash_programs() {
+        let (stdout, _) = run_bash(
+            &program,
+            "ALACRTERM_HISTORY_ENABLED=0\nhistory -s 'echo private-old'\n",
+            b"echo private-new\nsleep .1\nexit\n",
+        );
+        assert!(!history_events(&stdout).iter().any(|event| matches!(
+            event,
+            terminal::HistoryEvent::Entry { .. } | terminal::HistoryEvent::Begin { .. }
+        )));
+    }
+}
+
+#[test]
+fn zsh_imports_loaded_history_and_literal_utf8_without_multiline_fragments() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(".zshrc"),
+        "HISTSIZE=2000\nprint -s 'echo imported-zsh-中文'\nprint -s $'echo multiline-first\\necho multiline-second'\n").unwrap();
+    let mut env = HashMap::from([("HOME".into(), home.path().to_string_lossy().into_owned())]);
+    let (args, _files) = super::local::prepare("zsh", &[], &mut env)
+        .unwrap()
+        .unwrap();
+    let mut child = Command::new("zsh")
+        .args(args)
+        .envs(env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"sleep .15\necho incremental-zsh\nsleep .15\nexit\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let events = history_events(&output.stdout);
+    let commands: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            terminal::HistoryEvent::Entry { command, .. } => Some(command.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        commands.contains(&"echo imported-zsh-中文"),
+        "{events:?}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(commands.contains(&"echo incremental-zsh"));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.contains("multiline-"))
+    );
+}

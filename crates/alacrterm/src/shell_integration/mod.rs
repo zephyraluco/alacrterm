@@ -6,7 +6,7 @@ use std::sync::Arc;
 use terminal::{LaunchOptions, LocalSessionSetup, PreparedShell};
 
 /// Bump when remote scripts or startup entry semantics change.
-const VERSION: &str = "1.0.2";
+const VERSION: &str = "1.1.0";
 
 #[derive(Clone, Copy)]
 struct Scripts {
@@ -20,7 +20,9 @@ fn scripts() -> Scripts {
     }
 }
 
-struct LocalIntegration;
+struct LocalIntegration {
+    history_enabled: bool,
+}
 impl LocalSessionSetup for LocalIntegration {
     fn prepare(
         &self,
@@ -28,6 +30,10 @@ impl LocalSessionSetup for LocalIntegration {
         args: &[String],
         env: &mut std::collections::HashMap<String, String>,
     ) -> anyhow::Result<Option<PreparedShell>> {
+        env.insert(
+            "ALACRTERM_HISTORY_ENABLED".into(),
+            if self.history_enabled { "1" } else { "0" }.into(),
+        );
         Ok(
             local::prepare(program, args, env)?.map(|(args, files)| PreparedShell {
                 args,
@@ -37,14 +43,17 @@ impl LocalSessionSetup for LocalIntegration {
     }
 }
 
-pub(crate) fn launch_options(remote_enabled: bool) -> LaunchOptions {
+pub(crate) fn launch_options(settings: settings::SuggestionSettings) -> LaunchOptions {
     let enabled = std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
         != Some(std::ffi::OsStr::new("0"));
+    let history_enabled = settings.enabled && settings.history;
     LaunchOptions {
         ssh_x11: Some(Arc::new(crate::x11::WayxTarget)),
-        local_setup: enabled.then(|| Arc::new(LocalIntegration) as Arc<dyn LocalSessionSetup>),
-        ssh_setup: (enabled && remote_enabled)
-            .then(|| Arc::new(remote::RemoteIntegration) as Arc<dyn ssh::SessionSetup>),
+        local_setup: enabled
+            .then(|| Arc::new(LocalIntegration { history_enabled }) as Arc<dyn LocalSessionSetup>),
+        ssh_setup: (enabled && settings.remote_integration).then(|| {
+            Arc::new(remote::RemoteIntegration { history_enabled }) as Arc<dyn ssh::SessionSetup>
+        }),
         osc_decoder: Some(protocol::decode),
     }
 }
@@ -61,10 +70,12 @@ mod resource_tests {
     #[test]
     fn local_startup_resources_live_until_the_host_lease_is_dropped() {
         let mut env = std::collections::HashMap::new();
-        let prepared = LocalIntegration
-            .prepare("bash", &[], &mut env)
-            .unwrap()
-            .unwrap();
+        let prepared = LocalIntegration {
+            history_enabled: true,
+        }
+        .prepare("bash", &[], &mut env)
+        .unwrap()
+        .unwrap();
         let script = std::path::PathBuf::from(&env["ALACRTERM_INTEGRATION_SCRIPT"]);
         assert!(script.is_file());
         assert!(!prepared.args.is_empty());

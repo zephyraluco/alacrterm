@@ -83,7 +83,9 @@ async fn native_openssh_loads_persistent_integration_in_an_isolated_account() {
         params,
         SshSize::cells(80, 24),
         sender,
-        Some(Arc::new(super::remote::RemoteIntegration)),
+        Some(Arc::new(super::remote::RemoteIntegration {
+            history_enabled: true,
+        })),
     )
     .unwrap();
     let (text, closed) = collect_until(&mut events, Duration::from_secs(15), None, |text, _| {
@@ -139,7 +141,9 @@ async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
             params.clone(),
             SshSize::cells(80, 24),
             sender,
-            Some(Arc::new(super::remote::RemoteIntegration)),
+            Some(Arc::new(super::remote::RemoteIntegration {
+                history_enabled: true,
+            })),
         )
         .unwrap();
         let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
@@ -205,7 +209,9 @@ async fn failed_install_revokes_activation_and_preserves_native_login() {
         params,
         SshSize::cells(80, 24),
         sender,
-        Some(Arc::new(super::remote::RemoteIntegration)),
+        Some(Arc::new(super::remote::RemoteIntegration {
+            history_enabled: true,
+        })),
     )
     .unwrap();
     let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
