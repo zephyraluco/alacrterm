@@ -90,6 +90,7 @@ pub struct TerminalView {
     terminal_blinking: Option<bool>,
     completion: completion_controller::CompletionController,
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
+    suggestion_item_sizes: std::rc::Rc<Vec<gpui::Size<gpui::Pixels>>>,
     _blink_task: gpui::Task<()>,
     _startup_task: gpui::Task<()>,
     recovery_task: gpui::Task<()>,
@@ -230,6 +231,7 @@ impl TerminalView {
             terminal_blinking: None,
             completion: completion_controller::CompletionController::new(settings.suggestions),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
+            suggestion_item_sizes: Default::default(),
             _blink_task: blink_task,
             _startup_task: startup_task,
             recovery_task: gpui::Task::ready(()),
@@ -712,11 +714,20 @@ impl TerminalView {
         ) {
             completion_controller::PopupKey::Navigate(delta) => {
                 self.completion.model.step(delta);
-                self.suggestion_scroll.scroll_to_item(
-                    self.completion.model.selected,
-                    gpui::ScrollStrategy::Nearest,
-                );
+                // Fixed-height rows can scroll immediately, without queuing a
+                // deferred request that repeated key events can overwrite.
+                let viewport = self.suggestion_scroll.bounds().size.height;
+                let mut offset = self.suggestion_scroll.offset();
+                let top = gpui::px(24.) * self.completion.model.selected as f32;
+                let bottom = top + gpui::px(24.);
+                if top + offset.y < gpui::px(0.) {
+                    offset.y = -top;
+                } else if bottom + offset.y > viewport {
+                    offset.y = viewport - bottom;
+                }
+                self.suggestion_scroll.set_offset(offset);
                 cx.notify();
+                window.refresh();
                 cx.stop_propagation();
                 return;
             }

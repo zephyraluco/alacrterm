@@ -67,14 +67,17 @@ impl TerminalView {
         let background = cx.theme().popover;
         let border = cx.theme().border;
         let font_size = self.settings.font_size.clamp(px(10.), px(16.));
-        let item_sizes = std::rc::Rc::new(vec![
-            size(width, row_height);
-            self.completion.model.candidates.len()
-        ]);
+        let item_size = size(width, row_height);
+        if self.suggestion_item_sizes.len() != self.completion.model.candidates.len()
+            || self.suggestion_item_sizes.first() != Some(&item_size)
+        {
+            self.suggestion_item_sizes =
+                std::rc::Rc::new(vec![item_size; self.completion.model.candidates.len()]);
+        }
         let list = v_virtual_list(
             cx.entity(),
             "terminal-candidates",
-            item_sizes,
+            self.suggestion_item_sizes.clone(),
             move |this, range, _, cx| {
                 range
                     .filter_map(|index| {
