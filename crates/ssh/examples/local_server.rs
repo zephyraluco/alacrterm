@@ -34,7 +34,7 @@
 //!
 //! 支持的范围:`realpath` / `stat` / `lstat` / `opendir` / `readdir` / `close`(浏览)与
 //! `open` / `read` / `write` / `mkdir` / `remove` / `rmdir` / `rename`(上传下载与文件管理器的
-//! 新建 / 删 / 改名)。没有的(`symlink` / `setstat` / `chmod` …)一律回
+//! 新建 / 删 / 改名)。没有的(`symlink` …)一律回
 //! `SSH_FX_OP_UNSUPPORTED`。
 
 #![allow(dead_code)] // 被测试 `#[path]` 包进来时 `main` 是多余的
@@ -48,7 +48,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use russh::server::{Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
-    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Packet, Status, StatusCode, Version,
 };
 use tokio::net::TcpListener;
 
@@ -571,7 +571,7 @@ fn host_key() -> russh::keys::PrivateKey {
 /// SFTP 处理:读写**服务端进程当前目录**下的真实文件。
 ///
 /// 目的只是让「远端文件管理器」这条路能被端到端验证(列目录 / 判断是不是目录 / 上传 /
-/// 下载),所以刻意最小:余下的 `rename` / `symlink` / `setstat` … 一律回
+/// 下载),所以刻意最小:余下的 `symlink` … 一律回
 /// `SSH_FX_OP_UNSUPPORTED`。
 ///
 /// 路径解析按**服务端本机**语义(`std::fs`),不做 POSIX 归一化 —— 测试与手工验收
@@ -598,7 +598,11 @@ impl russh_sftp::server::Handler for FsSession {
         _version: u32,
         _extensions: HashMap<String, String>,
     ) -> Result<Version, Self::Error> {
-        Ok(Version::new())
+        let mut version = Version::new();
+        version
+            .extensions
+            .insert("posix-rename@openssh.com".into(), "1".into());
+        Ok(version)
     }
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
@@ -684,6 +688,13 @@ impl russh_sftp::server::Handler for FsSession {
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
         let resolved = resolve(&path);
+        let resolved = if std::fs::symlink_metadata(&resolved)
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            std::fs::canonicalize(&resolved).map_err(status_for)?
+        } else {
+            resolved
+        };
         Ok(Name {
             id,
             files: vec![File::dummy(resolved.to_string_lossy().to_string())],
@@ -698,9 +709,58 @@ impl russh_sftp::server::Handler for FsSession {
         })
     }
 
-    /// 玩具文件系统里没有符号链接,`lstat` 与 `stat` 同义。
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-        self.stat(id, path).await
+        let metadata = std::fs::symlink_metadata(resolve(&path)).map_err(status_for)?;
+        Ok(Attrs {
+            id,
+            attrs: attributes(&metadata),
+        })
+    }
+    async fn setstat(
+        &mut self,
+        id: u32,
+        path: String,
+        attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        #[cfg(unix)]
+        if let Some(mode) = attrs.permissions {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                resolve(&path),
+                std::fs::Permissions::from_mode(mode & 0o7777),
+            )
+            .map_err(status_for)?;
+        }
+        #[cfg(not(unix))]
+        let _ = (path, attrs);
+        Ok(ok(id))
+    }
+    async fn extended(
+        &mut self,
+        id: u32,
+        request: String,
+        data: Vec<u8>,
+    ) -> Result<Packet, Self::Error> {
+        if request != "posix-rename@openssh.com" {
+            return Err(StatusCode::OpUnsupported);
+        }
+        let mut bytes = data.as_slice();
+        let mut paths = Vec::new();
+        for _ in 0..2 {
+            let size = bytes.get(..4).ok_or(StatusCode::BadMessage)?;
+            let size = u32::from_be_bytes(size.try_into().unwrap()) as usize;
+            bytes = &bytes[4..];
+            let path = std::str::from_utf8(bytes.get(..size).ok_or(StatusCode::BadMessage)?)
+                .map_err(|_| StatusCode::BadMessage)?;
+            paths.push(path.to_owned());
+            bytes = &bytes[size..];
+        }
+        if !bytes.is_empty() {
+            return Err(StatusCode::BadMessage);
+        }
+        self.rename(id, paths.remove(0), paths.remove(0))
+            .await
+            .map(Packet::Status)
     }
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
@@ -809,6 +869,11 @@ fn attributes(metadata: &std::fs::Metadata) -> FileAttributes {
     } else {
         0o100644
     });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        attrs.permissions = Some(metadata.permissions().mode());
+    }
     attrs.mtime = metadata
         .modified()
         .ok()

@@ -39,9 +39,9 @@ use futures::channel::mpsc as futures_mpsc;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use russh::client;
-use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as SftpError;
-use russh_sftp::protocol::{OpenFlags, StatusCode};
+use russh_sftp::client::{RawSftpSession, SftpSession};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender as TokioSender, unbounded_channel};
@@ -421,7 +421,7 @@ impl SshFs {
         })
     }
 
-    /// 把本地这一个文件写到远端**指定的路径**(同名远端文件被**覆盖 / 截断**)。
+    /// 将本地文件写入远端同目录临时文件，成功后替换指定路径；取消不修改原文件。
     ///
     /// 与 [`Self::upload`] 的区别是**不改名、不拼目录**:远端路径由调用方给全。这是
     /// [`Self::download_one`] 的反向,「保存」远端文件要写的正是它打开时那个路径。
@@ -653,7 +653,7 @@ fn spawn_thread<T: Send + 'static>(
 
 /// 线程主循环:按需建 SFTP 连接,然后一条条伺候请求。
 async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
-    let mut sftp: Option<SftpSession> = None;
+    let mut sftp: Option<FsConnection> = None;
 
     while let Some(request) = requests.recv().await {
         if request.reply.is_canceled() {
@@ -664,11 +664,11 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
                 request.kind,
                 RequestKind::CompletionList(_) | RequestKind::CompletionRead(_)
             ) {
-                tokio::time::timeout(std::time::Duration::from_secs(5), connect(&params))
+                tokio::time::timeout(std::time::Duration::from_secs(5), connect(&params, false))
                     .await
                     .unwrap_or_else(|_| Err(SshError::Sftp("补全连接超时".into())))
             } else {
-                connect(&params).await
+                connect(&params, false).await
             };
             match connection {
                 Ok(session) => sftp = Some(session),
@@ -764,7 +764,19 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
 }
 
 /// 建连 + 认证 + 开 sftp 子系统。认证复用终端那条路的同一套顺序(agent → 私钥 → 密码)。
-async fn connect(params: &SshParams) -> Result<SftpSession, SshError> {
+struct FsConnection {
+    session: SftpSession,
+    commit: Option<RawSftpSession>,
+    posix_rename: bool,
+}
+impl std::ops::Deref for FsConnection {
+    type Target = SftpSession;
+    fn deref(&self) -> &SftpSession {
+        &self.session
+    }
+}
+
+async fn connect(params: &SshParams, transfer: bool) -> Result<FsConnection, SshError> {
     let socket = TcpStream::connect((params.host.as_str(), params.port))
         .await
         .map_err(|source| SshError::Connect {
@@ -805,9 +817,38 @@ async fn connect(params: &SshParams) -> Result<SftpSession, SshError> {
         .await
         .map_err(|error| SshError::Sftp(format!("服务端没有提供 sftp 子系统:{error}")))?;
 
-    SftpSession::new(channel.into_stream())
+    let session = SftpSession::new(channel.into_stream())
         .await
-        .map_err(|error| SshError::Sftp(error.to_string()))
+        .map_err(|error| SshError::Sftp(error.to_string()))?;
+    // russh-sftp's high-level API does not expose posix-rename. Use a second
+    // SFTP channel on the same authenticated transport for the commit only.
+    let (commit, posix_rename) = if transfer {
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|error| SshError::ChannelOpen(error.to_string()))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|error| SshError::Sftp(error.to_string()))?;
+        let raw = RawSftpSession::new(channel.into_stream());
+        let version = raw
+            .init()
+            .await
+            .map_err(|error| SshError::Sftp(error.to_string()))?;
+        let supported = version
+            .extensions
+            .get("posix-rename@openssh.com")
+            .is_some_and(|version| version == "1");
+        (Some(raw), supported)
+    } else {
+        (None, false)
+    };
+    Ok(FsConnection {
+        session,
+        commit,
+        posix_rename,
+    })
 }
 
 /// 列一层目录,顺序与本地一致:目录在前、名字不区分大小写。
@@ -945,14 +986,14 @@ impl TransferFailure {
 /// 一次只跑一个(天然排队,不至于把链路打满);取消靠共享的 [`CancelToken`],不需要这条
 /// 被占住的通道(见模块文档)。
 async fn serve_transfers(params: SshParams, mut requests: UnboundedReceiver<TransferRequest>) {
-    let mut sftp: Option<SftpSession> = None;
+    let mut sftp: Option<FsConnection> = None;
 
     while let Some(request) = requests.recv().await {
         if sftp.is_none() {
             let connection = tokio::select! {
                 biased;
                 _ = request.cancel.cancelled() => Err(SshError::Cancelled),
-                result = connect(&params) => result,
+                result = connect(&params, true) => result,
             };
             match connection {
                 Ok(session) => sftp = Some(session),
@@ -985,7 +1026,7 @@ async fn serve_transfers(params: SshParams, mut requests: UnboundedReceiver<Tran
 /// 跑一次传输。先把要传的东西摊成清单再开传 ⇒ 进度条一开始就知道总数 / 总字节数。
 async fn run_transfer(
     kind: &TransferKind,
-    session: &SftpSession,
+    session: &FsConnection,
     events: &futures_mpsc::UnboundedSender<TransferEvent>,
     cancel: &CancelToken,
 ) -> Result<(), TransferFailure> {
@@ -1394,7 +1435,7 @@ fn remote_path(path: &Path) -> String {
 
 /// 本地文件 → 远端路径,分块搬,每块都查一次取消。
 async fn upload_file(
-    session: &SftpSession,
+    session: &FsConnection,
     local: &Path,
     remote: &Path,
     reporter: &mut Reporter<'_>,
@@ -1402,8 +1443,59 @@ async fn upload_file(
     let mut source = tokio::fs::File::open(local)
         .await
         .map_err(TransferFailure::local)?;
+    reporter.check()?;
+    let original = remote_path(remote);
+    let metadata = match session.symlink_metadata(original.clone()).await {
+        Ok(meta) => Some(meta),
+        Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => None,
+        Err(error) => return Err(TransferFailure::from_sftp(error)),
+    };
+    // Follow the document's symlink, preserving the link itself on save.
+    let destination = if metadata
+        .as_ref()
+        .is_some_and(|meta| meta.file_type().is_symlink())
+    {
+        session
+            .canonicalize(original)
+            .await
+            .map_err(TransferFailure::from_sftp)?
+    } else {
+        original
+    };
+    let metadata = if metadata
+        .as_ref()
+        .is_some_and(|meta| meta.file_type().is_symlink())
+    {
+        Some(
+            session
+                .metadata(destination.clone())
+                .await
+                .map_err(TransferFailure::from_sftp)?,
+        )
+    } else {
+        metadata
+    };
+    let parent =
+        destination.rsplit_once('/').map_or(
+            ".",
+            |(parent, _)| if parent.is_empty() { "/" } else { parent },
+        );
+    let temporary = format!(
+        "{}/.alacrterm-upload-{:032x}.tmp",
+        parent.trim_end_matches('/'),
+        rand::random::<u128>()
+    );
+    let mut attrs = FileAttributes::empty();
+    attrs.permissions = metadata
+        .as_ref()
+        .and_then(|meta| meta.permissions)
+        .map(|mode| mode & 0o7777);
     let mut target = session
-        .create(remote_path(remote))
+        .open_with_flags_and_attributes(
+            temporary.clone(),
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+            attrs,
+        )
         .await
         .map_err(TransferFailure::from_sftp)?;
 
@@ -1441,17 +1533,69 @@ async fn upload_file(
         })
         .and_then(|result| result.map_err(TransferFailure::from_io));
     let result = result.and(closed).and_then(|()| reporter.check());
+    let result = match result {
+        Ok(()) => {
+            // Once commit starts, await its result even if cancellation arrives.
+            // Never remove the destination or roll it back after a successful rename.
+            async {
+                if let Some(mode) = metadata.as_ref().and_then(|meta| meta.permissions) {
+                    let mut attrs = FileAttributes::empty();
+                    attrs.permissions = Some(mode & 0o7777);
+                    session
+                        .set_metadata(temporary.clone(), attrs)
+                        .await
+                        .map_err(TransferFailure::from_sftp)?;
+                }
+                reporter.check()?;
+                commit_upload(session, &temporary, &destination).await
+            }
+            .await
+        }
+        Err(error) => Err(error),
+    };
     if result.is_err() {
         let removed = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            session.remove_file(remote_path(remote)),
+            session.remove_file(temporary.clone()),
         )
         .await;
         if !matches!(removed, Ok(Ok(()))) {
-            log::warn!("无法清理未完成的远端传输文件: {}", remote.display());
+            log::warn!("无法清理未完成的远端传输临时文件: {temporary}");
         }
     }
     result
+}
+
+/// Commit using OpenSSH's atomic overwrite extension when advertised. A server
+/// without it may reject replacement; never fall back to deleting the original.
+async fn commit_upload(
+    session: &FsConnection,
+    temporary: &str,
+    destination: &str,
+) -> Result<(), TransferFailure> {
+    if !session.posix_rename {
+        return session
+            .rename(temporary, destination)
+            .await
+            .map_err(TransferFailure::from_sftp);
+    }
+    let mut data = Vec::new();
+    for path in [temporary, destination] {
+        data.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        data.extend_from_slice(path.as_bytes());
+    }
+    match session
+        .commit
+        .as_ref()
+        .expect("transfer connection")
+        .extended("posix-rename@openssh.com", data)
+        .await
+    {
+        Ok(Packet::Status(status)) if status.status_code == StatusCode::Ok => Ok(()),
+        Ok(Packet::Status(status)) => Err(TransferFailure::from_sftp(SftpError::Status(status))),
+        Ok(_) => Err(TransferFailure::from_sftp(SftpError::UnexpectedPacket)),
+        Err(error) => Err(TransferFailure::from_sftp(error)),
+    }
 }
 
 /// 远端路径 → 本地文件,分块搬,每块都查一次取消。
@@ -1511,4 +1655,88 @@ async fn download_file(
             .map_err(TransferFailure::local)?;
     }
     result
+}
+
+#[cfg(all(test, unix))]
+mod staged_upload_tests {
+    use super::*;
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+    use std::process::{Child, Command, Stdio};
+    struct Server(Child);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn server(program: &Path) -> (tokio::net::UnixStream, Server) {
+        let (client, peer) = UnixStream::pair().unwrap();
+        let child = Command::new(program)
+            .stdin(Stdio::from(OwnedFd::from(peer.try_clone().unwrap())))
+            .stdout(Stdio::from(OwnedFd::from(peer)))
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        client.set_nonblocking(true).unwrap();
+        (
+            tokio::net::UnixStream::from_std(client).unwrap(),
+            Server(child),
+        )
+    }
+    #[tokio::test]
+    async fn openssh_atomic_overwrite_and_unsupported_commit_preserve_documents() {
+        let program = std::env::var_os("ALACRTERM_TEST_SFTP_SERVER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/usr/lib/openssh/sftp-server"));
+        if !program.is_file() {
+            return;
+        }
+        let (stream, _server) = server(&program);
+        let session = SftpSession::new(stream).await.unwrap();
+        let (stream, _commit_server) = server(&program);
+        let raw = RawSftpSession::new(stream);
+        let version = raw.init().await.unwrap();
+        assert_eq!(
+            version
+                .extensions
+                .get("posix-rename@openssh.com")
+                .map(String::as_str),
+            Some("1")
+        );
+        let mut connection = FsConnection {
+            session,
+            commit: Some(raw),
+            posix_rename: true,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "alacrterm-openssh-save-{:032x}",
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.txt");
+        let destination = root.join("document.txt");
+        std::fs::write(&source, b"new document").unwrap();
+        std::fs::write(&destination, b"old document").unwrap();
+        let kind = TransferKind::UploadOne {
+            local_file: source.clone(),
+            remote_file: destination.to_string_lossy().into_owned(),
+        };
+        let (events, _receiver) = futures_mpsc::unbounded();
+        run_transfer(&kind, &connection, &events, &CancelToken::default())
+            .await
+            .unwrap_or_else(|failure| panic!("{}", failure.error));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new document");
+        // OpenSSH's standard v3 rename rejects existing destinations. The
+        // fallback must report failure without unlinking the old document.
+        connection.posix_rename = false;
+        std::fs::write(&source, b"must not replace").unwrap();
+        assert!(
+            run_transfer(&kind, &connection, &events, &CancelToken::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new document");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

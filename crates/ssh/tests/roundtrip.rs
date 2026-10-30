@@ -1234,8 +1234,17 @@ async fn cancelling_active_upload_and_download_removes_partial_destinations() {
         .unwrap();
     let untouched = root.join("completed.bin");
     std::fs::write(&untouched, b"keep completed file").unwrap();
-    for upload in [true, false] {
-        let target = root.join(if upload { "upload.bin" } else { "download.bin" });
+    for (upload, overwrite) in [(true, false), (true, true), (false, false)] {
+        let target = root.join(if overwrite {
+            "existing-document.bin"
+        } else if upload {
+            "upload.bin"
+        } else {
+            "download.bin"
+        });
+        if overwrite {
+            std::fs::write(&target, b"original remote document").unwrap();
+        }
         let mut transfer = if upload {
             fs.upload_one(source.clone(), target.to_string_lossy().replace('\\', "/"))
         } else {
@@ -1246,10 +1255,22 @@ async fn cancelling_active_upload_and_download_removes_partial_destinations() {
             while let Some(event) = transfer.events.next().await {
                 match event {
                     TransferEvent::Progress(progress) if progress.bytes_done > 0 && !cancelled => {
-                        assert!(
-                            target.exists(),
-                            "test must cancel after the target was created"
-                        );
+                        if upload {
+                            assert!(std::fs::read_dir(&root).unwrap().flatten().any(|entry| {
+                                entry
+                                    .file_name()
+                                    .to_string_lossy()
+                                    .starts_with(".alacrterm-upload-")
+                            }));
+                            if overwrite {
+                                assert_eq!(
+                                    std::fs::read(&target).unwrap(),
+                                    b"original remote document"
+                                );
+                            }
+                        } else {
+                            assert!(target.exists());
+                        }
                         fs.cancel_transfers();
                         cancelled = true;
                     }
@@ -1263,9 +1284,23 @@ async fn cancelling_active_upload_and_download_removes_partial_destinations() {
         .unwrap();
         assert!(cancelled);
         assert!(matches!(result, Err(SshError::Cancelled)), "{result:?}");
+        if overwrite {
+            assert_eq!(std::fs::read(&target).unwrap(), b"original remote document");
+        } else {
+            assert!(
+                !target.exists(),
+                "partial destination survived cancellation"
+            );
+        }
         assert!(
-            !target.exists(),
-            "partial destination survived cancellation"
+            !std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".alacrterm-upload-")),
+            "staging file survived cancellation"
         );
         assert_eq!(std::fs::metadata(&source).unwrap().len(), 64 * 1024 * 1024);
         assert_eq!(std::fs::read(&untouched).unwrap(), b"keep completed file");
@@ -1277,6 +1312,61 @@ async fn cancelling_active_upload_and_download_removes_partial_destinations() {
     })
     .await
     .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+async fn failed_upload_commit_cleans_staging_without_removing_the_destination() {
+    use ssh::SshFs;
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("fs-staged-commit");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let fs = SshFs::new(params);
+    let root = std::env::temp_dir().join(format!("alacrterm-staged-commit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("edited.txt");
+    std::fs::write(&source, b"new document").unwrap();
+    let destination = root.join("existing-directory");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("original.txt"), b"keep original").unwrap();
+    let mut upload = fs.upload_one(&source, destination.to_string_lossy().replace('\\', "/"));
+    assert!(drive(&mut upload).await.is_err()); // Rename of file over directory fails.
+    assert_eq!(
+        std::fs::read(destination.join("original.txt")).unwrap(),
+        b"keep original"
+    );
+    assert!(!std::fs::read_dir(&root).unwrap().flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".alacrterm-upload-")
+    }));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let document = root.join("document.txt");
+        let link = root.join("document-link.txt");
+        std::fs::write(&document, b"original document").unwrap();
+        std::fs::set_permissions(&document, std::fs::Permissions::from_mode(0o750)).unwrap();
+        symlink(&document, &link).unwrap();
+        let mut save = fs.upload_one(source, link.to_string_lossy().into_owned());
+        assert!(drive(&mut save).await.is_ok());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&document).unwrap(), b"new document");
+        assert_eq!(
+            std::fs::metadata(&document).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
     std::fs::remove_dir_all(root).unwrap();
     let _ = std::fs::remove_file(known_hosts);
 }
