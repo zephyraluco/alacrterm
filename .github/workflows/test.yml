@@ -9,18 +9,23 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
       - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: checks
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake clang libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libvulkan-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libasound2-dev
       - name: Sparkle state regression tests
         run: bash scripts/test/test_sparkle_state.sh
-      - name: Format
-        run: cargo fmt --check
+      - name: Python regression tests
+        run: python3 -m unittest discover -s scripts/test -p 'test_*.py'
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
   test:
@@ -30,12 +35,27 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, windows-2022, macos-14]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: tests
       - name: Install native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake clang libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libvulkan-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libasound2-dev
-      - name: Test application and terminal UI
-        run: cargo test --locked -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util
+      - uses: actions/cache@v5
+        if: runner.os == 'macOS'
+        with:
+          path: target/sparkle-download
+          key: sparkle-${{ runner.os }}-${{ hashFiles('scripts/packaging/fetch_sparkle.py') }}
+      - name: Prepare Sparkle
+        if: runner.os == 'macOS'
+        run: bash scripts/packaging/prepare_sparkle.sh
+      - name: Test application and libraries
+        run: cargo test --locked -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util -p settings -p session -p transfer -p platform
+      - name: SSH unit and local-server integration tests
+        run: cargo test --locked -p ssh --lib --test roundtrip

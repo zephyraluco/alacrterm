@@ -29,11 +29,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--destination', type=Path, default=Path('target/sparkle'))
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory() as temporary:
-        archive = Path(temporary) / 'sparkle.tar.xz'
-        with urllib.request.urlopen(URL, timeout=60) as source, archive.open('wb') as output:
-            shutil.copyfileobj(source, output)
-        unpack(archive, args.destination)
+    cache = Path('target/sparkle-download')
+    cache.mkdir(parents=True, exist_ok=True)
+    archive = cache / f'Sparkle-{VERSION}-{SHA256}.tar.xz'
+    if not archive.exists():
+        with tempfile.TemporaryDirectory(dir=cache) as temporary:
+            download = Path(temporary) / 'download.tar.xz'
+            with urllib.request.urlopen(URL, timeout=60) as source, download.open('wb') as output:
+                shutil.copyfileobj(source, output)
+            # Verify and extract before accepting a downloaded archive into the cache.
+            unpack(download, args.destination)
+            download.replace(archive)
+    else:
+        try:
+            unpack(archive, args.destination)
+        except ValueError:
+            archive.unlink()
+            raise
     print(args.destination.resolve())
 
 

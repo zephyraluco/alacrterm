@@ -98,6 +98,23 @@ class PackagingTests(unittest.TestCase):
                 fetch.unpack(archive, root / 'output', hashlib.sha256(archive.read_bytes()).hexdigest())
             self.assertFalse((root / 'escape').exists())
 
+    def test_corrupt_cached_sparkle_archive_is_rejected_and_removed(self):
+        fetch = module('fetch_sparkle')
+        with tempfile.TemporaryDirectory() as temporary:
+            try:
+                os.chdir(temporary)
+                cache = Path('target/sparkle-download')
+                cache.mkdir(parents=True)
+                archive = cache / f'Sparkle-{fetch.VERSION}-{fetch.SHA256}.tar.xz'
+                archive.write_bytes(b'corrupt cache')
+                with patch('sys.argv', ['fetch_sparkle.py']), patch.object(fetch.urllib.request, 'urlopen') as network:
+                    with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+                        fetch.main()
+                    network.assert_not_called()
+                self.assertFalse(archive.exists())
+            finally:
+                os.chdir(ROOT)
+
 
 if __name__ == '__main__':
     unittest.main()
