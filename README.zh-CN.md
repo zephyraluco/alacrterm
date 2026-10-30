@@ -129,7 +129,8 @@ export SPARKLE_FRAMEWORK_DIR="$PWD/target/sparkle"
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util
+cargo test --locked -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util -p settings -p session -p transfer -p platform
+cargo test --locked -p ssh --lib --test roundtrip
 python -m unittest discover -s scripts/test -p 'test_*.py'
 ```
 

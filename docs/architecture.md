@@ -171,9 +171,13 @@ macOS 使用 Sparkle 原生流程，不使用 `sparklers`。推迟重启回调�
 
 `.github/workflows/` 仅编排命令和调用脚本；打包、签名与发布实现位于 `scripts/packaging/`，Python 回归测试位于 `scripts/test/`。
 
-- `test`：分支 push、PR，以及复用调用；先 fmt/Clippy，再 Linux、Windows、macOS 并行运行指定 crate 测试。
-- `package`：分支 push、PR，以及复用调用；生成 Linux x64 deb、Windows x64 Inno 安装器、macOS ARM64 DMG/更新 ZIP，产物保留七天。
-- `release`：tag 触发；校验稳定版本 tag 与应用版本相符及签名配置完整，等待同一 commit SHA 的分支 push test、package 工作流均成功（最多一小时，失败立即阻止发布），再重新打包、生成签名更新源，先上传草稿 Release，再发布为 latest。
+- `test`：分支 push、PR，以及复用调用；先 fmt，再执行 Clippy、Python 与 C 状态回归；Linux、Windows、macOS 并行运行应用、库及 SSH 本地服务器测试。macOS 准备 Sparkle，覆盖原生桥接的构建路径。
+- `package`：分支 push、PR，以及复用调用；生成 Linux x64 deb、Windows x64 Inno 安装器、macOS ARM64 DMG/更新 ZIP，产物保留七天。每个平台附带构建清单，记录完整提交 SHA、版本、运行 ID/attempt、构建公钥指纹及每个文件的大小与 SHA-256。
+- `release`：tag 触发；校验 tag、版本与签名配置，选择同一完整 SHA 的本仓库分支 push Test、Package 成功运行；不使用 PR 合并构建。复用确定运行 ID 的三平台产物，完整校验后在独立 macOS job 签名 ZIP，再生成更新源、上传草稿并发布。只有产物过期时重新调用三平台 Package，不为正常发布重复编译。
+
+CI 最长等待一小时；对应分支运行缺失五分钟后明确失败，失败/取消立即阻止发布。新产物缺平台、身份或摘要不符、公钥变化都报错，不能混用不同运行。失败重跑的不同 attempt 可共同提供同一 run ID 的完整平台集合。分支 push 保留检查记录，PR 则取消旧运行；检查/测试/打包超时分别为 30/45/60 分钟，签名与发布为 30 分钟。Rust 缓存按用途区分，Sparkle 缓存按下载脚本身份区分，读取时仍校验固定摘要。
+
+发布阶段串行执行，按语义版本决定是否设为 latest；不假定 GitHub concurrency 是 FIFO 队列，取消的待发布运行可重跑。草稿可恢复上传，远端文件内容全部验证后才公开；额外未知附件阻止自动发布。已公开版本只验证其发布清单和全部远端文件，不覆盖附件；完整时重跑成功退出，损坏时明确报错。发布前后核对 tag 指向，避免 tag 被移动。`release-manifest.json` 记录最终公开文件的摘要，恢复流程可以区分原始安装器和包含时间戳的更新元数据。
 
 GitHub Repository Variables：`ALACRTERM_UPDATE_PUBLIC_KEYS` 为一个或多个 minisign 公钥 Base64 行，`SPARKLE_PUBLIC_KEY` 为 Sparkle 公钥。两者分别服务 JSON 更新源和 Sparkle 更新包，不是同一套密钥。
 
@@ -195,7 +199,8 @@ GitHub Repository Secrets：
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util
+cargo test --locked -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util -p settings -p session -p transfer -p platform
+cargo test --locked -p ssh --lib --test roundtrip
 python -m unittest discover -s scripts/test -p 'test_*.py'
 bash scripts/test/test_sparkle_state.sh
 ```
