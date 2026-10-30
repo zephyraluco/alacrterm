@@ -86,7 +86,7 @@ impl Suggestions {
         self.candidates
             .retain(|item| item.source != crate::completion::Source::History);
         if visible {
-            self.refresh_in_place(false, false);
+            self.refresh_in_place(true, false);
             if let Some(index) = self
                 .candidates
                 .iter()

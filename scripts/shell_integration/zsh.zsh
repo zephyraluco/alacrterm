@@ -42,6 +42,7 @@ __alacrterm_history_collect() {
     done
 }
 __alacrterm_history_sync() {
+    __alacrterm_history_announce
     [[ ${ALACRTERM_HISTORY_ENABLED:-1} != 0 ]] || return 0
     local -a keys
     keys=(${(On)${(k)history}})

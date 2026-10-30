@@ -117,6 +117,17 @@ __alacrterm_run_prompt_commands() {
 __alacrterm_history_collect() {
     # Bash excludes the current event from expansion in interactive functions.
     # A worker-only sentinel makes the last accepted event addressable.
+    # Bash 3.2 replaces the current event on the first history -s call.
+    # Preserve that event before appending the worker-only boundary.
+    __alacrterm_history_saved=$(HISTTIMEFORMAT= builtin history 1; printf '\001')
+    __alacrterm_history_saved=${__alacrterm_history_saved%?}
+    __alacrterm_history_saved=${__alacrterm_history_saved%"$__alacrterm_nl"}
+    __alacrterm_history_saved=${__alacrterm_history_saved#"${__alacrterm_history_saved%%[![:space:]]*}"}
+    __alacrterm_history_event=${__alacrterm_history_saved%%[!0-9]*}
+    if [ -n "$__alacrterm_history_event" ]; then
+        __alacrterm_history_saved=${__alacrterm_history_saved#"$__alacrterm_history_event"}
+        builtin history -s "${__alacrterm_history_saved#??}"
+    fi
     builtin history -s '__alacrterm_history_boundary__'
     __alacrterm_history_index=$1
     while [ "$__alacrterm_history_index" -le "$2" ]; do
@@ -128,6 +139,7 @@ __alacrterm_history_collect() {
     done
 }
 __alacrterm_history_sync() {
+    __alacrterm_history_announce
     [ -n "${BASH_VERSION-}" ] && [ "${ALACRTERM_HISTORY_ENABLED:-1}" != 0 ] || return 0
     __alacrterm_history_row=$(HISTTIMEFORMAT= builtin history 1)
     [ "$__alacrterm_history_row" != "$__alacrterm_history_anchor" ] || [ -z "$__alacrterm_history_last" ] || return 0

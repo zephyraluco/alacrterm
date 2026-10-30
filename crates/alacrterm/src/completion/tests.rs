@@ -538,6 +538,33 @@ mod imported_history {
                 .any(|item| item.insert_text == "cat old-four")
         );
     }
+
+    #[test]
+    fn history_imports_keep_manually_opened_menus_when_automatic_is_disabled_or_input_is_empty() {
+        for text in ["g", ""] {
+            let mut state = state();
+            state.settings.automatic = false;
+            state.add_command("git");
+            batch(&mut state, 1, true, &["git old"]);
+            editing(&mut state, "posix", text);
+            state.trigger();
+            assert!(state.has_current_candidates());
+            batch(&mut state, 2, false, &["git new"]);
+            assert!(state.has_current_candidates());
+            assert!(
+                state
+                    .candidates
+                    .iter()
+                    .any(|item| item.source == Source::Shell)
+            );
+            assert!(
+                state
+                    .candidates
+                    .iter()
+                    .any(|item| item.insert_text == "git new")
+            );
+        }
+    }
     #[test]
     fn imported_history_keeps_recent_order_beyond_one_hundred_entries() {
         let mut state = state();

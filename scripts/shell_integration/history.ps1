@@ -127,6 +127,7 @@ function global:alacrterm_history_worker {
     }
 }
 function global:alacrterm_sync_history {
+    [Console]::Write("$([char]27)]633;History;session;$global:AlacrtermHistorySession$([char]7)")
     if ($env:ALACRTERM_HISTORY_ENABLED -eq '0') { return }
     $previous = $global:AlacrtermHistoryWorker
     if ($previous -and $previous.Async.IsCompleted) {

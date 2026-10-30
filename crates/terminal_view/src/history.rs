@@ -6,8 +6,82 @@ const LIMIT: usize = 1000;
 const MAX_BYTES: usize = LIMIT * 4096;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+// Retain bounded parent contexts while nested interactive shells are active.
+// Inactive batches can finish into their own cache without changing the UI.
 #[derive(Default)]
 pub(crate) struct History {
+    active: ShellHistory,
+    inactive: Vec<ShellHistory>,
+}
+impl History {
+    pub fn entries(&self) -> &[String] {
+        self.active.entries()
+    }
+    pub fn clear(&mut self) {
+        self.active.clear();
+        self.inactive.clear();
+    }
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+    #[cfg(test)]
+    fn record(&mut self, command: String) {
+        self.active.record(command);
+    }
+    pub fn receive(&mut self, event: HistoryEvent, enabled: bool) -> bool {
+        self.receive_at(event, enabled, Instant::now())
+    }
+    fn receive_at(&mut self, event: HistoryEvent, enabled: bool, now: Instant) -> bool {
+        if !enabled {
+            self.clear();
+        }
+        if let HistoryEvent::Session(session) = event {
+            if self.active.session.as_ref() == Some(&session) {
+                return false;
+            }
+            let next = self
+                .inactive
+                .iter()
+                .position(|saved| saved.session.as_ref() == Some(&session))
+                .map(|index| self.inactive.remove(index))
+                .unwrap_or_else(|| ShellHistory {
+                    session: Some(session),
+                    ..Default::default()
+                });
+            let previous = std::mem::replace(&mut self.active, next);
+            if enabled && previous.session.is_some() {
+                self.inactive.push(previous);
+                if self.inactive.len() > 7 {
+                    self.inactive.remove(0);
+                }
+            }
+            return true;
+        }
+        if !enabled {
+            return false;
+        }
+        let session = match &event {
+            HistoryEvent::Begin { session, .. }
+            | HistoryEvent::Entry { session, .. }
+            | HistoryEvent::End { session, .. } => session,
+            HistoryEvent::Session(_) => unreachable!(),
+        };
+        if self.active.session.as_ref() == Some(session) {
+            return self.active.receive_at(event, true, now);
+        }
+        if let Some(saved) = self
+            .inactive
+            .iter_mut()
+            .find(|saved| saved.session.as_ref() == Some(session))
+        {
+            saved.receive_at(event, true, now);
+        }
+        false
+    }
+}
+
+#[derive(Default)]
+struct ShellHistory {
     session: Option<String>,
     last_batch: u64,
     pending: Option<Batch>,
@@ -21,7 +95,7 @@ struct Batch {
     last_index: Option<u64>,
     bytes: usize,
 }
-impl History {
+impl ShellHistory {
     pub fn entries(&self) -> &[String] {
         &self.entries
     }
@@ -29,16 +103,10 @@ impl History {
         self.entries.clear();
         self.pending = None;
     }
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
     pub fn record(&mut self, command: String) {
         self.entries.retain(|old| old != &command);
         self.entries.insert(0, command);
         self.entries.truncate(LIMIT);
-    }
-    pub fn receive(&mut self, event: HistoryEvent, enabled: bool) -> bool {
-        self.receive_at(event, enabled, Instant::now())
     }
     fn receive_at(&mut self, event: HistoryEvent, enabled: bool, now: Instant) -> bool {
         if self
@@ -207,7 +275,7 @@ mod tests {
     fn expired_or_invalid_batches_never_replace_existing_history() {
         let mut h = History::default();
         h.record("keep".into());
-        h.session = Some("s".into());
+        h.active.session = Some("s".into());
         let now = Instant::now();
         h.receive_at(begin("s", 1, true), true, now);
         h.receive_at(
@@ -232,5 +300,38 @@ mod tests {
         assert_eq!(h.entries().len(), LIMIT);
         assert_eq!(h.entries()[0], "echo 1099");
         assert_eq!(h.entries()[999], "echo 100");
+    }
+    #[test]
+    fn nested_shells_restore_parent_history_and_finish_inactive_batches() {
+        let mut h = History::default();
+        h.receive(HistoryEvent::Session("parent".into()), true);
+        h.receive(begin("parent", 1, true), true);
+        h.receive(entry("parent", 1, 1, "parent command"), true);
+        h.receive(HistoryEvent::Session("child".into()), true);
+        assert!(!h.receive(end("parent", 1, 1), true));
+        h.receive(begin("child", 1, true), true);
+        h.receive(entry("child", 1, 1, "child command"), true);
+        h.receive(end("child", 1, 1), true);
+        assert_eq!(h.entries(), ["child command"]);
+        h.receive(HistoryEvent::Session("parent".into()), true);
+        assert_eq!(h.entries(), ["parent command"]);
+        h.receive(begin("parent", 2, false), true);
+        h.receive(entry("parent", 2, 2, "after child exit"), true);
+        h.receive(end("parent", 2, 1), true);
+        assert_eq!(h.entries(), ["after child exit", "parent command"]);
+        h.reset();
+        h.receive(HistoryEvent::Session("parent".into()), true);
+        assert!(h.entries().is_empty()); // No contexts survive connection reset.
+    }
+    #[test]
+    fn nested_contexts_are_bounded_and_disabling_clears_all_cached_sources() {
+        let mut h = History::default();
+        for index in 0..20 {
+            h.receive(HistoryEvent::Session(format!("shell-{index}")), true);
+            assert!(h.inactive.len() <= 7);
+        }
+        h.receive(begin("shell-19", 1, true), false);
+        assert!(h.inactive.is_empty());
+        assert!(h.entries().is_empty());
     }
 }

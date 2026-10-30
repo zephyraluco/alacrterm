@@ -355,3 +355,82 @@ __alacrterm_history_collect() { sleep .1; __alacrterm_saved_collect "$@"; }
         assert!(active.is_none());
     }
 }
+
+#[test]
+fn history_workers_preserve_the_users_last_background_pid() {
+    for program in bash_programs() {
+        let (stdout, stderr) = run_bash(
+            &program,
+            "history -c\n",
+            b"sleep 5 &\nprintf 'USER_PID=%s JOB_PID=%s\\n' $! \"$(jobs -p)\"\nkill $!\nexit\n",
+        );
+        let text = String::from_utf8_lossy(&stdout);
+        let line = text
+            .lines()
+            .find(|line| line.contains("USER_PID="))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: {text}\n{}",
+                    program.display(),
+                    String::from_utf8_lossy(&stderr)
+                )
+            });
+        let values = line.split("USER_PID=").nth(1).unwrap();
+        let (pid, job) = values.split_once(" JOB_PID=").unwrap();
+        let job: String = job.chars().take_while(char::is_ascii_digit).collect();
+        assert!(!job.is_empty());
+        assert_eq!(pid, job, "{text}");
+    }
+}
+
+#[test]
+fn returning_from_a_nested_bash_restores_parent_history() {
+    for program in bash_programs() {
+        let (stdout, stderr) = run_bash(&program, "history -c\nhistory -s 'echo parent-existing'\n",
+            b"\"$BASH\" --noprofile --norc -ic '. \"$ALACRTERM_INTEGRATION_SCRIPT\"; history -s \"echo nested-only\"; __alacrterm_history_sync; sleep .15'\necho parent-after\nsleep .3\nexit\n");
+        let events = history_events(&stdout);
+        let mut sessions: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                terminal::HistoryEvent::Session(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        sessions.dedup();
+        assert!(
+            sessions.len() >= 3,
+            "{events:?}\n{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert_eq!(sessions.first(), sessions.last());
+        let mut model = terminal_view::SuggestionModel::default();
+        model.service = Some(std::sync::Arc::new(
+            crate::completion::CompletionEngine::default(),
+        ));
+        for event in events {
+            model.import_history(event);
+        }
+        model.phase(terminal::PromptEvent::Prompt);
+        model.phase(terminal::PromptEvent::Input);
+        model.input("echo ");
+        model.refresh(false);
+        assert!(
+            model
+                .candidates
+                .iter()
+                .any(|item| item.insert_text == "echo parent-existing")
+        );
+        assert!(
+            model
+                .candidates
+                .iter()
+                .any(|item| item.insert_text == "echo parent-after")
+        );
+        assert!(
+            !model
+                .candidates
+                .iter()
+                .any(|item| item.insert_text == "echo nested-only")
+        );
+    }
+}
