@@ -78,7 +78,7 @@ use crate::alacritty::{
     toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
     update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
-use crate::directory::{DirectoryScanner, Report};
+use crate::directory::{DirectoryScanner, RemoteDirectory};
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
 
@@ -1116,8 +1116,7 @@ impl TerminalBuilder {
                 backend,
                 ssh_events,
                 ssh_pending: None,
-                remote_cwd: None,
-                osc7_seen: false,
+                remote_cwd: RemoteDirectory::default(),
                 directory_scanner: DirectoryScanner::default(),
                 prompt_scanner: Default::default(),
                 resized_once: false,
@@ -1273,16 +1272,12 @@ pub struct Terminal {
     ssh_events: Option<UnboundedReceiver<SshEvent>>,
     /// 终端按真实尺寸重排之前攒下的远端输出（见 [`Terminal::feed_remote_bytes`]）。
     ssh_pending: Option<Vec<u8>>,
-    /// 远端 shell 上报的当前目录（见 [`crate::directory`] 的两个来源）。
+    /// 远端 shell 上报的当前目录（标准报告或宿主解码的 Shell 元数据）。
     ///
     /// **只有远端会话**可能有：[`Terminal::working_directory`] 取的是本地 PTY 前台进程的
     /// cwd，远端没有本地进程可采样，所以那条路恒为 `None` —— 远端目录只能由远端 shell
     /// 自己说出来。
-    remote_cwd: Option<String>,
-    /// 已经收到过**精确**的 OSC 7 上报吗（见 [`Self::remote_cwd`]）。
-    ///
-    /// 收到过就不再用标题那条启发式路子盖它（见 [`Self::feed_remote_bytes`]）。
-    osc7_seen: bool,
+    remote_cwd: RemoteDirectory,
     /// OSC 扫描器（跨块状态，见 [`crate::directory::DirectoryScanner`]）。
     directory_scanner: DirectoryScanner,
     prompt_scanner: prompt::PromptScanner,
@@ -1515,15 +1510,8 @@ impl Terminal {
             return;
         }
 
-        match self.directory_scanner.feed(bytes) {
-            // OSC 7 是精确值，拿它当准（之后标题那条不再覆盖）。
-            Some(Report::Osc7(dir)) => {
-                self.remote_cwd = Some(dir);
-                self.osc7_seen = true;
-            }
-            // 标题只是启发式（可能是 `~` 打头的，应用层展开），别盖掉精确值。
-            Some(Report::Title(dir)) if !self.osc7_seen => self.remote_cwd = Some(dir),
-            _ => {}
+        if let Some(report) = self.directory_scanner.feed(bytes) {
+            self.remote_cwd.report(report);
         }
 
         if !self.resized_once {
@@ -1558,6 +1546,9 @@ impl Terminal {
             TerminalBackendEvent::Prompt(event) => cx.emit(Event::Prompt(event)),
             TerminalBackendEvent::ShellCommand(command) => cx.emit(Event::ShellCommand(command)),
             TerminalBackendEvent::ShellContext(key, value) => {
+                if self.template.target.is_ssh() {
+                    self.remote_cwd.context(key, &value);
+                }
                 cx.emit(Event::ShellContext(key, value))
             }
             TerminalBackendEvent::Title(title) => {
@@ -2771,8 +2762,7 @@ impl Terminal {
         self.backend.shutdown();
         self.backend = TerminalBackend::Ssh(session);
         self.lifecycle.reconnect();
-        self.remote_cwd = None;
-        self.osc7_seen = false;
+        self.remote_cwd = RemoteDirectory::default();
         self.directory_scanner = DirectoryScanner::default();
         self.prompt_scanner = Default::default();
         self.sync_task = Task::ready(());
@@ -2796,14 +2786,14 @@ impl Terminal {
         self.lifecycle.state() == ConnectionState::Exited
     }
 
-    /// 远端 shell 说出来的当前目录（OSC 7 或窗口标题，见 [`crate::directory`]）；
+    /// 远端 shell 说出来的当前目录（Shell 元数据、OSC 7 或窗口标题）；
     /// 没说到过就是 `None`。
     ///
     /// 与 [`Self::working_directory`] 的区别：那个取**本地** PTY 前台进程的 cwd，远端恒为
     /// `None`；这个只有远端会话才可能有。文件管理器靠它「跟着终端走」。
     /// ⚠️ 可能是 `~` / `~/x`（标题那条路缩写了家目录），展开在应用层做。
     pub fn remote_directory(&self) -> Option<&str> {
-        self.remote_cwd.as_deref()
+        self.remote_cwd.get()
     }
 
     fn register_task_finished(

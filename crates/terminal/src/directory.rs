@@ -1,4 +1,4 @@
-//! 「远端当前目录」的两个来源。
+//! 远端目录扫描及标准报告、宿主解码 Shell 元数据的统一状态。
 //!
 //! 本地会话的 cwd 有本地进程可采样(见 `pty_info`),远端**没有**:想知道远端 shell
 //! 现在在哪个目录,只能靠**远端自己说出来**。它一共会说两种话:
@@ -46,6 +46,37 @@ pub(crate) enum Report {
 
 /// 一条 OSC 载荷最多收这么多字节,超了就不再收(见 [`DirectoryScanner::push`])。
 ///
+/// Shared directory state for standard reports and host-decoded shell metadata.
+#[derive(Default)]
+pub(crate) struct RemoteDirectory {
+    path: Option<String>,
+    exact: bool,
+}
+
+impl RemoteDirectory {
+    pub(crate) fn report(&mut self, report: Report) {
+        match report {
+            Report::Osc7(path) => {
+                self.path = Some(path);
+                self.exact = true;
+            }
+            Report::Title(path) if !self.exact => self.path = Some(path),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn context(&mut self, key: &str, value: &str) {
+        if key == "cwd" {
+            self.path = (!value.is_empty()).then(|| value.to_owned());
+            self.exact = true;
+        }
+    }
+
+    pub(crate) fn get(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+}
+
 /// OSC 8(超链接)/ OSC 52(剪贴板)的载荷可以是任意大,而它们**不终止**就得一直收;给个
 /// 上限是为了「不认识的长序列不会把内存吃光」。取值远大于任何正常的 OSC 7
 /// (`file://` + 一个绝对路径),所以正常上报不会碰到它。
@@ -440,5 +471,52 @@ mod tests {
             parse_prompt_title("jz@host: /tmp/a: b").as_deref(),
             Some("/tmp/a: b")
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_directory_tests {
+    use super::*;
+
+    #[test]
+    fn fragmented_shell_directory_reports_reach_the_shared_state() {
+        fn decode(payload: &[u8]) -> Option<crate::ShellMetadata> {
+            let path = std::str::from_utf8(payload.strip_prefix(b"633;AlacrtermCwd;")?).ok()?;
+            Some(crate::ShellMetadata::Context("cwd", path.to_owned()))
+        }
+        let mut scanner = crate::prompt::PromptScanner::default();
+        let mut directory = RemoteDirectory::default();
+        for chunk in [
+            b"\x1b]633;AlacrtermCwd;/home/".as_slice(),
+            b"user\x07",
+            b"\x1b]633;AlacrtermCwd;/tmp/My Files\x07",
+        ] {
+            scanner.feed(chunk, Some(decode));
+            for (key, value) in scanner.context() {
+                directory.context(key, &value);
+            }
+        }
+        assert_eq!(directory.get(), Some("/tmp/My Files"));
+    }
+
+    #[test]
+    fn shell_metadata_updates_the_directory_used_by_file_management() {
+        let mut state = RemoteDirectory::default();
+        state.report(Report::Title("~".into()));
+        state.context("cwd", "/home/user");
+        assert_eq!(state.get(), Some("/home/user"));
+        state.report(Report::Title("~/old".into()));
+        assert_eq!(state.get(), Some("/home/user"));
+        state.context("cwd", "/tmp/My Files/目录");
+        assert_eq!(state.get(), Some("/tmp/My Files/目录"));
+        state.context("shell", "posix");
+        assert_eq!(state.get(), Some("/tmp/My Files/目录"));
+        state.report(Report::Osc7("/var/log".into()));
+        assert_eq!(state.get(), Some("/var/log"));
+        state.context("cwd", "");
+        assert_eq!(state.get(), None);
+        state = RemoteDirectory::default();
+        state.report(Report::Title("~/new-session".into()));
+        assert_eq!(state.get(), Some("~/new-session"));
     }
 }
