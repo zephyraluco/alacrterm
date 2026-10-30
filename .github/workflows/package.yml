@@ -26,6 +26,11 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '12.0'
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.3
         with:
@@ -55,3 +60,4 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
