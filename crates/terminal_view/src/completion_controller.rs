@@ -154,6 +154,7 @@ impl CompletionController {
         self.cancel();
         self.model.invalidate();
         self.model.add_command("");
+        self.model.reset_history();
         self.model.cwd = None;
         self.model.powershell = None;
         if let Some(service) = &self.model.service {

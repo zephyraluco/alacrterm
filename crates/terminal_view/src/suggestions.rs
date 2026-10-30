@@ -38,7 +38,7 @@ pub struct Suggestions {
     pub cursor: usize,
     pub revision: u64,
     candidate_revision: u64,
-    history: Vec<String>,
+    history: crate::history::History,
     commands: Vec<String>,
     pub cwd: Option<String>,
     pub powershell: Option<bool>,
@@ -68,6 +68,35 @@ impl Suggestions {
         if let InputState::Editing { menu } = &mut self.state {
             *menu = MenuState::Ready;
         }
+    }
+    pub fn import_history(&mut self, event: terminal::HistoryEvent) -> bool {
+        let visible = self.has_current_candidates();
+        let selected = self
+            .candidates
+            .get(self.selected)
+            .map(|item| item.insert_text.clone());
+        if !self
+            .history
+            .receive(event, self.settings.enabled && self.settings.history)
+        {
+            return false;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        self.clear_cache();
+        if visible {
+            self.refresh_in_place(false, false);
+            if let Some(index) = self
+                .candidates
+                .iter()
+                .position(|item| Some(&item.insert_text) == selected.as_ref())
+            {
+                self.selected = index;
+            }
+        }
+        true
+    }
+    pub fn reset_history(&mut self) {
+        self.history.reset();
     }
     pub fn clear_history(&mut self) {
         self.history.clear();
@@ -287,9 +316,7 @@ impl Suggestions {
                     command: Some(command),
                 },
             ) if self.settings.history => {
-                self.history.retain(|old| old != &command);
-                self.history.insert(0, command);
-                self.history.truncate(256);
+                self.history.record(command);
                 InputState::Inactive
             }
             _ => InputState::Inactive,
@@ -417,7 +444,7 @@ impl Suggestions {
             cursor: self.cursor,
             powershell: self.powershell,
             cwd: self.cwd.as_deref().unwrap_or(""),
-            history: &self.history,
+            history: self.history.entries(),
             commands: &self.commands,
             settings: &self.settings,
         }

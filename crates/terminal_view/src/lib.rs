@@ -13,6 +13,7 @@ pub mod completion;
 mod completion_controller;
 pub mod completion_service;
 mod contrast;
+mod history;
 mod prompt_input;
 mod scrollbar;
 mod suggestion_popup;
@@ -321,6 +322,11 @@ impl TerminalView {
 
     fn handle_terminal_event(&mut self, event: &TerminalEvent, cx: &mut gpui::Context<Self>) {
         match event {
+            TerminalEvent::ShellHistory(event) => {
+                if self.completion.model.import_history(event.clone()) {
+                    cx.notify();
+                }
+            }
             TerminalEvent::ShellCommand(command) => self.completion.model.add_command(command),
             TerminalEvent::ShellContext(key, value) => {
                 self.completion.model.context(key, value);
