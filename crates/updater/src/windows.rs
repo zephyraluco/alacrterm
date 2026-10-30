@@ -95,7 +95,19 @@ fn create_job(data: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(any(windows, test))]
-fn installation_lock(data: &Path, executable: &Path) -> Result<std::fs::File> {
+struct InstallationLock(std::fs::File);
+
+#[cfg(any(windows, test))]
+impl Drop for InstallationLock {
+    fn drop(&mut self) {
+        // Unix fork can temporarily inherit the open file description before exec.
+        // Explicit unlock releases it even while an inherited/duplicated descriptor lives.
+        let _ = self.0.unlock();
+    }
+}
+
+#[cfg(any(windows, test))]
+fn installation_lock(data: &Path, executable: &Path) -> Result<InstallationLock> {
     use sha2::{Digest as _, Sha256};
     let identity = executable
         .canonicalize()
@@ -113,7 +125,7 @@ fn installation_lock(data: &Path, executable: &Path) -> Result<std::fs::File> {
         .write(true)
         .open(data.join(name))?;
     file.try_lock().context("此安装目录已有更新助手正在运行")?;
-    Ok(file)
+    Ok(InstallationLock(file))
 }
 
 /// The application stays alive until the helper has verified its request and acquired the lock.
@@ -310,6 +322,23 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_installation_guard_unlocks_with_a_shared_descriptor_alive() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("alacrterm.exe");
+        let lock = installation_lock(temp.path(), &exe).unwrap();
+        // A duplicate shares the lock-bearing open file description, just as fork does.
+        let inherited = lock.0.try_clone().unwrap();
+        assert!(installation_lock(temp.path(), &exe).is_err());
+        drop(lock);
+        let replacement = installation_lock(temp.path(), &exe).unwrap();
+        drop(inherited);
+        assert!(installation_lock(temp.path(), &exe).is_err());
+        drop(replacement);
+        assert!(installation_lock(temp.path(), &exe).is_ok());
     }
 
     #[test]
