@@ -643,6 +643,10 @@ fn load_text(tab: &mut PreviewTab, window: &mut Window, cx: &mut Context<Preview
 }
 
 impl PreviewWindow {
+    pub(crate) fn shutdown_sources(&self) -> Vec<SshFs> {
+        self.tabs.iter().map(|tab| tab.request.fs.clone()).collect()
+    }
+
     fn new(
         request: PreviewRequest,
         main_window: AnyWindowHandle,
@@ -965,6 +969,10 @@ impl PreviewWindow {
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.finish_save(preview_id, operation_id, Err(message), window, cx)
                     });
+                    return;
+                }
+                // A forced app shutdown may have removed the preview while writing the cache.
+                if this.update_in(cx, |_, _, _| ()).is_err() {
                     return;
                 }
                 let mut events = fs.upload_one(cache.clone(), remote_path.clone()).events;
@@ -1519,8 +1527,7 @@ impl Render for PreviewWindow {
 impl Drop for PreviewWindow {
     fn drop(&mut self) {
         // 每个标签都持有缓存租约，`self.tabs` 析构时自动释放（最后一份时删文件）。
-        // ⚠️ 有没写回的改动时关窗口那一下先被 [`PreviewWindow::should_close`] 拦下来问了,
-        // 所以走到这里的内容要么已经写回远端、要么是用户明确选了「丢弃」。
+        // 单独关闭预览仍处理未保存改动；退出主应用时则直接丢弃并取消写回。
     }
 }
 
@@ -1839,33 +1846,15 @@ fn save_label(text: &TextEditing) -> Option<(String, bool)> {
 }
 
 impl AppRoot {
-    pub(crate) fn preview_has_pending_changes(
-        handle: Option<gpui::WindowHandle<Root>>,
-        cx: &mut App,
-    ) -> bool {
-        handle.is_some_and(|handle| {
-            handle
-                .update(cx, |root, _, cx| {
-                    root.view()
-                        .clone()
-                        .downcast::<PreviewWindow>()
-                        .is_ok_and(|view| {
-                            view.read(cx)
-                                .tabs
-                                .iter()
-                                .any(|tab| close_ask(tab) != CloseAsk::Allow)
-                        })
-                })
-                .unwrap_or(false)
-        })
-    }
-
     /// 打开一个文件预览。
     ///
     /// **一个窗口多个标签**(见模块文档):窗口没开就开一个(首标签就是这个请求),已经开了就
     /// 往里加一个标签(同一个远端路径的直接切过去)。主窗口关掉时这个窗口跟着退出应用,见
     /// [`PreviewWindow::new`] 的订阅。
     pub(crate) fn open_preview_window(&mut self, request: PreviewRequest, cx: &mut App) {
+        if self.closing {
+            return;
+        }
         // 窗口已经开着(而且根视图还是我们的 `Root`):直接把请求交给它加标签。
         if let Some(handle) = self.preview_window {
             // ⚠️ `request` 后面还要用来开新窗口(句柄失效那条路),所以这里克隆一份进闭包。

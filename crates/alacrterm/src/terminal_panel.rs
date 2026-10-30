@@ -83,6 +83,9 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.closing {
+            return;
+        }
         let SessionRequest { name, target } = request;
         let target = match target {
             SessionTarget::Local(shell) => TerminalTarget::Local(shell),
@@ -524,12 +527,15 @@ impl TabPane {
         self.focused_view().read(cx).is_connected(cx)
     }
 
-    pub(crate) fn connected_views(&self, cx: &App) -> Vec<EntityId> {
-        self.panes
-            .iter()
-            .filter(|pane| pane.read(cx).is_connected(cx))
-            .map(Entity::entity_id)
-            .collect()
+    pub(crate) fn shutdown(&mut self, cx: &mut App) -> Vec<terminal::SshFs> {
+        let mut sources = Vec::new();
+        for pane in &self.panes {
+            if let Some(source) = pane.read(cx).remote_fs(cx) {
+                sources.push(source);
+            }
+            pane.update(cx, |view, cx| view.shutdown(cx));
+        }
+        sources
     }
 
     /// 把渲染参数推给本页所有格子。

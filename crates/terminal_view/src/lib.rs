@@ -835,6 +835,15 @@ impl TerminalView {
     /// 这是「文件管理器跟着终端走」的数据源。远端没有本地进程可采样，目录只能由远端
     /// shell 自己说（集成脚本的目录元数据、OSC 7，或窗口标题里的 `\w`）。
     /// ⚠️ 可能是 `~` / `~/x`（标题那条路缩写了家目录），展开由应用层做。
+    pub fn shutdown(&mut self, cx: &mut gpui::Context<Self>) {
+        self._startup_task = gpui::Task::ready(());
+        self.recovery_task = gpui::Task::ready(());
+        self.subscription = None;
+        self.terminal = None;
+        self.completion.dismiss();
+        cx.notify();
+    }
+
     pub fn remote_directory(&self, cx: &App) -> Option<String> {
         self.terminal.as_ref().and_then(|terminal| {
             terminal.read_with(cx, |terminal, _| {

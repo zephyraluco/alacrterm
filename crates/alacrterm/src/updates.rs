@@ -572,6 +572,8 @@ pub(crate) fn install_package(
     cx: &mut App,
     continue_installation: impl FnOnce(bool, &mut gpui::Window, &mut App) -> bool + 'static,
 ) {
+    #[cfg(target_os = "linux")]
+    let _ = root;
     let installing = model(cx);
     let Some(task) = installing.update(cx, |update, cx| update.prepare_install(cx)) else {
         return;
@@ -584,27 +586,25 @@ pub(crate) fn install_package(
                 let proceed = continue_installation(prepared.is_ok(), window, cx);
                 match prepared {
                     Ok(prepared) if proceed => {
+                        #[cfg(target_os = "linux")]
+                        {
+                            // Opening a system package installer does not exit the application.
+                            use gpui_kit::component::{WindowExt as _, notification::Notification};
+                            let result = prepared.install(cx);
+                            installing.update(cx, |update, cx| update.finish_preparing(None, cx));
+                            let notification = match result {
+                                Ok(()) => Notification::info(model(cx).read(cx).notice.clone()),
+                                Err(error) => Notification::error(format!("操作失败：{error:#}")),
+                            };
+                            window.push_notification(notification, cx);
+                        }
+                        #[cfg(not(target_os = "linux"))]
                         crate::exit_coordinator::request_with_completion(
                             root,
                             window,
                             cx,
                             "安装更新",
-                            Box::new(move |window, cx| {
-                                prepared.install(cx)?;
-                                #[cfg(target_os = "linux")]
-                                {
-                                    use gpui_kit::component::{
-                                        WindowExt as _, notification::Notification,
-                                    };
-                                    window.push_notification(
-                                        Notification::info(model(cx).read(cx).notice.clone()),
-                                        cx,
-                                    );
-                                }
-                                #[cfg(not(target_os = "linux"))]
-                                let _ = window;
-                                Ok(())
-                            }),
+                            Box::new(move |_, cx| prepared.install(cx)),
                             Box::new(move |_, cx| {
                                 installing
                                     .update(cx, |update, cx| update.finish_preparing(None, cx))

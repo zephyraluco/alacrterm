@@ -88,16 +88,27 @@ pub struct RemoteMeta {
 /// 做成**共享的原子标志**而不是一条「取消」消息:传输 worker 一次只跑一个传输,跑起来就
 /// 占住了自己那条通道 —— 用消息取消的话,恰恰在「最需要取消」的时候送不进去。
 #[derive(Clone, Default, Debug)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken(Arc<CancelState>);
+
+#[derive(Default, Debug)]
+struct CancelState {
+    cancelled: AtomicBool,
+    finished: AtomicBool,
+}
 
 impl CancelToken {
-    /// 请求取消。worker 在下一个分块边界放弃(不会立刻中断一次进行中的往返)。
+    /// 请求取消。连接、扫描及复制任务会响应；目标文件清理完成后报告结束。
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.0.cancelled.store(true, Ordering::Relaxed);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.cancelled.load(Ordering::Relaxed)
+    }
+    async fn cancelled(&self) {
+        while !self.is_cancelled() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 }
 
@@ -205,6 +216,7 @@ struct Inner {
     /// **传输** worker 的入口(另一条连接,见模块文档);同样是懒的。
     transfer: Mutex<Option<TokioSender<TransferRequest>>>,
     completion: Mutex<Option<TokioSender<Request>>>,
+    pending: Mutex<Vec<CancelToken>>,
 }
 
 impl PartialEq for SshFs {
@@ -225,12 +237,28 @@ impl SshFs {
             worker: Mutex::new(None),
             transfer: Mutex::new(None),
             completion: Mutex::new(None),
+            pending: Mutex::new(Vec::new()),
         }))
     }
 
     /// 这条连接实例的身份。克隆句柄返回同一个值；新建句柄一定是新值。
     pub fn session_id(&self) -> SessionId {
         self.0.id
+    }
+
+    /// Cancel all queued/running transfers, including preview writebacks.
+    pub fn cancel_transfers(&self) {
+        let mut pending = self.0.pending.lock().expect("transfer registry poisoned");
+        pending.retain(|token| !token.0.finished.load(Ordering::Acquire));
+        for token in pending.iter() {
+            token.cancel();
+        }
+    }
+
+    pub fn has_pending_transfers(&self) -> bool {
+        let mut pending = self.0.pending.lock().expect("transfer registry poisoned");
+        pending.retain(|token| !token.0.finished.load(Ordering::Acquire));
+        !pending.is_empty()
     }
 
     /// 远端主机名(参数里的 `host`)。
@@ -457,6 +485,11 @@ impl SshFs {
     fn send_transfer(&self, kind: TransferKind) -> Transfer {
         let (events, receiver) = futures_mpsc::unbounded();
         let cancel = CancelToken::default();
+        {
+            let mut pending = self.0.pending.lock().expect("transfer registry poisoned");
+            pending.retain(|token| !token.0.finished.load(Ordering::Acquire));
+            pending.push(cancel.clone());
+        }
         let mut request = TransferRequest {
             kind,
             events,
@@ -568,6 +601,12 @@ struct TransferRequest {
     kind: TransferKind,
     events: futures_mpsc::UnboundedSender<TransferEvent>,
     cancel: CancelToken,
+}
+
+impl Drop for TransferRequest {
+    fn drop(&mut self) {
+        self.cancel.0.finished.store(true, Ordering::Release);
+    }
 }
 
 /// 起**浏览** worker(线程 + 运行时 + 一条连接),返回它的入口。
@@ -910,7 +949,12 @@ async fn serve_transfers(params: SshParams, mut requests: UnboundedReceiver<Tran
 
     while let Some(request) = requests.recv().await {
         if sftp.is_none() {
-            match connect(&params).await {
+            let connection = tokio::select! {
+                biased;
+                _ = request.cancel.cancelled() => Err(SshError::Cancelled),
+                result = connect(&params) => result,
+            };
+            match connection {
                 Ok(session) => sftp = Some(session),
                 Err(error) => {
                     let _ = request
@@ -955,7 +999,10 @@ async fn run_transfer(
         kind,
         TransferKind::Upload { .. } | TransferKind::UploadOne { .. }
     );
-    let jobs = match kind {
+    let jobs = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(TransferFailure::cancelled()),
+        jobs = async { Ok::<_, TransferFailure>(match kind {
         TransferKind::Upload { locals, remote_dir } => collect_uploads(locals, remote_dir)?,
         TransferKind::Download { remotes, local_dir } => {
             collect_downloads(session, remotes, local_dir).await?
@@ -987,6 +1034,7 @@ async fn run_transfer(
         }
         // 删除在函数开头就分流走了 —— 它没有「搬字节」的清单。
         TransferKind::Remove { .. } => unreachable!("删除不会走到 Job 清单这一路"),
+        }) } => jobs?,
     };
 
     let mut reporter = Reporter::new(events, cancel, &jobs);
@@ -1359,6 +1407,11 @@ async fn upload_file(
         .await
         .map_err(TransferFailure::from_sftp)?;
 
+    let cancel = reporter.cancel.clone();
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(TransferFailure::cancelled()),
+        result = async {
     let mut buffer = vec![0u8; CHUNK];
     loop {
         let read = source
@@ -1374,9 +1427,31 @@ async fn upload_file(
             .map_err(TransferFailure::from_io)?;
         reporter.advance(read as u64)?;
     }
-    // `close` = 把在途的写等回来 + 发 CLOSE;光靠 `Drop` 不等在途写。
-    target.close().await.map_err(TransferFailure::from_io)?;
-    Ok(())
+            reporter.check()
+        } => result,
+    };
+    // Close outstanding writes before removing the incomplete destination.
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), target.close())
+        .await
+        .map_err(|_| {
+            TransferFailure::from_io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "SFTP close timed out",
+            ))
+        })
+        .and_then(|result| result.map_err(TransferFailure::from_io));
+    let result = result.and(closed).and_then(|()| reporter.check());
+    if result.is_err() {
+        let removed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session.remove_file(remote_path(remote)),
+        )
+        .await;
+        if !matches!(removed, Ok(Ok(()))) {
+            log::warn!("无法清理未完成的远端传输文件: {}", remote.display());
+        }
+    }
+    result
 }
 
 /// 远端路径 → 本地文件,分块搬,每块都查一次取消。
@@ -1402,6 +1477,11 @@ async fn download_file(
         .await
         .map_err(TransferFailure::local)?;
 
+    let cancel = reporter.cancel.clone();
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(TransferFailure::cancelled()),
+        result = async {
     let mut buffer = vec![0u8; CHUNK];
     loop {
         let read = source
@@ -1417,6 +1497,18 @@ async fn download_file(
             .map_err(TransferFailure::local)?;
         reporter.advance(read as u64)?;
     }
-    target.flush().await.map_err(TransferFailure::local)?;
-    Ok(())
+            reporter.check()
+        } => result,
+    };
+    // Tokio file writes may still be executing on a blocking worker after cancellation.
+    // Flush before closing/removing the handle, including on Windows.
+    let flushed = target.flush().await.map_err(TransferFailure::local);
+    let result = result.and(flushed).and_then(|()| reporter.check());
+    drop(target);
+    if result.is_err() {
+        tokio::fs::remove_file(local)
+            .await
+            .map_err(TransferFailure::local)?;
+    }
+    result
 }

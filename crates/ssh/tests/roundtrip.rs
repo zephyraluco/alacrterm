@@ -1211,3 +1211,72 @@ async fn closing_a_session_cancels_pending_host_preparation() {
     .unwrap();
     let _ = std::fs::remove_file(known_hosts);
 }
+
+/// Cancellation must finish deleting the partial destination before reporting Done.
+#[tokio::test]
+async fn cancelling_active_upload_and_download_removes_partial_destinations() {
+    use ssh::{SshError, SshFs, TransferEvent};
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("fs-cancel-cleanup");
+    let mut params = SshParams::new("127.0.0.1", port, "tester");
+    params.auth = SshAuth::Password(PASSWORD.to_string());
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let fs = SshFs::new(params);
+    let root =
+        std::env::temp_dir().join(format!("alacrterm-cancel-cleanup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.bin");
+    std::fs::File::create(&source)
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
+    let untouched = root.join("completed.bin");
+    std::fs::write(&untouched, b"keep completed file").unwrap();
+    for upload in [true, false] {
+        let target = root.join(if upload { "upload.bin" } else { "download.bin" });
+        let mut transfer = if upload {
+            fs.upload_one(source.clone(), target.to_string_lossy().replace('\\', "/"))
+        } else {
+            fs.download_one(source.to_string_lossy().replace('\\', "/"), target.clone())
+        };
+        let mut cancelled = false;
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            while let Some(event) = transfer.events.next().await {
+                match event {
+                    TransferEvent::Progress(progress) if progress.bytes_done > 0 && !cancelled => {
+                        assert!(
+                            target.exists(),
+                            "test must cancel after the target was created"
+                        );
+                        fs.cancel_transfers();
+                        cancelled = true;
+                    }
+                    TransferEvent::Done(result) => return result,
+                    _ => {}
+                }
+            }
+            panic!("transfer closed without Done")
+        })
+        .await
+        .unwrap();
+        assert!(cancelled);
+        assert!(matches!(result, Err(SshError::Cancelled)), "{result:?}");
+        assert!(
+            !target.exists(),
+            "partial destination survived cancellation"
+        );
+        assert_eq!(std::fs::metadata(&source).unwrap().len(), 64 * 1024 * 1024);
+        assert_eq!(std::fs::read(&untouched).unwrap(), b"keep completed file");
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fs.has_pending_transfers() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    let _ = std::fs::remove_file(known_hosts);
+}
