@@ -338,3 +338,69 @@ mod behavior {
         assert_eq!(texts(&state), ["git status"]);
     }
 }
+
+mod cached_sessions {
+    use super::*;
+    fn paths(text: &str) -> Suggestions {
+        let mut state = state();
+        state.phase(PromptEvent::Prompt);
+        state.phase(PromptEvent::Input);
+        state.context("shell", "posix");
+        state.context("cwd", "/project");
+        state.input(text);
+        state.refresh(false);
+        let query = path_query(&state).unwrap();
+        state.merge_candidates(query.candidates(vec![
+            super::super::path_suggestions::Entry {
+                name: "alpha.txt".into(),
+                directory: false,
+            },
+            super::super::path_suggestions::Entry {
+                name: "apple.txt".into(),
+                directory: false,
+            },
+        ]));
+        state
+    }
+    #[test]
+    fn deletion_can_restore_broader_cached_paths_without_requerying() {
+        let mut state = paths("cat a");
+        state.input("l");
+        state.refresh_in_place(false, true);
+        assert_eq!(
+            state
+                .candidates
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha.txt"]
+        );
+        assert_eq!(state.candidates[0].replacement, 4..6);
+        state.edit_key("backspace", false);
+        state.refilter_cached();
+        assert_eq!(state.candidates.len(), 2);
+        assert!(
+            state
+                .candidates
+                .iter()
+                .all(|item| item.replacement == (4..5))
+        );
+        state.edit_key("backspace", false);
+        state.edit_key("w", true);
+        state.refilter_cached();
+        assert!(state.candidates.is_empty());
+    }
+    #[test]
+    fn cached_paths_do_not_cross_directory_quote_or_session_boundaries() {
+        for suffix in ["/", "\""] {
+            let mut state = paths("cat a");
+            state.input(suffix);
+            state.refresh_in_place(false, true);
+            assert!(!state.has_current_candidates());
+        }
+        let mut state = paths("cat a");
+        state.context("cwd", "/another");
+        state.refilter_cached();
+        assert!(state.candidates.is_empty());
+    }
+}

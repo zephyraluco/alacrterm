@@ -92,6 +92,60 @@ impl CompletionService for CompletionEngine {
             .unwrap_or("")
             .into()
     }
+    fn reuse_candidate(
+        &self,
+        previous: &Context<'_>,
+        current: &Context<'_>,
+        candidate: &Candidate,
+    ) -> Option<Candidate> {
+        use completion::{Kind, Source};
+        let mut item =
+            terminal_view::completion_service::rebase_candidate(previous, current, candidate)?;
+        let query = if item.source == Source::Filesystem {
+            let old = path_suggestions::PathQuery::parse(
+                previous.text,
+                previous.cursor,
+                previous.powershell?,
+            )?;
+            let new = path_suggestions::PathQuery::parse(
+                current.text,
+                current.cursor,
+                current.powershell?,
+            )?;
+            if !old.same_location(&new) || new.replacement != item.replacement {
+                return None;
+            }
+            new.leaf
+        } else {
+            if item.kind == Kind::Command
+                && (current.cursor
+                    > current
+                        .text
+                        .find(char::is_whitespace)
+                        .unwrap_or(current.text.len())
+                    || current.commands.binary_search(&item.insert_text).is_err())
+            {
+                return None;
+            }
+            current
+                .text
+                .get(item.replacement.start..current.cursor)?
+                .to_owned()
+        };
+        let value = if item.source == Source::Filesystem {
+            item.label.trim_end_matches('/')
+        } else {
+            &item.insert_text
+        };
+        let score = scoring::match_score(
+            &query,
+            value,
+            current.powershell == Some(true),
+            item.kind == Kind::Command && current.settings.fuzzy,
+        )?;
+        item.score = score;
+        Some(item)
+    }
     fn reset(&self) {
         let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
         cache.generation = cache.generation.wrapping_add(1);

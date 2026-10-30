@@ -90,6 +90,7 @@ pub struct TerminalView {
     terminal_blinking: Option<bool>,
     completion: completion_controller::CompletionController,
     suggestion_scroll: gpui_kit::component::VirtualListScrollHandle,
+    suggestion_item_sizes: std::rc::Rc<Vec<gpui::Size<gpui::Pixels>>>,
     _blink_task: gpui::Task<()>,
     _startup_task: gpui::Task<()>,
     recovery_task: gpui::Task<()>,
@@ -230,6 +231,7 @@ impl TerminalView {
             terminal_blinking: None,
             completion: completion_controller::CompletionController::new(settings.suggestions),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
+            suggestion_item_sizes: Default::default(),
             _blink_task: blink_task,
             _startup_task: startup_task,
             recovery_task: gpui::Task::ready(()),
@@ -320,7 +322,10 @@ impl TerminalView {
     fn handle_terminal_event(&mut self, event: &TerminalEvent, cx: &mut gpui::Context<Self>) {
         match event {
             TerminalEvent::ShellCommand(command) => self.completion.model.add_command(command),
-            TerminalEvent::ShellContext(key, value) => self.completion.model.context(key, value),
+            TerminalEvent::ShellContext(key, value) => {
+                self.completion.model.context(key, value);
+                cx.notify();
+            }
             TerminalEvent::Prompt(event) => {
                 let generation = self
                     .terminal
@@ -420,7 +425,7 @@ impl TerminalView {
             }) {
                 self.completion.invalidate_input();
             }
-            self.completion.model.input(text);
+            self.completion.input(text);
             self.schedule_suggestions(false, cx);
             if let Some(terminal) = &self.terminal {
                 terminal.update(cx, |term, _| {
@@ -531,6 +536,12 @@ impl TerminalView {
         if !self.completion.begin(manual) {
             return;
         }
+        self.suggestion_scroll.scroll_to_item(
+            self.completion.model.selected,
+            gpui::ScrollStrategy::Nearest,
+        );
+        cx.notify();
+        let generation = self.completion.generation();
         self.completion.task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(if manual {
@@ -540,12 +551,12 @@ impl TerminalView {
                 })
                 .await;
             let Ok(request) = this.update(cx, |this, cx| {
-                if !this.focused || this.ime_state.is_some() {
+                if !this.focused
+                    || this.ime_state.is_some()
+                    || this.completion.generation() != generation
+                {
                     return None;
                 }
-                this.completion.model.refresh(manual);
-                this.suggestion_scroll
-                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 cx.notify();
                 let backend = if this.remote {
                     completion_service::Backend::Remote(this.remote_fs(cx)?)
@@ -557,13 +568,25 @@ impl TerminalView {
                 return;
             };
             let Some(request) = request else {
+                let _ = this.update(cx, |this, cx| {
+                    this.completion.finish(generation);
+                    cx.notify();
+                });
                 return;
             };
             let Some(response) = request.resolve(cx.background_executor().clone()).await else {
+                let _ = this.update(cx, |this, cx| {
+                    this.completion.finish(generation);
+                    cx.notify();
+                });
                 return;
             };
             let _ = this.update(cx, |this, cx| {
                 if this.focused && this.ime_state.is_none() && this.completion.apply(response) {
+                    this.suggestion_scroll.scroll_to_item(
+                        this.completion.model.selected,
+                        gpui::ScrollStrategy::Nearest,
+                    );
                     cx.notify();
                 }
             });
@@ -607,6 +630,7 @@ impl TerminalView {
         if self
             .completion
             .recover_input(terminal.last_content(), terminal.content_generation())
+            && self.completion.take_recovery_trigger()
         {
             self.schedule_suggestions(false, cx);
         }
@@ -628,7 +652,7 @@ impl TerminalView {
         };
         match acceptance {
             completion_controller::Acceptance::Submit => return false,
-            completion_controller::Acceptance::Refresh => self.schedule_suggestions(false, cx),
+            completion_controller::Acceptance::Refresh => self.schedule_suggestions(true, cx),
             completion_controller::Acceptance::Insert { bytes, retrigger } => {
                 if let Some(terminal) = &self.terminal {
                     terminal.update(cx, |terminal, _| terminal.input(bytes.into_bytes()));
@@ -679,7 +703,7 @@ impl TerminalView {
         }
         let control_passthrough =
             control || e.keystroke.modifiers.alt || e.keystroke.modifiers.platform;
-        if control_passthrough {
+        if control_passthrough && !(control && matches!(key, "w" | "u" | "k")) {
             self.completion.dismiss();
             cx.notify();
         }
@@ -690,11 +714,20 @@ impl TerminalView {
         ) {
             completion_controller::PopupKey::Navigate(delta) => {
                 self.completion.model.step(delta);
-                self.suggestion_scroll.scroll_to_item(
-                    self.completion.model.selected,
-                    gpui::ScrollStrategy::Nearest,
-                );
+                // Fixed-height rows can scroll immediately, without queuing a
+                // deferred request that repeated key events can overwrite.
+                let viewport = self.suggestion_scroll.bounds().size.height;
+                let mut offset = self.suggestion_scroll.offset();
+                let top = gpui::px(24.) * self.completion.model.selected as f32;
+                let bottom = top + gpui::px(24.);
+                if top + offset.y < gpui::px(0.) {
+                    offset.y = -top;
+                } else if bottom + offset.y > viewport {
+                    offset.y = viewport - bottom;
+                }
+                self.suggestion_scroll.set_offset(offset);
                 cx.notify();
+                window.refresh();
                 cx.stop_propagation();
                 return;
             }
@@ -719,7 +752,13 @@ impl TerminalView {
         } else if key == "enter" && plain {
             self.completion.submit();
         } else if !printable && !matches!(key, "shift" | "control" | "alt" | "cmd" | "super") {
-            let refresh_native = self.completion.edit_key(key, control);
+            let refresh_native = self.completion.edit_key(key, control)
+                || e.keystroke.modifiers.alt
+                || e.keystroke.modifiers.platform;
+            self.suggestion_scroll.scroll_to_item(
+                self.completion.model.selected,
+                gpui::ScrollStrategy::Nearest,
+            );
             if refresh_native
                 && self.completion.has_input_anchor()
                 && allowed
@@ -727,9 +766,7 @@ impl TerminalView {
             {
                 self.request_input_recovery(cx);
             }
-            if !control_passthrough {
-                self.schedule_suggestions(false, cx);
-            }
+            cx.notify();
         }
         if let Some(terminal) = &self.terminal {
             // ⚠️ 复制粘贴 / 滚动 / vi 模式不在这里：那些键由 keymap 绑成应用动作
@@ -830,8 +867,17 @@ impl TerminalView {
     /// 没说到过时为 `None`。
     ///
     /// 这是「文件管理器跟着终端走」的数据源。远端没有本地进程可采样，目录只能由远端
-    /// shell 自己说（精确的 OSC 7，或 Ubuntu 默认 `PS1` 放在窗口标题里的 `\w`）。
+    /// shell 自己说（集成脚本的目录元数据、OSC 7，或窗口标题里的 `\w`）。
     /// ⚠️ 可能是 `~` / `~/x`（标题那条路缩写了家目录），展开由应用层做。
+    pub fn shutdown(&mut self, cx: &mut gpui::Context<Self>) {
+        self._startup_task = gpui::Task::ready(());
+        self.recovery_task = gpui::Task::ready(());
+        self.subscription = None;
+        self.terminal = None;
+        self.completion.dismiss();
+        cx.notify();
+    }
+
     pub fn remote_directory(&self, cx: &App) -> Option<String> {
         self.terminal.as_ref().and_then(|terminal| {
             terminal.read_with(cx, |terminal, _| {

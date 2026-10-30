@@ -18,7 +18,8 @@ impl TerminalView {
         self.completion.popup_visible = false;
         if !self.focused
             || self.ime_state.is_some()
-            || !self.completion.model.has_current_candidates()
+            || self.completion.model.candidates.is_empty()
+            || (!self.completion.pending && !self.completion.model.has_current_candidates())
         {
             return None;
         }
@@ -66,14 +67,17 @@ impl TerminalView {
         let background = cx.theme().popover;
         let border = cx.theme().border;
         let font_size = self.settings.font_size.clamp(px(10.), px(16.));
-        let item_sizes = std::rc::Rc::new(vec![
-            size(width, row_height);
-            self.completion.model.candidates.len()
-        ]);
+        let item_size = size(width, row_height);
+        if self.suggestion_item_sizes.len() != self.completion.model.candidates.len()
+            || self.suggestion_item_sizes.first() != Some(&item_size)
+        {
+            self.suggestion_item_sizes =
+                std::rc::Rc::new(vec![item_size; self.completion.model.candidates.len()]);
+        }
         let list = v_virtual_list(
             cx.entity(),
             "terminal-candidates",
-            item_sizes,
+            self.suggestion_item_sizes.clone(),
             move |this, range, _, cx| {
                 range
                     .filter_map(|index| {
@@ -163,7 +167,9 @@ impl TerminalView {
                                     cx.stop_propagation();
                                 })
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    if this.ime_state.is_none() {
+                                    if this.ime_state.is_none()
+                                        && this.completion.model.has_current_candidates()
+                                    {
                                         this.completion.model.selected = index;
                                         this.accept_suggestion(cx);
                                         window.focus(&this.focus_handle, cx);

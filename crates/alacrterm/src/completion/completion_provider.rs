@@ -89,6 +89,7 @@ impl Provider {
                     context
                         .commands
                         .iter()
+                        .filter(|command| !command.starts_with('_'))
                         .filter_map(|command| {
                             let score = match_score(
                                 prefix,
@@ -156,6 +157,33 @@ impl Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_candidates_exclude_underscore_prefixed_shell_helpers() {
+        let settings = SuggestionSettings::default();
+        let commands = ["__git", "_git", "git", "git_helper"].map(String::from);
+        for powershell in [false, true] {
+            for text in ["", "g", "_", "__"] {
+                let context = Context {
+                    text,
+                    cursor: text.len(),
+                    powershell,
+                    history: &[],
+                    commands: &commands,
+                    settings: &settings,
+                    path: None,
+                };
+                let Some(Work::Ready(items)) = Provider::Commands.query(&context) else {
+                    panic!("expected command candidates");
+                };
+                assert!(items.iter().all(|item| !item.insert_text.starts_with('_')));
+                if text == "g" {
+                    assert!(items.iter().any(|item| item.insert_text == "git"));
+                    assert!(items.iter().any(|item| item.insert_text == "git_helper"));
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_same_context_selects_immediate_or_deferred_providers_by_policy() {
         let settings = SuggestionSettings::default();

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>alacrterm</title>
+  <defs>
+    <!-- 竖向提亮：顶部 ≈ +0.115 白，底部归零（对标 zed-app-icon 的纵向亮度衰减） -->
+    <linearGradient id="lift" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.115"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <!-- 顶部偏右的柔光热点（实测峰值约在 x≈0.58, y≈0.10） -->
+    <radialGradient id="glow" cx="0.58" cy="0.1" r="0.45">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.075"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ink" gradientUnits="userSpaceOnUse" x1="66" y1="128" x2="206" y2="128">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="1"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 底板：近黑圆角方块 + 竖向提亮 + 柔光热点（无描边，同 zed-app-icon） -->
+  <rect x="19.2" y="19.2" width="217.6" height="217.6" rx="48.63" fill="#0b0c0d"/>
+  <rect x="19.2" y="19.2" width="217.6" height="217.6" rx="48.63" fill="url(#lift)"/>
+  <rect x="19.2" y="19.2" width="217.6" height="217.6" rx="48.63" fill="url(#glow)"/>
+
+  <!-- 标记：提示符 + 光标 -->
+  <g transform="translate(19.2,19.2) scale(0.85000)">
+    <path d="M70 70 L136 128 L70 186" fill="none" stroke="url(#ink)"
+          stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="166" y="93" width="36" height="70" rx="12" fill="url(#ink)"/>
+  </g>
+</svg>

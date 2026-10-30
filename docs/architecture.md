@@ -40,7 +40,7 @@ flowchart TD
 
 `AppRoot` 持有工作区布局与跨组件状态，协调当前终端上下文、会话列表、文件管理器、传输面板、设置窗口和更新入口。组件通过实体句柄、事件和观察订阅协作；后台结果返回应用执行器后才修改 UI。
 
-`exit_coordinator.rs` 统一处理退出和安装前的保护：检查已连接终端、进行中的传输与未保存预览，并在继续操作前重新核对状态。macOS 的原生退出路径也接入协调器。最终退出时停止 WayX，并释放日志写入守卫以刷新缓冲。
+`exit_coordinator.rs` 统一处理主窗口关闭、升级重启及 macOS 原生退出，不弹确认、不因连接、传输或未保存预览阻止退出。立即释放终端、丢弃未保存预览，并取消普通传输和预览写回；等待传输工作线程清理未完成目标文件后结束进程。最终退出时停止 WayX，并释放日志写入守卫以刷新缓冲。Linux 仅打开系统安装工具的操作不退出应用，也不关闭会话。
 
 ## 布局、标签与焦点
 
@@ -80,6 +80,8 @@ GPUI 先派发匹配上下文的 Action，再进入终端按键处理。`Termina
 
 `terminal_view` 管理补全会话、选择、弹窗及输入替换，应用层 `completion/` 实现 `CompletionService`，提供命令、历史、参数、路径与项目候选。即时候选与后台查询分开，后台结果通过代次/上下文检查防止覆盖更新输入。远端目录查询通过 SFTP，避免向交互式命令行插入查询命令。初始补全与已输入命令完全匹配时，Enter 可直接交给终端执行。
 
+补全的自动触发仅来自字符提交（含输入法提交）；手动触发仍可用。删除只过滤当前会话缓存，不发新查询，删空关闭；空输入的上下键交给 Shell，历史和光标恢复仅同步输入，不自动弹窗。输入时取消旧查询而不关闭已有面板，立即更新即时/缓存候选，再原位替换后台结果；等待期间保留的旧显示不能接受或拦截 Enter/Tab。缓存复用校验目录、Shell、替换范围、路径目录及引用语法，选择与滚动位置尽量保留。
+
 ## Shell 集成与 SSH
 
 应用层 `shell_integration/` 使用 `include_str!` 将 `scripts/shell_integration/` 脚本编译进程序，安装包不需要额外的脚本目录。
@@ -88,7 +90,7 @@ GPUI 先派发匹配上下文的 Action，再进入终端按键处理。`Termina
 
 远端集成先尝试设置会话激活环境变量，再通过辅助 SSH 连接执行安装脚本。Bash/Zsh 脚本持久化到远端 `~/.local/share/alacrterm/shell/`，对应启动配置增加加载入口；版本与 Shell 类型清单用于判断是否更新。入口只在带激活标记的交互式会话加载，不把安装命令输入交互终端。环境变量被服务器拒绝或安装失败时继续普通登录。`ALACRTERM_SHELL_INTEGRATION=0` 禁用注入，远端还受设置开关控制。
 
-脚本通过 OSC 上报命令阶段、工作目录、Shell 类型和可用命令，`protocol.rs` 解码应用扩展，终端核心处理标准生命周期与目录线索。未启用集成时仍可利用远端已有的 OSC 输出和目录线索，但信息完整程度取决于 Shell。
+脚本通过 OSC 上报命令阶段、工作目录、Shell 类型和可用命令，`protocol.rs` 解码应用扩展，终端核心统一维护集成脚本上报的 cwd、OSC 7 与标题目录线索，文件管理器读取同一目录状态跟随远端 `cd`；精确上报不被标题中的缩写路径覆盖。未启用集成时仍可利用远端已有的 OSC 输出和目录线索，但信息完整程度取决于 Shell。
 
 SSH 认证支持 agent、密钥与配置的密码。默认主机密钥策略对未知主机请求用户确认并保存到 `known_hosts`，已知主机密钥变化时拒绝连接。`SshFs` 按需建立 SFTP 连接，独立于交互终端的数据流。
 
@@ -98,7 +100,7 @@ SSH 认证支持 agent、密钥与配置的密码。默认主机密钥策略对�
 
 `sidebar_panel/files.rs` 负责当前文件系统、目录、选择及加载状态，本地使用文件系统接口，远端使用 `SshFs`。工具栏与路径输入框固定，文件列表单独滚动；文件夹单击选择、双击跳转。路径输入支持候选，跳转失败时保留输入、清空列表并提示错误。
 
-`preview_window.rs` 与 `preview_cache.rs` 管理文件预览、编辑和临时资源。远端预览通过缓存下载，保存后回传；未保存内容参与退出保护。`transfer_manager.rs` 将 SSH 传输事件适配到 `transfer` 状态模型与 UI。取消请求不立即删除任务，等待工作线程结束后再完成收尾。
+`preview_window.rs` 与 `preview_cache.rs` 管理文件预览、编辑和临时资源。远端预览通过缓存下载，保存后回传；退出应用时直接丢弃未保存内容。`transfer_manager.rs` 将 SSH 传输事件适配到 `transfer` 状态模型与 UI。取消请求不立即删除任务，等待工作线程清理未完成文件后再完成收尾；已完成文件及源文件保留。上传（含预览保存）先写入目标同目录的随机独占临时文件，关闭并确认成功后替换目标；取消或失败只清理临时文件，原文档保持不变。支持时使用 OpenSSH `posix-rename` 原子覆盖，通过同一认证连接上的独立 SFTP 通道提交；不支持的服务器可使用普通 rename，拒绝覆盖时返回错误，绝不先删除原文件。保存符号链接时跟随其目标，并保留原有权限位。`SshFs` 统一追踪排队和运行中的传输，包括预览写回。连接和目录扫描可取消，文件复制取消也可中断网络等待。远端清理依赖 SFTP 连接和权限；无法删除时记录警告，不能保证离线远端已清理。
 
 ## 配置、资源与日志
 
@@ -118,7 +120,7 @@ SSH 认证支持 agent、密钥与配置的密码。默认主机密钥策略对�
 
 ### 资源
 
-SVG 图标和默认按键通过 `rust-embed` 提供；Shell 脚本通过 `include_str!` 嵌入。`assets/app-icon.ico` 用于 Windows 可执行文件及安装器，并转换为 Linux PNG 和 macOS ICNS；Windows 安装目录无需另放 ICO。
+SVG 图标和默认按键通过 `rust-embed` 提供；Shell 脚本通过 `include_str!` 嵌入。`assets/app-icon.svg` 为图标单一真源，派生的 `app-icon.ico` 用于 Windows 可执行文件及安装器；预生成的 `assets/app-icon-128.png`、`app-icon-256.png` 和 `app-icon.icns` 分别用于 Linux 与 macOS，打包直接复制。修改 SVG 后安装 `scripts/packaging/requirements-icons.txt` 中的手动生成依赖，运行 `python scripts/packaging/generate_icons.py` 更新并提交派生文件；Windows 安装目录无需另放 ICO。
 
 全局主题和终端配色位于 `themes/global`、`themes/terminal`。外部资源覆盖内置默认；`util::resource_registry` 管理资源与目录监听，应用的 `resource_registry.rs` 提供 GPUI 适配。无效修改保留最后有效资源，删除恢复默认；后台解析与去抖后回到 UI 应用结果，旧代次通知被丢弃。偏好和资源是两类数据，资源热更新不反向保存用户偏好。
 
@@ -161,11 +163,11 @@ Windows/Linux 发布构建在启用自动检查时启动后约 30 秒检查，�
 
 | 平台 | 更新链路 |
 | --- | --- |
-| Windows | minisign 签名 JSON → 校验版本、大小和 SHA-256 → 下载 Inno 安装器 → 独立 helper 准备并确认 → 应用获准退出 → helper 等待应用/WayX 结束 → 静默安装并重启 |
+| Windows | minisign 签名 JSON → 校验版本、大小和 SHA-256 → 下载 Inno 安装器 → 独立 helper 准备并确认 → 应用清理后退出 → helper 等待应用/WayX 结束 → 静默安装并重启 |
 | macOS | Sparkle 2.10.1 标准 UI 与安装器，Rust/Objective-C 桥接；EdDSA 校验更新 ZIP，应用使用 ad-hoc 临时签名，不做 Developer ID 签名或公证 |
 | Linux deb | 验证签名元数据及 deb，打开可用的系统安装工具；否则显示安全引用路径的 `sudo apt install` 命令，由系统处理提权与依赖，安装后手动重启 |
 
-Windows 每次安装使用唯一任务目录、按安装位置隔离的跨进程锁，以及 ready/commit 握手。主程序只在 helper 准备就绪且退出获准后提交安装；取消时清理未提交 helper。helper 再次独立验证，结果写入任务目录，应用下次启动读取。安装失败不承诺自动回滚。
+Windows 每次安装使用唯一任务目录、按安装位置隔离的跨进程锁，以及 ready/commit 握手。主程序只在 helper 准备就绪且退出清理完成后提交安装；取消更新操作时清理未提交 helper。helper 再次独立验证，结果写入任务目录，应用下次启动读取。安装失败不承诺自动回滚。
 
 macOS 使用 Sparkle 原生流程，不使用 `sparklers`。推迟重启回调与原生退出路径接入退出协调器；跳过、取消、关闭和更新周期结束会清理临时状态。应用不会自行覆盖 macOS 应用包或 Linux 系统目录。
 

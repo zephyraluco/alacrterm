@@ -43,7 +43,8 @@ class PackagingTests(unittest.TestCase):
                 (root / 'assets').mkdir()
                 for name in ['conpty.dll', 'OpenConsole.exe']:
                     (root / 'plugins/windows/conpty' / name).write_bytes(b'conpty fixture')
-                shutil.copy2(ROOT / 'assets/app-icon.ico', root / 'assets/app-icon.ico')
+                for name in ['app-icon.ico', 'app-icon-128.png', 'app-icon-256.png', 'app-icon.icns']:
+                    shutil.copy2(ROOT / 'assets' / name, root / 'assets' / name)
                 framework = root / 'sparkle/Sparkle.framework'
                 framework.mkdir(parents=True)
                 (framework / 'fixture').write_bytes(b'framework')
@@ -67,7 +68,7 @@ class PackagingTests(unittest.TestCase):
                         desktop = (root / 'target/package' / key / 'usr/share/applications/alacrterm.desktop').read_text()
                         self.assertIn('Icon=alacrterm\n', desktop)
                         icon = root / 'target/package' / key / 'usr/share/icons/hicolor/256x256/apps/alacrterm.png'
-                        self.assertEqual(icon.read_bytes(), package.icon_images(ROOT / 'assets/app-icon.ico')[256])
+                        self.assertEqual(icon.read_bytes(), (ROOT / 'assets/app-icon-256.png').read_bytes())
                     if system == 'Darwin':
                         app = payload.parent
                         info = plistlib.loads((app / 'Info.plist').read_bytes())
@@ -75,7 +76,7 @@ class PackagingTests(unittest.TestCase):
                         icon = (app / 'Resources/app-icon.icns').read_bytes()
                         self.assertEqual(icon[:4], b'icns')
                         self.assertEqual(int.from_bytes(icon[4:8], 'big'), len(icon))
-                        self.assertIn(package.icon_images(ROOT / 'assets/app-icon.ico')[256], icon)
+                        self.assertEqual(icon, (ROOT / 'assets/app-icon.icns').read_bytes())
                         self.assertEqual(info['SUPublicEDKey'], 'public-test-key')
                         self.assertTrue(info['SUFeedURL'].endswith('/appcast.xml'))
                         self.assertTrue((app / 'Frameworks/Sparkle.framework/fixture').is_file())

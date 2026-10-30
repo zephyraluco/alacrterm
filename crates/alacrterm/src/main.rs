@@ -60,10 +60,6 @@ use tab_bar::{TerminalDockSkin, TerminalTabBar};
 use terminal_panel::TabPane;
 use transfer_manager::{TransferDone, TransferManager};
 
-fn close_after_transfers(active: usize, waiting: bool) -> bool {
-    active == 0 && waiting
-}
-
 /// 这次同步需要真的应用吗。
 ///
 /// 快照没变、又没有「必须拿窗口才能做」的待办时跳过 —— 事件可能因为同一帧内的多次
@@ -78,7 +74,7 @@ fn needs_context_apply(
 
 #[cfg(test)]
 mod close_tests {
-    use super::{ActiveContext, close_after_transfers, needs_context_apply};
+    use super::{ActiveContext, needs_context_apply};
 
     fn context(title: &str, directory: Option<&str>) -> ActiveContext {
         ActiveContext {
@@ -90,13 +86,6 @@ mod close_tests {
             directory: directory.map(str::to_string),
             title: title.to_string(),
         }
-    }
-
-    #[test]
-    fn exits_only_after_pending_transfers_finish() {
-        assert!(!close_after_transfers(2, true));
-        assert!(!close_after_transfers(0, false));
-        assert!(close_after_transfers(0, true));
     }
 
     #[test]
@@ -213,9 +202,8 @@ struct AppRoot {
     /// 「文件管理器」视图状态。
     files: Entity<FilesState>,
     _transfers: Entity<TransferManager>,
-    _transfer_sub: Subscription,
     _transfer_completion_sub: Subscription,
-    close_when_transfers_finish: bool,
+    closing: bool,
     /// 终端会话的 dock。
     dock: Entity<DockArea>,
     _dock_sub: Subscription,
@@ -290,19 +278,10 @@ impl AppRoot {
         let sessions = cx.new(|_| SessionsState::new());
         let app_root = cx.weak_entity();
         let transfers = cx.new(|_| TransferManager::default());
-        let transfer_sub = cx.observe_in(
-            &transfers,
-            window,
-            |root: &mut Self, manager, window, cx| {
-                if close_after_transfers(
-                    manager.read(cx).active_count(),
-                    root.close_when_transfers_finish,
-                ) {
-                    root.finish_main_close(window, cx);
-                }
-            },
-        );
         let transfer_completion_sub = cx.subscribe(&transfers, |root: &mut Self, _, event, cx| {
+            if root.closing {
+                return;
+            }
             if event.result.is_ok() {
                 match &event.done {
                     TransferDone::Preview(request) => {
@@ -365,9 +344,8 @@ impl AppRoot {
             sessions,
             files,
             _transfers: transfers,
-            _transfer_sub: transfer_sub,
             _transfer_completion_sub: transfer_completion_sub,
-            close_when_transfers_finish: false,
+            closing: false,
             dock,
             _dock_sub: dock_sub,
             zoom_tab_bar: TerminalTabBar::new(cx.weak_entity()),
