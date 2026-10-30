@@ -132,9 +132,9 @@ SVG 图标和默认按键通过 `rust-embed` 提供；Shell 脚本通过 `includ
 | macOS | `~/Library/Logs/Alacrterm` |
 | Linux | `$XDG_STATE_HOME/alacrterm/logs`，默认 `~/.local/state/alacrterm/logs` |
 
-按 UTC 日期滚动，保留当天及之前六天，无文件大小或总容量上限；启动和每小时清理匹配的日志文件。文件区分应用/helper、构建类型、PID 与启动标识。默认应用 INFO、依赖 WARN，`RUST_LOG` 可覆盖；现有 DEBUG 日志可能包含终端输入与远端命令。写入队列满时可能丢事件，目录不可用则回退 stderr；正常退出刷新，强制终止不保证尾部日志落盘。
+按 UTC 日期滚动，保留当天及之前六天，无文件大小或总容量上限；启动和每小时清理匹配的日志文件。文件统一命名为 `<程序>-YYYY-MM-DD.log`，不区分 debug/release、PID 或启动标识；同一程序当天的多个启动追加到同一文件。默认应用 INFO、依赖 WARN，`RUST_LOG` 可覆盖；现有 DEBUG 日志可能包含终端输入与远端命令。写入队列满时可能丢事件，目录不可用则回退 stderr；正常退出刷新，强制终止不保证尾部日志落盘。
 
-WayX 子进程的 stdout、stderr 通过独立后台管道读取，分别写入 `wayx-*.YYYY-MM-DD.log`、`wayx-err-*.YYYY-MM-DD.log`；UTC 每日滚动，保留当天及之前六天，启动及每小时清理，无容量上限。Windows 目录为 `%LOCALAPPDATA%\Alacrterm\wayx`，macOS 为 `~/Library/Logs/Alacrterm/wayx`，Linux 为 `$XDG_STATE_HOME/alacrterm/wayx`（默认 `~/.local/state/alacrterm/wayx`）。文件区分构建类型、PID 与启动标识，保留原始字节，不受 `RUST_LOG` 过滤；停止或启动失败不删除日志。无法创建某个日志时，该流继承父进程的对应输出；退出时先结束子进程，再限时等待管道排空。此前固定文件不自动迁移或删除。
+WayX 子进程的 stdout、stderr 通过独立后台管道读取，分别写入 `wayx-YYYY-MM-DD.log`、`wayx-err-YYYY-MM-DD.log`；UTC 每日滚动，保留当天及之前六天，启动及每小时清理，无容量上限。Windows 目录为 `%LOCALAPPDATA%\Alacrterm\wayx`，macOS 为 `~/Library/Logs/Alacrterm/wayx`，Linux 为 `$XDG_STATE_HOME/alacrterm/wayx`（默认 `~/.local/state/alacrterm/wayx`）。同一天追加到同一程序文件，保留原始字节，不受 `RUST_LOG` 过滤；停止或启动失败不删除日志。无法创建某个日志时，该流继承父进程的对应输出；退出时先结束子进程，再限时等待管道排空。此前固定文件不自动迁移或删除。
 
 ## 平台插件与 X11
 

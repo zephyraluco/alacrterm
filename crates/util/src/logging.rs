@@ -4,13 +4,10 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc,
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use time::{Date, OffsetDateTime, macros::format_description};
-use tracing_appender::{
-    non_blocking::WorkerGuard,
-    rolling::{RollingFileAppender, Rotation},
-};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt::writer::BoxMakeWriter};
 
 const DEFAULT_FILTER: &str = "warn,alacrterm=info,alacrterm_update_helper=info,terminal=info,terminal_view=info,ssh=info,settings=info,session=info,platform=info,transfer=info,updater=info,util=info";
@@ -61,7 +58,7 @@ pub fn wayx_log_directory() -> Option<PathBuf> {
 
 /// A raw byte writer with the same UTC daily rotation and retention as app logs.
 pub struct OutputLog {
-    file: RollingFileAppender,
+    file: DailyFile,
     _guard: LoggingGuard,
 }
 
@@ -120,8 +117,48 @@ fn filter(value: Option<&str>) -> EnvFilter {
         })
 }
 
-fn appender(directory: &Path, application: &str) -> io::Result<RollingFileAppender> {
-    // Directory privacy is set only when we create it; existing directory permissions are preserved.
+/// tracing-appender's filename separator is fixed to a dot; use an append-only
+/// writer here for the application's `<program>-<UTC date>.log` convention.
+struct DailyFile {
+    directory: PathBuf,
+    application: String,
+    date: Date,
+    file: fs::File,
+}
+
+impl DailyFile {
+    fn open(directory: &Path, application: &str, date: Date) -> io::Result<fs::File> {
+        let mut options = fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        options.open(directory.join(format!("{application}-{date}.log")))
+    }
+
+    fn rotate_at(&mut self, date: Date) -> io::Result<()> {
+        if self.date != date {
+            let file = Self::open(&self.directory, &self.application, date)?;
+            self.file = file;
+            self.date = date;
+        }
+        Ok(())
+    }
+}
+
+impl io::Write for DailyFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.rotate_at(OffsetDateTime::now_utc().date())?;
+        io::Write::write(&mut self.file, bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut self.file)
+    }
+}
+
+fn appender(directory: &Path, application: &str) -> io::Result<DailyFile> {
     let existed = directory.exists();
     fs::create_dir_all(directory)?;
     #[cfg(unix)]
@@ -131,22 +168,13 @@ fn appender(directory: &Path, application: &str) -> io::Result<RollingFileAppend
     }
     #[cfg(not(unix))]
     let _ = existed;
-    let instance = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let prefix = format!("{application}-{profile}-{}-{instance}", std::process::id());
-    RollingFileAppender::builder()
-        .rotation(Rotation::DAILY)
-        .filename_prefix(prefix)
-        .filename_suffix("log")
-        .build(directory)
-        .map_err(io::Error::other)
+    let date = OffsetDateTime::now_utc().date();
+    Ok(DailyFile {
+        directory: directory.to_owned(),
+        application: application.to_owned(),
+        date,
+        file: DailyFile::open(directory, application, date)?,
+    })
 }
 
 /// Initializes files when available, otherwise keeps existing diagnostics on stderr.
@@ -195,7 +223,12 @@ fn log_date(name: &str) -> Option<Date> {
         .or_else(|| name.strip_prefix("wayx-err-"))
         .or_else(|| name.strip_prefix("wayx-"))
         .or_else(|| name.strip_prefix("alacrterm-"))?;
-    let (instance, date) = rest.strip_suffix(".log")?.rsplit_once('.')?;
+    let stem = rest.strip_suffix(".log")?;
+    if let Ok(date) = Date::parse(stem, format_description!("[year]-[month]-[day]")) {
+        return Some(date);
+    }
+    // Continue retiring recognized files created by previous naming schemes.
+    let (instance, date) = stem.rsplit_once('.')?;
     let instance = instance
         .strip_prefix("debug-")
         .or_else(|| instance.strip_prefix("release-"))
@@ -236,6 +269,38 @@ mod tests {
     use time::macros::date;
 
     #[test]
+    fn exact_program_date_names_rotate_without_overwriting_previous_days() {
+        use io::Write as _;
+        let directory = tempfile::tempdir().unwrap();
+        let today = OffsetDateTime::now_utc().date();
+        let yesterday = today - time::Duration::days(1);
+        for application in ["alacrterm", "alacrterm-update-helper", "wayx", "wayx-err"] {
+            let mut writer = appender(directory.path(), application).unwrap();
+            writer.rotate_at(yesterday).unwrap();
+            writer.file.write_all(b"previous day\n").unwrap();
+            writer.write_all(b"today\n").unwrap();
+            drop(writer);
+            appender(directory.path(), application)
+                .unwrap()
+                .write_all(b"restart\n")
+                .unwrap();
+            assert_eq!(
+                fs::read(
+                    directory
+                        .path()
+                        .join(format!("{application}-{yesterday}.log"))
+                )
+                .unwrap(),
+                b"previous day\n"
+            );
+            assert_eq!(
+                fs::read(directory.path().join(format!("{application}-{today}.log"))).unwrap(),
+                b"today\nrestart\n"
+            );
+        }
+    }
+
+    #[test]
     fn raw_output_uses_utc_dated_files_preserves_bytes_and_cleans_old_logs() {
         use io::Write as _;
         let directory = tempfile::tempdir().unwrap();
@@ -274,6 +339,10 @@ mod tests {
     fn seven_calendar_days_are_retained_without_deleting_other_files() {
         let temp = tempfile::tempdir().unwrap();
         for name in [
+            "alacrterm-2026-10-22.log",
+            "wayx-2026-10-22.log",
+            "wayx-err-2026-10-22.log",
+            "alacrterm-update-helper-2026-10-22.log",
             "alacrterm-12-10.2026-10-22.log",
             "wayx-debug-12-10.2026-10-22.log",
             "wayx-err-release-12-10.2026-10-22.log",
@@ -289,6 +358,9 @@ mod tests {
         let directory = temp.path().join("alacrterm-22-2.2026-10-01.log");
         fs::create_dir(&directory).unwrap();
         cleanup_at(temp.path(), date!(2026 - 10 - 29));
+        for name in ["alacrterm", "wayx", "wayx-err", "alacrterm-update-helper"] {
+            assert!(!temp.path().join(format!("{name}-2026-10-22.log")).exists());
+        }
         assert!(!temp.path().join("alacrterm-12-10.2026-10-22.log").exists());
         assert!(
             !temp
@@ -316,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn writers_are_isolated_and_flush_before_shutdown() {
+    fn writers_append_to_the_same_daily_file_and_flush_before_shutdown() {
         let temp = tempfile::tempdir().unwrap();
         for message in ["first instance", "second instance"] {
             let file = appender(temp.path(), "alacrterm").unwrap();
@@ -333,7 +405,7 @@ mod tests {
             .flatten()
             .map(|entry| entry.path())
             .collect();
-        assert_eq!(paths.len(), 2);
+        assert_eq!(paths.len(), 1);
         let text: String = paths
             .iter()
             .map(|path| fs::read_to_string(path).unwrap())
@@ -378,7 +450,7 @@ mod tests {
             .flatten()
             .map(|entry| entry.path())
             .collect();
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 1);
         for file in files {
             let text = fs::read_to_string(file).unwrap();
             assert!(text.contains("application message") && text.contains("legacy message"));
