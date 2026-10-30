@@ -34,7 +34,7 @@ pub enum Source {
 impl Source {
     pub fn label(self) -> &'static str {
         match self {
-            Self::History => "当前会话历史",
+            Self::History => "Shell 历史",
             Self::Shell => "当前 shell",
             Self::Specification => "内置命令规格",
             Self::Filesystem => "当前会话文件系统",

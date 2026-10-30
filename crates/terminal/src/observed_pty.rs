@@ -42,6 +42,11 @@ impl Read for ObservedPty {
                 .events
                 .unbounded_send(TerminalBackendEvent::Prompt(event));
         }
+        for history in self.scanner.history() {
+            let _ = self
+                .events
+                .unbounded_send(TerminalBackendEvent::ShellHistory(history));
+        }
         for command in self.scanner.commands() {
             let _ = self
                 .events

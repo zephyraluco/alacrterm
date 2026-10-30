@@ -4,7 +4,8 @@ mod alacritty;
 mod backend;
 mod launch;
 pub use launch::{
-    LaunchOptions, LocalSessionSetup, OscDecoder, PreparedShell, SessionResources, ShellMetadata,
+    HistoryEvent, LaunchOptions, LocalSessionSetup, OscDecoder, PreparedShell, SessionResources,
+    ShellMetadata,
 };
 mod lifecycle;
 mod observed_pty;
@@ -647,6 +648,7 @@ pub fn insert_zed_terminal_env(env: &mut HashMap<String, String>) {
 pub enum Event {
     ShellContext(&'static str, String),
     ShellCommand(String),
+    ShellHistory(HistoryEvent),
     Prompt(PromptEvent),
     TitleChanged,
     BreadcrumbsChanged,
@@ -711,6 +713,7 @@ type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send 
 pub(crate) enum TerminalBackendEvent {
     ShellContext(&'static str, String),
     ShellCommand(String),
+    ShellHistory(HistoryEvent),
     Prompt(PromptEvent),
     MouseCursorDirty,
     Title(String),
@@ -745,6 +748,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
             Self::Prompt(event) => write!(f, "Prompt({event:?})"),
             Self::ShellCommand(_) => f.write_str("ShellCommand"),
+            Self::ShellHistory(_) => f.write_str("ShellHistory"),
             Self::ShellContext(_, _) => f.write_str("ShellContext"),
         }
     }
@@ -1496,6 +1500,11 @@ impl Terminal {
                 .parser_events_sender
                 .unbounded_send(TerminalBackendEvent::Prompt(event));
         }
+        for history in self.prompt_scanner.history() {
+            let _ = self
+                .parser_events_sender
+                .unbounded_send(TerminalBackendEvent::ShellHistory(history));
+        }
         for command in self.prompt_scanner.commands() {
             let _ = self
                 .parser_events_sender
@@ -1545,6 +1554,7 @@ impl Terminal {
         match event {
             TerminalBackendEvent::Prompt(event) => cx.emit(Event::Prompt(event)),
             TerminalBackendEvent::ShellCommand(command) => cx.emit(Event::ShellCommand(command)),
+            TerminalBackendEvent::ShellHistory(history) => cx.emit(Event::ShellHistory(history)),
             TerminalBackendEvent::ShellContext(key, value) => {
                 if self.template.target.is_ssh() {
                     self.remote_cwd.context(key, &value);

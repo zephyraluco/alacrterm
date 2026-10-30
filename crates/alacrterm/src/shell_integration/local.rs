@@ -42,6 +42,17 @@ pub(crate) fn prepare(
     };
     let script = dir.path().join(script);
     // Embedded scripts may come from a CRLF checkout on Windows.
+    let contents = if matches!(name.as_str(), "bash" | "zsh") {
+        format!(
+            "{}\n{contents}",
+            include_str!("../../../../scripts/shell_integration/history.sh")
+        )
+    } else {
+        format!(
+            "{}\n{contents}",
+            include_str!("../../../../scripts/shell_integration/history.ps1")
+        )
+    };
     std::fs::write(&script, contents.replace("\r\n", "\n"))?;
     env.insert(
         "ALACRTERM_INTEGRATION_SCRIPT".into(),

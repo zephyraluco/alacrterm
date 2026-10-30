@@ -83,7 +83,9 @@ async fn native_openssh_loads_persistent_integration_in_an_isolated_account() {
         params,
         SshSize::cells(80, 24),
         sender,
-        Some(Arc::new(super::remote::RemoteIntegration)),
+        Some(Arc::new(super::remote::RemoteIntegration {
+            history_enabled: true,
+        })),
     )
     .unwrap();
     let (text, closed) = collect_until(&mut events, Duration::from_secs(15), None, |text, _| {
@@ -139,7 +141,9 @@ async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
             params.clone(),
             SshSize::cells(80, 24),
             sender,
-            Some(Arc::new(super::remote::RemoteIntegration)),
+            Some(Arc::new(super::remote::RemoteIntegration {
+                history_enabled: true,
+            })),
         )
         .unwrap();
         let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
@@ -205,7 +209,9 @@ async fn failed_install_revokes_activation_and_preserves_native_login() {
         params,
         SshSize::cells(80, 24),
         sender,
-        Some(Arc::new(super::remote::RemoteIntegration)),
+        Some(Arc::new(super::remote::RemoteIntegration {
+            history_enabled: true,
+        })),
     )
     .unwrap();
     let (text, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
@@ -221,5 +227,73 @@ async fn failed_install_revokes_activation_and_preserves_native_login() {
             .exists()
     );
     session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn installed_remote_history_travels_over_ssh_and_honors_disabled_activation() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".bash_history"),
+        "echo REMOTE_IMPORTED_OLD\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "HISTSIZE=2000\nHISTFILE=\"$HOME/.bash_history\"\nhistory -r\n",
+    )
+    .unwrap();
+    let port = local_server::serve_with_integration_home(home.path().to_owned())
+        .await
+        .unwrap();
+    let known_hosts = temp_known_hosts("remote-history");
+    let mut params = SshParams::new("127.0.0.1", port, "tester").with_password(PASSWORD);
+    params.host_key = HostKeyPolicy::AcceptNew;
+    params.known_hosts = Some(known_hosts.clone());
+    let (sender, mut events) = futures::channel::mpsc::unbounded();
+    let session = SshSession::connect_with_setup(
+        params.clone(),
+        SshSize::cells(80, 24),
+        sender,
+        Some(Arc::new(super::remote::RemoteIntegration {
+            history_enabled: true,
+        })),
+    )
+    .unwrap();
+    let (startup, _) = collect_until(&mut events, Duration::from_secs(10), None, |text, _| {
+        text.ends_with(PROMPT)
+    })
+    .await;
+    assert!(startup.contains("633;AlacrtermShell;posix"));
+    session.disconnect();
+    for activation in ["1", "1-no-history"] {
+        let (sender, mut events) = futures::channel::mpsc::unbounded();
+        let command = format!(
+            "LC_ALACRTERM_INTEGRATION={activation} bash --noprofile --rcfile \"$HOME/.bashrc\" -ic '__alacrterm_history_sync; sleep .2'"
+        );
+        let session = SshSession::connect_exec(params.clone(), command, sender).unwrap();
+        let (output, status) =
+            collect_until(&mut events, Duration::from_secs(10), None, |_, status| {
+                status.is_some()
+            })
+            .await;
+        assert_eq!(status, Some(0), "{output}");
+        let imported = output
+            .split('\x07')
+            .filter_map(|part| {
+                let (_, payload) = part.rsplit_once("\x1b]")?;
+                match super::protocol::decode(payload.as_bytes())? {
+                    terminal::ShellMetadata::History(terminal::HistoryEvent::Entry {
+                        command,
+                        ..
+                    }) => Some(command),
+                    _ => None,
+                }
+            })
+            .any(|command| command == "echo REMOTE_IMPORTED_OLD");
+        assert_eq!(imported, activation == "1", "{output}");
+        session.disconnect();
+    }
     let _ = std::fs::remove_file(known_hosts);
 }

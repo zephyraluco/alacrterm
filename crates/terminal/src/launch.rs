@@ -23,6 +23,28 @@ pub trait LocalSessionSetup: Send + Sync {
 pub enum ShellMetadata {
     Command(String),
     Context(&'static str, String),
+    History(HistoryEvent),
+}
+/// History transport is scoped to one shell invocation, not its working directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistoryEvent {
+    Session(String),
+    Begin {
+        session: String,
+        batch: u64,
+        reset: bool,
+    },
+    Entry {
+        session: String,
+        batch: u64,
+        index: u64,
+        command: String,
+    },
+    End {
+        session: String,
+        batch: u64,
+        count: usize,
+    },
 }
 pub type OscDecoder = fn(&[u8]) -> Option<ShellMetadata>;
 

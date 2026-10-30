@@ -86,6 +86,7 @@ __alacrterm_prompt() {
         [ "$((__alacrterm_now - __alacrterm_last_refresh))" -ge 30 ]; then
         alacrterm_refresh_completions "$__alacrterm_current_signature" "$__alacrterm_now"
     fi
+    __alacrterm_history_sync
     case ${PWD-} in
         *"$__alacrterm_esc"*|*"$__alacrterm_bel"*|*"$__alacrterm_cr"*|*"$__alacrterm_nl"*) printf '\033]633;AlacrtermCwd;\007' ;;
         *) printf '\033]633;AlacrtermCwd;%s\007' "${PWD-}" ;;
@@ -111,6 +112,55 @@ __alacrterm_run_prompt_commands() {
         eval "$__alacrterm_user_prompt_command"
     done'
 }
+
+# History is read from this shell, never from a guessed history file.
+__alacrterm_history_collect() {
+    # Bash excludes the current event from expansion in interactive functions.
+    # A worker-only sentinel makes the last accepted event addressable.
+    # Bash 3.2 replaces the current event on the first history -s call.
+    # Preserve that event before appending the worker-only boundary.
+    __alacrterm_history_saved=$(HISTTIMEFORMAT= builtin history 1; printf '\001')
+    __alacrterm_history_saved=${__alacrterm_history_saved%?}
+    __alacrterm_history_saved=${__alacrterm_history_saved%"$__alacrterm_nl"}
+    __alacrterm_history_saved=${__alacrterm_history_saved#"${__alacrterm_history_saved%%[![:space:]]*}"}
+    __alacrterm_history_event=${__alacrterm_history_saved%%[!0-9]*}
+    if [ -n "$__alacrterm_history_event" ]; then
+        __alacrterm_history_saved=${__alacrterm_history_saved#"$__alacrterm_history_event"}
+        builtin history -s "${__alacrterm_history_saved#??}"
+    fi
+    builtin history -s '__alacrterm_history_boundary__'
+    __alacrterm_history_index=$1
+    while [ "$__alacrterm_history_index" -le "$2" ]; do
+        # history -p resolves the event without executing it, preserving literal
+        # whitespace and multiline boundaries. Run only in this worker's copy.
+        __alacrterm_history_command=$(builtin history -p "!$__alacrterm_history_index" 2>/dev/null) || __alacrterm_history_command=
+        __alacrterm_history_emit "$__alacrterm_history_index" "$__alacrterm_history_command"
+        __alacrterm_history_index=$((__alacrterm_history_index + 1))
+    done
+}
+__alacrterm_history_sync() {
+    __alacrterm_history_announce
+    [ -n "${BASH_VERSION-}" ] && [ "${ALACRTERM_HISTORY_ENABLED:-1}" != 0 ] || return 0
+    __alacrterm_history_row=$(HISTTIMEFORMAT= builtin history 1)
+    [ "$__alacrterm_history_row" != "$__alacrterm_history_anchor" ] || [ -z "$__alacrterm_history_last" ] || return 0
+    __alacrterm_history_number=${__alacrterm_history_row#"${__alacrterm_history_row%%[![:space:]]*}"}
+    __alacrterm_history_number=${__alacrterm_history_number%%[!0-9]*}
+    __alacrterm_history_number=${__alacrterm_history_number:-0}
+    __alacrterm_history_mode=append
+    __alacrterm_history_first=$(HISTTIMEFORMAT= builtin history 1000)
+    __alacrterm_history_first=${__alacrterm_history_first#"${__alacrterm_history_first%%[![:space:]]*}"}
+    __alacrterm_history_first=${__alacrterm_history_first%%[!0-9]*}
+    __alacrterm_history_first=${__alacrterm_history_first:-1}
+    if [ -z "$__alacrterm_history_last" ] || [ "$__alacrterm_history_number" -le "$__alacrterm_history_last" ]; then
+        __alacrterm_history_mode=snapshot
+    elif [ "$__alacrterm_history_first" -le "$__alacrterm_history_last" ]; then
+        __alacrterm_history_first=$((__alacrterm_history_last + 1))
+    fi
+    __alacrterm_history_last=$__alacrterm_history_number
+    __alacrterm_history_anchor=$__alacrterm_history_row
+    __alacrterm_history_start "$__alacrterm_history_mode" "$__alacrterm_history_first" "$__alacrterm_history_number"
+}
+__alacrterm_history_init
 
 alacrterm_refresh_completions
 printf '\033]633;AlacrtermShell;posix\007'

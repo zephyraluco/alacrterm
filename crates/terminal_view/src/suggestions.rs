@@ -1,4 +1,4 @@
-//! Per-pane, memory-only history suggestions gated by shell lifecycle markers.
+//! Per-pane completion sessions with history imported from the active shell.
 use crate::completion::{Candidate, Kind, rank};
 use terminal::PromptEvent;
 /// A submitted command cannot simultaneously be an editable input line.
@@ -10,9 +10,7 @@ enum InputState {
     Editing {
         menu: MenuState,
     },
-    Submitted {
-        command: Option<String>,
-    },
+    Submitted,
 }
 #[derive(Clone, Copy)]
 enum MenuState {
@@ -38,7 +36,7 @@ pub struct Suggestions {
     pub cursor: usize,
     pub revision: u64,
     candidate_revision: u64,
-    history: Vec<String>,
+    history: crate::history::History,
     commands: Vec<String>,
     pub cwd: Option<String>,
     pub powershell: Option<bool>,
@@ -68,6 +66,39 @@ impl Suggestions {
         if let InputState::Editing { menu } = &mut self.state {
             *menu = MenuState::Ready;
         }
+    }
+    pub fn import_history(&mut self, event: terminal::HistoryEvent) -> bool {
+        let visible = self.has_current_candidates();
+        let selected = self
+            .candidates
+            .get(self.selected)
+            .map(|item| item.insert_text.clone());
+        if !self
+            .history
+            .receive(event, self.settings.enabled && self.settings.history)
+        {
+            return false;
+        }
+        // History changes are not input edits: keep in-flight path requests
+        // valid and retain cached candidates from the other providers.
+        self.cached
+            .retain(|entry| entry.item.source != crate::completion::Source::History);
+        self.candidates
+            .retain(|item| item.source != crate::completion::Source::History);
+        if visible {
+            self.refresh_in_place(true, false);
+            if let Some(index) = self
+                .candidates
+                .iter()
+                .position(|item| Some(&item.insert_text) == selected.as_ref())
+            {
+                self.selected = index;
+            }
+        }
+        true
+    }
+    pub fn reset_history(&mut self) {
+        self.history.reset();
     }
     pub fn clear_history(&mut self) {
         self.history.clear();
@@ -281,17 +312,6 @@ impl Suggestions {
             (PromptEvent::Input, InputState::Prompt) => InputState::Editing {
                 menu: MenuState::Ready,
             },
-            (
-                PromptEvent::Execute,
-                InputState::Submitted {
-                    command: Some(command),
-                },
-            ) if self.settings.history => {
-                self.history.retain(|old| old != &command);
-                self.history.insert(0, command);
-                self.history.truncate(256);
-                InputState::Inactive
-            }
             _ => InputState::Inactive,
         };
         self.text.clear();
@@ -334,11 +354,7 @@ impl Suggestions {
         self.resume_menu();
     }
     pub fn submit(&mut self) {
-        let command = (self.is_editing()
-            && !self.text.trim().is_empty()
-            && !self.text.starts_with(char::is_whitespace))
-        .then(|| self.text.clone());
-        self.state = InputState::Submitted { command };
+        self.state = InputState::Submitted;
         self.candidates.clear();
     }
     pub fn edit_key(&mut self, key: &str, control: bool) {
@@ -417,7 +433,7 @@ impl Suggestions {
             cursor: self.cursor,
             powershell: self.powershell,
             cwd: self.cwd.as_deref().unwrap_or(""),
-            history: &self.history,
+            history: self.history.entries(),
             commands: &self.commands,
             settings: &self.settings,
         }

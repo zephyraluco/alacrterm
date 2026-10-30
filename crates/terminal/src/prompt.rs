@@ -11,6 +11,7 @@ pub(crate) struct PromptScanner {
     state: u8,
     payload: Vec<u8>,
     commands: Vec<String>,
+    history: Vec<crate::HistoryEvent>,
     context: Vec<(&'static str, String)>,
 }
 impl PromptScanner {
@@ -32,6 +33,7 @@ impl PromptScanner {
                     if let Some(metadata) = decoder.and_then(|decode| decode(&self.payload)) {
                         match metadata {
                             crate::ShellMetadata::Command(command) => self.commands.push(command),
+                            crate::ShellMetadata::History(history) => self.history.push(history),
                             crate::ShellMetadata::Context(key, value) => {
                                 self.context.push((key, value))
                             }
@@ -44,7 +46,7 @@ impl PromptScanner {
                     self.state = 0;
                 }
                 (2, 27) => self.state = 3,
-                (2, _) if self.payload.len() < 4096 => self.payload.push(byte),
+                (2, _) if self.payload.len() < 12288 => self.payload.push(byte),
                 (2, _) => {
                     self.payload.clear();
                     self.state = 4;
@@ -64,6 +66,10 @@ impl PromptScanner {
     }
     pub(crate) fn context(&mut self) -> Vec<(&'static str, String)> {
         std::mem::take(&mut self.context)
+    }
+
+    pub(crate) fn history(&mut self) -> Vec<crate::HistoryEvent> {
+        std::mem::take(&mut self.history)
     }
 
     pub(crate) fn commands(&mut self) -> Vec<String> {
@@ -113,7 +119,7 @@ mod tests {
             [PromptEvent::Input, PromptEvent::Execute]
         );
         let mut oversized = b"\x1b]633;".to_vec();
-        oversized.extend(vec![b'A'; 5000]);
+        oversized.extend(vec![b'A'; 13000]);
         oversized.extend_from_slice(b"\x07\x1b]633;D;0\x07");
         assert_eq!(scanner.feed(&oversized, None), [PromptEvent::Finished]);
     }
