@@ -20,13 +20,13 @@ Debug/development builds instead read and write the repository-root `config/` di
 
 CI workflows call the standalone scripts in this directory for Sparkle preparation, build identity/integrity manifests, CI resolution, artifact download/validation, signing, feed generation and publication. Python regression tests live in `scripts/test`; run them with `python -m unittest discover -s scripts/test -p 'test_*.py'`. The native Sparkle state regression test is available through `bash scripts/test/test_sparkle_state.sh`.
 
-## Release identity and recovery
+## Release identity and publication
 
 `artifacts.py` records commit, version, run ID/attempt, public-key fingerprints, and the exact files with sizes/SHA-256 in `build-<platform>.json`. Downloads must match the tag SHA, selected successful source run, current public keys and complete three-platform file set. Failed-job reruns may contribute different attempts within the same run. A key change requires rebuilding the installers; it cannot be repaired by signing old binaries with a new key.
 
 `resolve_ci.py` waits up to an hour for branch CI. Missing runs fail after five minutes with a push-to-branch instruction. Failed/cancelled runs fail immediately. Expired artifacts are rebuilt; recent missing/duplicate platforms fail rather than mixing sources. Rebuild artifacts belong to the current Release run and are consumed only after its reusable Package job succeeds.
 
-`publish_release.py` creates or resumes a draft. Uploads may replace draft attachments, but unexpected attachments require review. All uploaded bytes are downloaded and verified before publication. `release-manifest.json` identifies the commit/tag and hashes every public attachment. Already published versions are verified and left unchanged; an incomplete or changed version fails instead of being overwritten. Re-generated feed timestamps do not force an immutable version to be re-uploaded.
+`publish_release.py` passes all attachments to `gh release create --draft`, then publishes when upload succeeds. There is no draft recovery, remote attachment re-download/verification, publication manifest, or already-published precheck. An existing release causes creation to fail instead of overwriting assets. Clean up an incomplete draft manually before retrying. Installer provenance, file hashes and signatures are still checked before publication.
 
 Publication is serialized with `cancel-in-progress: false`. GitHub concurrency is not a FIFO queue and may replace pending runs; rerun a cancelled pending release if needed. Numeric stable-version comparison prevents older releases from replacing latest. Manual publication outside this workflow is not covered by its concurrency lock.
 
