@@ -40,7 +40,21 @@ class GitHub:
         raise ValueError('Tag does not resolve to a commit')
 
     def release(self, tag):
-        return self.api('releases/tags/' + quote(tag, safe=''), optional=True)
+        published = self.api('releases/tags/' + quote(tag, safe=''), optional=True)
+        if published is not None:
+            return published
+        # The tag endpoint does not expose unpublished drafts. Authenticated listing does.
+        matches = []
+        page = 1
+        while True:
+            releases = self.api(f'releases?per_page=100&page={page}')
+            matches.extend(release for release in releases if release['tag_name'] == tag)
+            if len(releases) < 100:
+                break
+            page += 1
+        if len(matches) > 1:
+            raise ValueError(f'Multiple releases match {tag}; review duplicate drafts')
+        return matches[0] if matches else None
 
     def assets(self, release):
         pages = json.loads(subprocess.check_output([

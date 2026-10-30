@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from test_package import module
 
@@ -49,6 +50,23 @@ class FakeGitHub:
 
 
 class PublicationTests(unittest.TestCase):
+    def test_draft_lookup_uses_authenticated_paginated_list_when_tag_is_not_found(self):
+        publisher = module('publish_release')
+        github = publisher.GitHub('owner/repo')
+        draft = {'id': 12, 'tag_name': 'v0.1.1', 'draft': True}
+        first_page = [{'id': i, 'tag_name': f'v0.0.{i}', 'draft': False} for i in range(100)]
+        with patch.object(github, 'api', side_effect=[None, first_page, [draft]]) as api:
+            self.assertEqual(github.release('v0.1.1'), draft)
+            self.assertEqual(api.call_args.args[0], 'releases?per_page=100&page=2')
+        with patch.object(github, 'api', side_effect=[None, []]):
+            self.assertIsNone(github.release('v9.9.9'))
+        with patch.object(github, 'api', return_value=draft) as api:
+            self.assertEqual(github.release('v0.1.1'), draft)
+            api.assert_called_once()
+        with patch.object(github, 'api', side_effect=[None, [draft, draft]]):
+            with self.assertRaisesRegex(ValueError, 'Multiple releases'):
+                github.release('v0.1.1')
+
     def fixture(self, directory):
         for name in ['installer.exe', 'build-windows-x64.json', 'update.json', 'appcast.xml', 'sparkle-signature.json']:
             (directory / name).write_text('fixture', encoding='utf-8')
