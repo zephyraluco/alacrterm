@@ -47,6 +47,67 @@ pub fn log_directory() -> Option<PathBuf> {
     }
 }
 
+/// Raw WayX output is separate from formatted application logs.
+pub fn wayx_log_directory() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        log_directory().map(|directory| directory.join("wayx"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        log_directory().and_then(|directory| directory.parent().map(|parent| parent.join("wayx")))
+    }
+}
+
+/// A raw byte writer with the same UTC daily rotation and retention as app logs.
+pub struct OutputLog {
+    file: RollingFileAppender,
+    _guard: LoggingGuard,
+}
+
+impl io::Write for OutputLog {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        io::Write::write(&mut self.file, bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut self.file)
+    }
+}
+
+pub fn output_log(directory: &Path, stream: &str) -> io::Result<OutputLog> {
+    if !matches!(stream, "wayx" | "wayx-err") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unknown output stream",
+        ));
+    }
+    let file = appender(directory, stream)?;
+    Ok(OutputLog {
+        file,
+        _guard: LoggingGuard {
+            worker: None,
+            maintenance: retention(directory.to_owned()),
+        },
+    })
+}
+
+fn retention(directory: PathBuf) -> Option<(mpsc::Sender<()>, JoinHandle<()>)> {
+    let (stop, receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name("log-retention".into())
+        .spawn(move || {
+            loop {
+                cleanup_at(&directory, OffsetDateTime::now_utc().date());
+                match receiver.recv_timeout(CLEANUP_INTERVAL) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+            }
+        })
+        .ok()
+        .map(|task| (stop, task))
+}
+
 fn filter(value: Option<&str>) -> EnvFilter {
     value
         .filter(|value| !value.trim().is_empty())
@@ -118,22 +179,7 @@ fn init_in(application: &'static str, directory: Option<PathBuf>) -> LoggingGuar
         let _ = tracing_log::LogTracer::init();
     }
     let maintenance = if installed && worker.is_some() {
-        directory.and_then(|directory| {
-            let (stop, receiver) = mpsc::channel();
-            thread::Builder::new()
-                .name("log-retention".into())
-                .spawn(move || {
-                    loop {
-                        cleanup_at(&directory, OffsetDateTime::now_utc().date());
-                        match receiver.recv_timeout(CLEANUP_INTERVAL) {
-                            Err(mpsc::RecvTimeoutError::Timeout) => {}
-                            _ => break,
-                        }
-                    }
-                })
-                .ok()
-                .map(|task| (stop, task))
-        })
+        directory.and_then(retention)
     } else {
         None
     };
@@ -146,6 +192,8 @@ fn init_in(application: &'static str, directory: Option<PathBuf>) -> LoggingGuar
 fn log_date(name: &str) -> Option<Date> {
     let rest = name
         .strip_prefix("alacrterm-update-helper-")
+        .or_else(|| name.strip_prefix("wayx-err-"))
+        .or_else(|| name.strip_prefix("wayx-"))
         .or_else(|| name.strip_prefix("alacrterm-"))?;
     let (instance, date) = rest.strip_suffix(".log")?.rsplit_once('.')?;
     let instance = instance
@@ -188,10 +236,47 @@ mod tests {
     use time::macros::date;
 
     #[test]
+    fn raw_output_uses_utc_dated_files_preserves_bytes_and_cleans_old_logs() {
+        use io::Write as _;
+        let directory = tempfile::tempdir().unwrap();
+        let stale = directory.path().join("wayx-release-12-10.2020-01-01.log");
+        fs::write(&stale, b"old").unwrap();
+        let unrelated = directory.path().join("notes.log");
+        fs::write(&unrelated, b"keep").unwrap();
+        let today = OffsetDateTime::now_utc().date();
+        for (stream, bytes) in [
+            ("wayx", b"stdout\n".as_slice()),
+            ("wayx-err", b"stderr\xff\n".as_slice()),
+        ] {
+            let mut log = output_log(directory.path(), stream).unwrap();
+            log.write_all(bytes).unwrap();
+            log.flush().unwrap();
+            drop(log);
+            let paths: Vec<_> = fs::read_dir(directory.path())
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(&format!("{stream}-")) && log_date(&name) == Some(today)
+                })
+                .collect();
+            let matching = paths
+                .iter()
+                .any(|entry| fs::read(entry.path()).unwrap() == bytes);
+            assert!(matching);
+        }
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
     fn seven_calendar_days_are_retained_without_deleting_other_files() {
         let temp = tempfile::tempdir().unwrap();
         for name in [
             "alacrterm-12-10.2026-10-22.log",
+            "wayx-debug-12-10.2026-10-22.log",
+            "wayx-err-release-12-10.2026-10-22.log",
             "alacrterm-update-helper-12-11.2026-10-22.log",
             "alacrterm-12-10.2026-10-23.log",
             "alacrterm-99-42.2026-10-29.log",
@@ -209,6 +294,13 @@ mod tests {
             !temp
                 .path()
                 .join("alacrterm-update-helper-12-11.2026-10-22.log")
+                .exists()
+        );
+        assert!(!temp.path().join("wayx-debug-12-10.2026-10-22.log").exists());
+        assert!(
+            !temp
+                .path()
+                .join("wayx-err-release-12-10.2026-10-22.log")
                 .exists()
         );
         for name in [

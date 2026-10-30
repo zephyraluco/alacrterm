@@ -21,6 +21,7 @@ pub struct Endpoint {
 
 struct Wayx {
     child: Option<Child>,
+    outputs: Vec<std::sync::mpsc::Receiver<()>>,
     directory: PathBuf,
     endpoint: Endpoint,
 }
@@ -277,6 +278,13 @@ impl Drop for Wayx {
             #[cfg(unix)]
             cleanup_display(self.endpoint.display, child.id());
         }
+        // Usually EOF follows child exit immediately. Bound the wait in case a descendant
+        // inherited a pipe; readers keep draining independently rather than blocking shutdown.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        for finished in self.outputs.drain(..) {
+            let _ = finished
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+        }
         let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
@@ -342,24 +350,30 @@ fn runtime_dir() -> Result<PathBuf> {
     bail!("找不到 plugins/{name}；请随应用分发 plugins 目录或设置 WAYX_RUNTIME_DIR")
 }
 
-/// Keep child diagnostics outside the display reservation, which is deleted on stop.
-fn wayx_log_file(directory: &Path, name: &str) -> std::io::Result<std::fs::File> {
-    std::fs::create_dir_all(directory)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.append(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(directory.join(name))
+/// Pipe readers own their rolling writers; raw output does not pass through log filters.
+fn capture_output(
+    mut reader: impl std::io::Read + Send + 'static,
+    mut writer: util::logging::OutputLog,
+) -> std::io::Result<std::sync::mpsc::Receiver<()>> {
+    let (finished, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("wayx-output".into())
+        .spawn(move || {
+            use std::io::Write as _;
+            if std::io::copy(&mut reader, &mut writer).is_err() {
+                // Continue draining on a disk error so a full pipe cannot block WayX.
+                let _ = std::io::copy(&mut reader, &mut std::io::sink());
+            }
+            let _ = writer.flush();
+            drop(writer);
+            let _ = finished.send(());
+        })?;
+    Ok(receiver)
 }
 
-fn wayx_output(name: &str) -> Stdio {
-    util::logging::log_directory()
-        .and_then(|directory| wayx_log_file(&directory, name).ok())
-        .map(Stdio::from)
-        .unwrap_or_else(Stdio::inherit)
+fn wayx_log(stream: &str) -> Option<util::logging::OutputLog> {
+    util::logging::wayx_log_directory()
+        .and_then(|directory| util::logging::output_log(&directory, stream).ok())
 }
 
 impl Wayx {
@@ -397,6 +411,7 @@ impl Wayx {
         let (display, directory) = reservation.context("没有可用的 WayX 显示编号")?;
         let mut server = Self {
             child: None,
+            outputs: Vec::new(),
             directory,
             endpoint: Endpoint {
                 display,
@@ -429,13 +444,23 @@ impl Wayx {
         command.args(["-nolisten", "tcp"]);
         #[cfg(windows)]
         command.args(["-listen", "tcp", "-nolisten", "local"]);
+        let stdout_log = wayx_log("wayx");
+        let stderr_log = wayx_log("wayx-err");
         command
             .arg("-ac")
             .env("WAYX_XKB_DIR", runtime.join("share/X11/xkb"))
             .env("WAYX_XKB_BIN_DIR", &bin)
             .stdin(Stdio::null())
-            .stdout(wayx_output("wayx.log"))
-            .stderr(wayx_output("wayx-err.log"));
+            .stdout(if stdout_log.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
+            .stderr(if stderr_log.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            });
         let library_var = if cfg!(windows) {
             "PATH"
         } else if cfg!(target_os = "macos") {
@@ -457,6 +482,19 @@ impl Wayx {
                 .spawn()
                 .context("启动内置 WayX（请检查可执行权限及运行依赖）")?,
         );
+        let child = server.child.as_mut().expect("WayX was spawned");
+        if let Some(writer) = stdout_log {
+            server.outputs.push(capture_output(
+                child.stdout.take().expect("piped stdout"),
+                writer,
+            )?);
+        }
+        if let Some(writer) = stderr_log {
+            server.outputs.push(capture_output(
+                child.stderr.take().expect("piped stderr"),
+                writer,
+            )?);
+        }
         Ok(server)
     }
 }
@@ -507,8 +545,7 @@ impl Endpoint {
 mod tests {
     use super::*;
     #[test]
-    fn child_logs_separate_streams_and_append_across_starts() {
-        use std::io::Write as _;
+    fn child_output_is_drained_into_separate_rolling_files() {
         let base = std::env::temp_dir().join(format!(
             "alacrterm-wayx-log-test-{}-{}",
             std::process::id(),
@@ -517,36 +554,20 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let logs = base.join("logs");
-        let reservation = base.join("display");
-        std::fs::create_dir_all(&reservation).unwrap();
-        for text in ["first startup", "second startup"] {
-            let mut file = wayx_log_file(&logs, "wayx.log").unwrap();
-            writeln!(file, "{text}").unwrap();
+        for (stream, bytes) in [
+            ("wayx", b"stdout\n".as_slice()),
+            ("wayx-err", b"stderr\xff\n".as_slice()),
+        ] {
+            let writer = util::logging::output_log(&base, stream).unwrap();
+            let finished = capture_output(std::io::Cursor::new(bytes.to_vec()), writer).unwrap();
+            finished.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                std::fs::read_dir(&base)
+                    .unwrap()
+                    .flatten()
+                    .any(|entry| { std::fs::read(entry.path()).unwrap() == bytes })
+            );
         }
-        writeln!(
-            wayx_log_file(&logs, "wayx-err.log").unwrap(),
-            "startup error"
-        )
-        .unwrap();
-        std::fs::remove_dir_all(reservation).unwrap();
-        let files: Vec<_> = std::fs::read_dir(&logs)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        assert_eq!(files.len(), 2);
-        let contents: String = files
-            .iter()
-            .map(|path| std::fs::read_to_string(path).unwrap())
-            .collect();
-        assert!(contents.contains("first startup"));
-        assert!(contents.contains("second startup"));
-        let stdout = std::fs::read_to_string(logs.join("wayx.log")).unwrap();
-        let stderr = std::fs::read_to_string(logs.join("wayx-err.log")).unwrap();
-        assert!(stdout.contains("first startup") && stdout.contains("second startup"));
-        assert!(!stdout.contains("startup error"));
-        assert_eq!(stderr, "startup error\n");
-        assert!(wayx_log_file(&files[0], "wayx.log").is_err());
         std::fs::remove_dir_all(base).unwrap();
     }
 
