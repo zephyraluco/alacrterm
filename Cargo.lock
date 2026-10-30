@@ -5553,6 +5553,7 @@ dependencies = [
  "libc",
  "log",
  "tokio",
+ "util",
 ]
 
 [[package]]

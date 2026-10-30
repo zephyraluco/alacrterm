@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
+util = { workspace = true, features = ["logging"] }
 tokio = { version = "1", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

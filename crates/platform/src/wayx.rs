@@ -342,6 +342,26 @@ fn runtime_dir() -> Result<PathBuf> {
     bail!("找不到 plugins/{name}；请随应用分发 plugins 目录或设置 WAYX_RUNTIME_DIR")
 }
 
+/// Keep child diagnostics outside the display reservation, which is deleted on stop.
+fn wayx_log_file(directory: &Path, name: &str) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(directory)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(directory.join(name))
+}
+
+fn wayx_output(name: &str) -> Stdio {
+    util::logging::log_directory()
+        .and_then(|directory| wayx_log_file(&directory, name).ok())
+        .map(Stdio::from)
+        .unwrap_or_else(Stdio::inherit)
+}
+
 impl Wayx {
     fn spawn() -> Result<Self> {
         let runtime = runtime_dir()?;
@@ -414,10 +434,8 @@ impl Wayx {
             .env("WAYX_XKB_DIR", runtime.join("share/X11/xkb"))
             .env("WAYX_XKB_BIN_DIR", &bin)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(std::fs::File::create(
-                server.directory.join("wayx.log"),
-            )?));
+            .stdout(wayx_output("wayx.log"))
+            .stderr(wayx_output("wayx-err.log"));
         let library_var = if cfg!(windows) {
             "PATH"
         } else if cfg!(target_os = "macos") {
@@ -488,6 +506,50 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn child_logs_separate_streams_and_append_across_starts() {
+        use std::io::Write as _;
+        let base = std::env::temp_dir().join(format!(
+            "alacrterm-wayx-log-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let logs = base.join("logs");
+        let reservation = base.join("display");
+        std::fs::create_dir_all(&reservation).unwrap();
+        for text in ["first startup", "second startup"] {
+            let mut file = wayx_log_file(&logs, "wayx.log").unwrap();
+            writeln!(file, "{text}").unwrap();
+        }
+        writeln!(
+            wayx_log_file(&logs, "wayx-err.log").unwrap(),
+            "startup error"
+        )
+        .unwrap();
+        std::fs::remove_dir_all(reservation).unwrap();
+        let files: Vec<_> = std::fs::read_dir(&logs)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 2);
+        let contents: String = files
+            .iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect();
+        assert!(contents.contains("first startup"));
+        assert!(contents.contains("second startup"));
+        let stdout = std::fs::read_to_string(logs.join("wayx.log")).unwrap();
+        let stderr = std::fs::read_to_string(logs.join("wayx-err.log")).unwrap();
+        assert!(stdout.contains("first startup") && stdout.contains("second startup"));
+        assert!(!stdout.contains("startup error"));
+        assert_eq!(stderr, "startup error\n");
+        assert!(wayx_log_file(&files[0], "wayx.log").is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn shutdown_invalidates_pending_start_and_prevents_restart() {
         let service = WayxService::default();
