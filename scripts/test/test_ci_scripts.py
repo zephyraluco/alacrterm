@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import runpy
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -16,10 +17,16 @@ class WorkflowScriptTests(unittest.TestCase):
             'MINISIGN_SECRET_KEY', 'SPARKLE_PRIVATE_KEY',
         ]
         env = dict.fromkeys(required, 'fixture')
-        env['RELEASE_TAG'] = 'v0.1.0'
+        with (ROOT / 'crates/alacrterm/Cargo.toml').open('rb') as source:
+            version = tomllib.load(source)['package']['version']
+        env['RELEASE_TAG'] = f'v{version}'
         script = ROOT / 'scripts/packaging/validate_release.py'
         with patch.dict(os.environ, env, clear=True):
             runpy.run_path(str(script), run_name='__main__')
+            major, minor, patch_version = map(int, version.split('.'))
+            with patch.dict(os.environ, {'RELEASE_TAG': f'v{major}.{minor}.{patch_version + 1}'}):
+                with self.assertRaisesRegex(ValueError, 'Release tag must match'):
+                    runpy.run_path(str(script), run_name='__main__')
             del os.environ['SPARKLE_PRIVATE_KEY']
             with self.assertRaisesRegex(SystemExit, 'Missing release configuration: SPARKLE_PRIVATE_KEY'):
                 runpy.run_path(str(script), run_name='__main__')

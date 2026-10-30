@@ -41,7 +41,8 @@ class ReleaseTests(unittest.TestCase):
             with (release.ROOT / 'crates/alacrterm/Cargo.toml').open('rb') as source:
                 current = tomllib.load(source)['package']['version']
             self.assertEqual(release.version_for_tag(f'v{current}'), current)
-            for tag in ['0.1.0', 'v9.9.9', 'v0.1.0-beta.1']:
+            major, minor, patch_version = map(int, current.split('.'))
+            for tag in [current, f'v{major}.{minor}.{patch_version + 1}', f'v{current}-beta.1']:
                 with self.assertRaises(ValueError):
                     release.version_for_tag(tag)
             (dist / 'alacrterm-0.1.0-macos-arm64.app.zip').write_bytes(b'changed-package')
