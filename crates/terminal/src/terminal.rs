@@ -60,7 +60,7 @@ use crate::backend::{INITIAL_PTY_SIZE, TerminalBackend};
 /// 视图层与应用层不必自己依赖 `ssh`。
 pub use ssh::{
     CancelToken, HostKeyDecision, HostKeyPrompt, RemoteEntry, RemoteMeta, SessionId, SshAuth,
-    SshError, SshFs, SshParams, Transfer, TransferEvent, TransferProgress,
+    SshError, SshExec, SshFs, SshParams, Transfer, TransferEvent, TransferProgress,
 };
 
 use gpui::{
@@ -2745,6 +2745,11 @@ impl Terminal {
     /// （主机密钥可能还没确认，那条连接没有确认通道，只会失败）。
     pub fn remote_fs(&self) -> Option<SshFs> {
         self.backend.remote_fs()
+    }
+
+    /// Additional command channels on this terminal's authenticated SSH transport.
+    pub fn remote_exec(&self) -> Option<SshExec> {
+        self.backend.remote_exec()
     }
 
     /// Replace host hooks for future reconnects and cloned sessions.

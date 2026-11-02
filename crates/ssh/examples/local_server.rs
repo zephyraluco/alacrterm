@@ -75,7 +75,15 @@ Bk2HQaDQUfzXAJLGnkW2AAAAGWFsYWNydGVybS1sb2NhbC10ZXN0LWhvc3QBAgME
 
 /// 每连接一个的处理器:只有「当前行」这一点状态,用来识别 `exit`;
 /// 另外留着已打开的会话通道,`sftp` 子系统要在它上面跑(见 [`Self::subsystem_request`])。
+#[derive(Default)]
+pub struct ServerStats {
+    pub connections: std::sync::atomic::AtomicUsize,
+    pub authentications: std::sync::atomic::AtomicUsize,
+    pub ptys: std::sync::atomic::AtomicUsize,
+}
+
 pub struct LocalServer {
+    stats: Arc<ServerStats>,
     line: String,
     /// 已打开的会话通道(按 channel id 存;`sftp` 子系统要取走一个自己用)。
     channels: HashMap<ChannelId, Channel<Msg>>,
@@ -95,6 +103,7 @@ pub struct LocalServer {
 impl LocalServer {
     fn new() -> Self {
         Self {
+            stats: Arc::default(),
             line: String::new(),
             channels: HashMap::new(),
             shell: None,
@@ -179,6 +188,10 @@ impl russh::server::Server for LocalServer {
 
     fn new_client(&mut self, _peer: Option<SocketAddr>) -> Self {
         let mut client = Self::new();
+        client.stats = self.stats.clone();
+        self.stats
+            .connections
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         client.integration_home = self.integration_home.clone();
         client
     }
@@ -203,6 +216,9 @@ impl russh::server::Handler for LocalServer {
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         self.reject_x11 = user == "no-x11";
         Ok(if password == PASSWORD {
+            self.stats
+                .authentications
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Auth::Accept
         } else {
             reject()
@@ -298,6 +314,9 @@ impl russh::server::Handler for LocalServer {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         eprintln!("[local_server] pty_request term={term} {col_width}x{row_height}");
+        self.stats
+            .ptys
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         session.data(
             channel,
             format!("PTY:{term}:{col_width}x{row_height}\r\n").into_bytes(),
@@ -478,6 +497,15 @@ impl russh::server::Handler for LocalServer {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).trim().to_string();
+        if command == "monitor-hold" {
+            session.channel_success(channel)?;
+            session.data(channel, b"MONITOR_READY".to_vec())?;
+            return Ok(());
+        }
+        if command == "monitor-reject" {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         if let Some(home) = &self.integration_home {
             // Like OpenSSH, exec consumes connection-scoped login messages
             // without displaying them for a non-interactive command.
@@ -526,16 +554,28 @@ pub async fn serve() -> std::io::Result<u16> {
 pub async fn serve_with_compression(
     compression: std::borrow::Cow<'static, [russh::compression::Name]>,
 ) -> std::io::Result<u16> {
-    serve_internal(compression, None).await
+    serve_internal(compression, None, Arc::default()).await
 }
 
 pub async fn serve_with_integration_home(home: std::path::PathBuf) -> std::io::Result<u16> {
-    serve_internal(russh::Preferred::default().compression, Some(home)).await
+    serve_internal(
+        russh::Preferred::default().compression,
+        Some(home),
+        Arc::default(),
+    )
+    .await
+}
+
+pub async fn serve_counted() -> std::io::Result<(u16, Arc<ServerStats>)> {
+    let stats = Arc::new(ServerStats::default());
+    let port = serve_internal(russh::Preferred::default().compression, None, stats.clone()).await?;
+    Ok((port, stats))
 }
 
 async fn serve_internal(
     compression: std::borrow::Cow<'static, [russh::compression::Name]>,
     integration_home: Option<std::path::PathBuf>,
+    stats: Arc<ServerStats>,
 ) -> std::io::Result<u16> {
     let config = Arc::new(russh::server::Config {
         preferred: russh::Preferred {
@@ -553,6 +593,7 @@ async fn serve_internal(
     let port = listener.local_addr()?.port();
     tokio::spawn(async move {
         let mut server = LocalServer::new();
+        server.stats = stats;
         server.integration_home = integration_home;
         if let Err(error) = server.run_on_socket(config, &listener).await {
             eprintln!("[local_server] 退出:{error}");

@@ -28,6 +28,7 @@ mod settings_window;
 pub mod shell_integration;
 mod sidebar_panel;
 mod status_bar;
+mod system_monitor;
 mod tab_bar;
 mod terminal_panel;
 mod transfer_manager;
@@ -73,6 +74,7 @@ fn needs_context_apply(
 ///
 /// 定义在库根：各子模块用 `impl AppRoot` 挂方法。字段保持私有（crate 根对全 crate 可见）。
 pub struct AppRoot {
+    system_monitor: Entity<system_monitor::SystemMonitor>,
     /// 所有标签页（每页内部自己分屏）。
     tabs: Vec<Entity<TabPane>>,
     /// 当前标签页下标。
@@ -221,6 +223,7 @@ impl AppRoot {
             }
         });
         let mut this = Self {
+            system_monitor: cx.new(system_monitor::SystemMonitor::new),
             tabs: Vec::new(),
             active: 0,
             sidebar,
@@ -384,6 +387,24 @@ impl AppRoot {
 
         window.set_window_title(&snapshot.title);
 
+        let monitor_target = if remote {
+            tab.filter(|_| connected).and_then(|tab| {
+                let tab = tab.read(cx);
+                let exec = tab.focused_view().read(cx).remote_exec(cx)?;
+                let fs = tab.remote_fs(cx)?;
+                Some((
+                    (tab.focused_id(), fs.session_id()),
+                    exec,
+                    fs.host().to_string(),
+                ))
+            })
+        } else {
+            None
+        };
+        self.system_monitor.update(cx, |monitor, cx| {
+            monitor.set_target(monitor_target, remote, cx);
+        });
+
         // 未连上时不给句柄：连上之前目录树没有意义（也避免展示上一轮的残留）。
         let fs = tab
             .filter(|_| snapshot.connected)
@@ -429,6 +450,13 @@ impl Render for AppRoot {
                             .overflow_hidden()
                             .child(self.dock.clone()),
                     )
+                    .child(self.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.render_status_bar(
+                            &self.right_sidebar,
+                            self.system_monitor.clone(),
+                            cx,
+                        )
+                    }))
                     .into_any_element();
             }
         }
@@ -524,7 +552,7 @@ impl Render for AppRoot {
         };
 
         let status_bar = self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.render_status_bar(&self.right_sidebar, cx)
+            sidebar.render_status_bar(&self.right_sidebar, self.system_monitor.clone(), cx)
         });
 
         v_flex()

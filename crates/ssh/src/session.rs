@@ -116,6 +116,11 @@ impl EventSink {
 
 /// 宿主(终端)发给会话线程的命令。
 enum Command {
+    Exec {
+        command: String,
+        sink: EventSink,
+        cancel: tokio::sync::watch::Receiver<bool>,
+    },
     /// 把键盘字节送给远端。
     Write(Vec<u8>),
     /// 窗口尺寸变了。
@@ -134,6 +139,42 @@ pub struct SshSession {
     fs: SshFs,
     output_budget: Arc<tokio::sync::Semaphore>,
     cancel: tokio::sync::watch::Sender<bool>,
+}
+
+/// Opens non-PTY command channels on an existing authenticated SSH transport.
+/// Cloning this handle neither connects nor authenticates again.
+#[derive(Clone)]
+pub struct SshExec {
+    commands: TokioSender<Command>,
+}
+
+/// Dropping this guard closes only the exec channel, never the terminal transport.
+pub struct SshExecChannel {
+    cancel: tokio::sync::watch::Sender<bool>,
+}
+impl Drop for SshExecChannel {
+    fn drop(&mut self) {
+        self.cancel.send_replace(true);
+    }
+}
+impl SshExec {
+    pub fn exec(
+        &self,
+        command: impl Into<String>,
+        events: UnboundedSender<SshEvent>,
+    ) -> std::io::Result<SshExecChannel> {
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        self.commands
+            .send(Command::Exec {
+                command: command.into(),
+                sink: EventSink::new(events),
+                cancel: receiver,
+            })
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "SSH session is closed")
+            })?;
+        Ok(SshExecChannel { cancel })
+    }
 }
 
 /// 这次连接要远端干什么。
@@ -244,6 +285,12 @@ impl SshSession {
     pub fn write(&self, bytes: &[u8]) {
         if !bytes.is_empty() {
             let _ = self.commands.send(Command::Write(bytes.to_vec()));
+        }
+    }
+
+    pub fn exec_client(&self) -> SshExec {
+        SshExec {
+            commands: self.commands.clone(),
         }
     }
 
@@ -412,8 +459,16 @@ async fn run_session(
         sink.connected();
     }
 
+    let handle = Arc::new(handle);
+    let mut executions = tokio::task::JoinSet::new();
+
     loop {
         tokio::select! {
+            Some(result) = executions.join_next(), if !executions.is_empty() => {
+                if let Err(error) = result {
+                    log::debug!("SSH exec task ended: {error}");
+                }
+            }
             message = reader.wait() => match message {
                 Some(ChannelMsg::Data { data }) => sink.data(&data).await,
                 // ext = 1 是 stderr。终端里两者是同一个屏幕,一起画。
@@ -426,6 +481,9 @@ async fn run_session(
                 Some(_) => {}
             },
             command = commands.recv() => match command {
+                Some(Command::Exec { command, sink, cancel }) => {
+                    executions.spawn(run_exec_channel(handle.clone(), command, sink, cancel));
+                }
                 Some(Command::Write(bytes)) => {
                     if let Err(error) = writer.data_bytes(bytes).await {
                         return Err(error.into());
@@ -457,6 +515,59 @@ async fn run_session(
     // 礼貌地告别:服务端据此清理 shell 与 PTY,不等 TCP 超时。
     let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
     Ok(exit_status)
+}
+
+async fn run_exec_channel(
+    handle: Arc<client::Handle<ClientHandler>>,
+    command: String,
+    sink: EventSink,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) {
+    if *cancel.borrow() {
+        sink.closed(None, None);
+        return;
+    }
+    let opened = tokio::time::timeout(Duration::from_secs(10), handle.channel_open_session()).await;
+    let channel = match opened {
+        Ok(Ok(channel)) => channel,
+        Ok(Err(error)) => {
+            sink.closed(None, Some(error.to_string()));
+            return;
+        }
+        Err(_) => {
+            sink.closed(None, Some("SSH exec channel open timed out".into()));
+            return;
+        }
+    };
+    let (mut reader, writer) = channel.split();
+    let result: anyhow::Result<Option<u32>> = if *cancel.borrow() {
+        Ok(None)
+    } else {
+        tokio::select! {
+            biased;
+            _ = cancel.changed() => Ok(None),
+            result = async {
+                writer.exec(true, command).await?;
+                let mut exit_status = None;
+                while let Some(message) = reader.wait().await {
+                    match message {
+                        ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => sink.data(&data).await,
+                        ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
+                        ChannelMsg::Failure => anyhow::bail!("SSH exec request rejected"),
+                        ChannelMsg::Close => break,
+                        _ => {}
+                    }
+                }
+                Ok(exit_status)
+            } => result,
+        }
+    };
+    let _ = writer.eof().await;
+    let _ = writer.close().await;
+    match result {
+        Ok(code) => sink.closed(code, None),
+        Err(error) => sink.closed(None, Some(error.to_string())),
+    }
 }
 
 #[cfg(test)]
