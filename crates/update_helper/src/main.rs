@@ -14,12 +14,10 @@ fn main() -> std::process::ExitCode {
             std::path::PathBuf::from(path)
                 .parent()
                 .map(std::path::Path::to_owned)
-        }) {
-            if let Err(logging) = std::fs::create_dir_all(&folder)
-                .and_then(|()| std::fs::write(folder.join("helper-error.log"), &error))
-            {
-                eprintln!("{logging}: {error}");
-            }
+        }) && let Err(logging) = std::fs::create_dir_all(&folder)
+            .and_then(|()| std::fs::write(folder.join("helper-error.log"), &error))
+        {
+            eprintln!("{logging}: {error}");
         }
         return std::process::ExitCode::FAILURE;
     }

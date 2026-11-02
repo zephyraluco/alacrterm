@@ -18,7 +18,15 @@ use updater::manifest::Release;
 pub(crate) enum Phase {
     Disabled,
     Idle,
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(dead_code, reason = "Sparkle reports checking through Phase::Native")
+    )]
     Checking,
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(dead_code, reason = "Sparkle reports completion through Phase::Native")
+    )]
     Current,
     Available(UpdateOffer),
     Downloading {
@@ -78,11 +86,16 @@ impl Phase {
 #[derive(Clone, Debug)]
 pub(crate) struct SignedRelease {
     release: Release,
+    #[cfg(not(target_os = "macos"))]
     envelope: Vec<u8>,
 }
 #[derive(Clone, Debug)]
 pub(crate) enum UpdateOffer {
     Signed(SignedRelease),
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(dead_code, reason = "Sparkle handles manual upgrades on macOS")
+    )]
     Manual(Version),
 }
 
@@ -325,7 +338,6 @@ impl Updates {
                 updater::macos::check();
                 cx.notify();
             }
-            return;
         }
         #[cfg(not(target_os = "macos"))]
         self.check_feed(cx);
@@ -760,6 +772,7 @@ mod tests {
                     kind: updater::manifest::PackageKind::Deb,
                 },
             },
+            #[cfg(not(target_os = "macos"))]
             envelope: vec![],
         };
         for phase in [
