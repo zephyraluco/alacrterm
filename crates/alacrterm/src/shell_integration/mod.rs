@@ -1,12 +1,12 @@
 //! Alacrterm's shell scripts, activation policy, installation and OSC extensions.
-mod local;
-mod protocol;
-mod remote;
+pub mod local;
+pub mod protocol;
+pub mod remote;
 use std::sync::Arc;
 use terminal::{LaunchOptions, LocalSessionSetup, PreparedShell};
 
 /// Bump when remote scripts or startup entry semantics change.
-const VERSION: &str = "1.1.1";
+pub const VERSION: &str = "1.1.1";
 
 #[derive(Clone, Copy)]
 struct Scripts {
@@ -43,7 +43,11 @@ impl LocalSessionSetup for LocalIntegration {
     }
 }
 
-pub(crate) fn launch_options(settings: settings::SuggestionSettings) -> LaunchOptions {
+/// 组装一个会话的启动配置（shell 集成、WayX X11 转发与 OSC 解析）。
+///
+/// 对 `lib` 目标公开，是因为库只导出模块给 `tests/` 使用，没有内部调用者；
+/// 真正的调用点在二进制的 `terminal_panel`。
+pub fn launch_options(settings: settings::SuggestionSettings) -> LaunchOptions {
     let enabled = std::env::var_os("ALACRTERM_SHELL_INTEGRATION").as_deref()
         != Some(std::ffi::OsStr::new("0"));
     let history_enabled = settings.enabled && settings.history;
@@ -57,15 +61,6 @@ pub(crate) fn launch_options(settings: settings::SuggestionSettings) -> LaunchOp
         osc_decoder: Some(protocol::decode),
     }
 }
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(all(test, unix))]
-mod script_tests;
-
-#[cfg(test)]
-mod powershell_tests;
 
 #[cfg(test)]
 mod resource_tests {

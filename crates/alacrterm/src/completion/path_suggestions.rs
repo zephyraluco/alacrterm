@@ -2,7 +2,7 @@
 use super::completion::{Candidate, Kind, Source};
 use std::ops::Range;
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct PathQuery {
+pub struct PathQuery {
     pub input: String,
     pub cursor: usize,
     pub directory: String,
@@ -14,7 +14,7 @@ pub(super) struct PathQuery {
     powershell: bool,
 }
 #[derive(Clone, Debug)]
-pub(super) struct Entry {
+pub struct Entry {
     pub name: String,
     pub directory: bool,
 }

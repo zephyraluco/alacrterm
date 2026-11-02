@@ -1,4 +1,5 @@
 //! Real-shell regression tests. Optionally include a separately built old Bash.
+#![cfg(unix)]
 use std::{
     collections::HashMap,
     io::Write as _,
@@ -26,9 +27,10 @@ fn run_bash(program: &Path, rc: &str, input: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join(".bashrc"), rc).unwrap();
     let mut env = HashMap::from([("HOME".into(), home.path().to_string_lossy().into_owned())]);
-    let (args, _files) = super::local::prepare(program.to_str().unwrap(), &[], &mut env)
-        .unwrap()
-        .unwrap();
+    let (args, _files) =
+        alacrterm::shell_integration::local::prepare(program.to_str().unwrap(), &[], &mut env)
+            .unwrap()
+            .unwrap();
     let mut child = Command::new(program)
         .args(args)
         .envs(env)
@@ -202,7 +204,7 @@ fn history_events(bytes: &[u8]) -> Vec<terminal::HistoryEvent> {
         .split(|byte| *byte == 7)
         .filter_map(|part| {
             let start = part.windows(2).rposition(|bytes| bytes == b"\x1b]")?;
-            match super::protocol::decode(&part[start + 2..])? {
+            match alacrterm::shell_integration::protocol::decode(&part[start + 2..])? {
                 terminal::ShellMetadata::History(event) => Some(event),
                 _ => None,
             }
@@ -278,7 +280,7 @@ fn zsh_imports_loaded_history_and_literal_utf8_without_multiline_fragments() {
     std::fs::write(home.path().join(".zshrc"),
         "HISTSIZE=2000\nprint -s 'echo imported-zsh-中文'\nprint -s $'echo multiline-first\\necho multiline-second'\n").unwrap();
     let mut env = HashMap::from([("HOME".into(), home.path().to_string_lossy().into_owned())]);
-    let (args, _files) = super::local::prepare("zsh", &[], &mut env)
+    let (args, _files) = alacrterm::shell_integration::local::prepare("zsh", &[], &mut env)
         .unwrap()
         .unwrap();
     let mut child = Command::new("zsh")
@@ -405,7 +407,7 @@ fn returning_from_a_nested_bash_restores_parent_history() {
         assert_eq!(sessions.first(), sessions.last());
         let mut model = terminal_view::SuggestionModel::default();
         model.service = Some(std::sync::Arc::new(
-            crate::completion::CompletionEngine::default(),
+            alacrterm::completion::CompletionEngine::default(),
         ));
         for event in events {
             model.import_history(event);

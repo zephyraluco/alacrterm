@@ -158,7 +158,7 @@ pub(crate) fn model(cx: &App) -> Entity<Updates> {
     cx.global::<GlobalUpdates>().0.clone()
 }
 
-pub(crate) fn install(cx: &mut App) {
+pub fn install(cx: &mut App) {
     let automatic = settings::read_config_file("config/update.json")
         .and_then(|(_, text)| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|value| value["automatic"].as_bool())
@@ -661,7 +661,7 @@ impl gpui::Render for Updates {
 }
 
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn attach_sparkle_guard(
+pub fn attach_sparkle_guard(
     root: gpui::WeakEntity<crate::AppRoot>,
     window: &mut gpui::Window,
     cx: &mut App,

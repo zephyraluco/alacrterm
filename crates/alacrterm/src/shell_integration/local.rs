@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::{collections::HashMap, path::Path};
 use tempfile::TempDir;
 
-pub(crate) fn prepare(
+pub fn prepare(
     program: &str,
     args: &[String],
     env: &mut HashMap<String, String>,

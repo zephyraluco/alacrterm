@@ -3,7 +3,7 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use ssh::{X11Lease, X11Stream, X11Target};
 
-pub(crate) struct WayxTarget;
+pub struct WayxTarget;
 struct WayxLease {
     endpoint: platform::wayx::Endpoint,
     _permit: tokio::sync::OwnedSemaphorePermit,
@@ -30,6 +30,3 @@ impl X11Lease for WayxLease {
         })
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -1,7 +1,7 @@
 //! Decode Alacrterm-specific OSC extensions; standard lifecycle stays in terminal.
 use terminal::ShellMetadata;
 
-pub(super) fn decode(payload: &[u8]) -> Option<ShellMetadata> {
+pub fn decode(payload: &[u8]) -> Option<ShellMetadata> {
     if let Some(cwd) = payload
         .strip_prefix(b"633;AlacrtermCwd;")
         .and_then(|bytes| std::str::from_utf8(bytes).ok())

@@ -1,14 +1,16 @@
+use alacrterm::completion::CompletionEngine;
+use alacrterm::completion::path_suggestions::PathQuery;
 use std::sync::Arc;
 use terminal::PromptEvent;
 use terminal_view::SuggestionModel as Suggestions;
 use terminal_view::completion::{Candidate, Kind, Source};
 fn state() -> Suggestions {
     let mut state = Suggestions::default();
-    state.service = Some(Arc::new(super::CompletionEngine::default()));
+    state.service = Some(Arc::new(CompletionEngine::default()));
     state
 }
-fn path_query(state: &Suggestions) -> Option<super::path_suggestions::PathQuery> {
-    super::path_suggestions::PathQuery::parse(&state.text, state.cursor, state.powershell?)
+fn path_query(state: &Suggestions) -> Option<PathQuery> {
+    PathQuery::parse(&state.text, state.cursor, state.powershell?)
 }
 mod behavior {
     use super::*;
@@ -185,12 +187,12 @@ mod behavior {
         }
         state.refresh(false);
         let query = path_query(&state).unwrap();
-        state.merge_candidates(
-            query.candidates(vec![super::super::path_suggestions::Entry {
+        state.merge_candidates(query.candidates(vec![
+            alacrterm::completion::path_suggestions::Entry {
                 name: "sample file".into(),
                 directory: false,
-            }]),
-        );
+            },
+        ]));
         let edit = state.accept().unwrap();
         assert_eq!(state.text, "cat sample\\ file other");
         assert!(!edit.contains('\n'));
@@ -378,11 +380,11 @@ mod cached_sessions {
         state.refresh(false);
         let query = path_query(&state).unwrap();
         state.merge_candidates(query.candidates(vec![
-            super::super::path_suggestions::Entry {
+            alacrterm::completion::path_suggestions::Entry {
                 name: "alpha.txt".into(),
                 directory: false,
             },
-            super::super::path_suggestions::Entry {
+            alacrterm::completion::path_suggestions::Entry {
                 name: "apple.txt".into(),
                 directory: false,
             },

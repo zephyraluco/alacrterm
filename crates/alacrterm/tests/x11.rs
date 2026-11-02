@@ -1,11 +1,14 @@
-use crate::local_server;
+#[path = "../../ssh/examples/local_server.rs"]
+mod local_server;
+
+use alacrterm::x11::WayxTarget;
 use futures::StreamExt as _;
 use local_server::{EXIT_CODE, PASSWORD};
 use ssh::{HostKeyDecision, HostKeyPolicy, SshEvent, SshParams, SshSession, SshSize};
 use std::{path::PathBuf, time::Duration};
 fn options() -> ssh::SessionOptions {
     ssh::SessionOptions {
-        x11: Some(std::sync::Arc::new(super::WayxTarget)),
+        x11: Some(std::sync::Arc::new(WayxTarget)),
         ..Default::default()
     }
 }

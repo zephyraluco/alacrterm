@@ -53,7 +53,7 @@ fn default_keymap_asset() -> &'static str {
 }
 
 /// 读两层 keymap 并注册。在 `gpui_kit::init` 之后调用一次。
-pub(crate) fn install(cx: &mut App) {
+pub fn install(cx: &mut App) {
     let asset = default_keymap_asset();
     let mut sections = match KeymapAssets::get(asset) {
         Some(file) => parse_sections(&String::from_utf8_lossy(&file.data), asset),

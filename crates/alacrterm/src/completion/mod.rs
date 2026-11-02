@@ -2,7 +2,7 @@
 mod command_specs;
 mod completion_provider;
 mod completion_resources;
-mod path_suggestions;
+pub mod path_suggestions;
 mod project_completions;
 mod scoring;
 use completion::{Candidate, rank};
@@ -14,7 +14,7 @@ use terminal_view::completion;
 use terminal_view::completion_service::{Backend, CompletionJob, CompletionService, Context};
 
 #[derive(Default)]
-pub(crate) struct CompletionEngine {
+pub struct CompletionEngine {
     cache: Arc<Mutex<Cache>>,
 }
 
@@ -195,6 +195,3 @@ impl CompletionJob for Job {
         })
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -31,7 +31,7 @@ pub(crate) struct Settings {
 impl gpui::Global for Settings {}
 
 /// 启动时读完配置并装进全局。
-pub(crate) fn install(cx: &mut App) {
+pub fn install(cx: &mut App) {
     ColorSchemeRegistry::init(cx);
     match settings::color_schemes::defaults() {
         Ok(defaults) => ColorSchemeRegistry::global_mut(cx).register_defaults(defaults),
@@ -292,7 +292,7 @@ fn parse_color(value: &str) -> Option<Hsla> {
 }
 
 /// 加载主题目录并开启热重载；目录不存在时保持内置主题。
-pub(crate) fn load_themes(cx: &mut App) {
+pub fn load_themes(cx: &mut App) {
     let Some(dir) = themes_dir() else {
         eprintln!("[config] 未找到 {THEMES_DIR}/ 目录，界面使用内置主题");
         return;
@@ -364,7 +364,7 @@ pub(crate) fn theme_options(cx: &App, mode: ThemeMode) -> Vec<(SharedString, Sha
 }
 
 /// 应用（或切换）界面主题，并关掉 `list.active_highlight`。
-pub(crate) fn change_theme(mode: ThemeMode, cx: &mut App) {
+pub fn change_theme(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
     Theme::global_mut(cx).list.active_highlight = false;
 }
@@ -394,7 +394,7 @@ pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut Ap
 }
 
 /// 启动时把 `config/app.json` 里的主题选择挂到两个槽位上。
-pub(crate) fn apply_saved_themes(cx: &mut App) {
+pub fn apply_saved_themes(cx: &mut App) {
     let (dark, light) = {
         let settings = settings(cx);
         (settings.dark_theme.clone(), settings.light_theme.clone())

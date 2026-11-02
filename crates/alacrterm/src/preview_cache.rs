@@ -2,10 +2,10 @@
 use gpui::{App, Global};
 use std::{ops::Deref, path::PathBuf};
 pub(crate) use util::file_cache::CacheLease;
-pub(crate) struct PreviewCache(util::file_cache::FileCache);
+pub struct PreviewCache(util::file_cache::FileCache);
 impl Global for PreviewCache {}
 impl PreviewCache {
-    pub(crate) fn install(cx: &mut App) {
+    pub fn install(cx: &mut App) {
         cx.set_global(Self(util::file_cache::FileCache::new(&cache_root())));
     }
     pub(crate) fn global(cx: &App) -> &Self {

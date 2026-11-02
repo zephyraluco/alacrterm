@@ -123,7 +123,7 @@ const MAX_FONT_SIZE: f32 = 48.0;
 
 impl AppRoot {
     /// 注册全局 action 监听器。
-    pub(crate) fn register_actions(root: WeakEntity<Self>, cx: &mut App) {
+    pub fn register_actions(root: WeakEntity<Self>, cx: &mut App) {
         let Ok(sessions) = root.read_with(cx, |root, _| root.sessions.clone()) else {
             return;
         };

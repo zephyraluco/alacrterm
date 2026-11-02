@@ -45,7 +45,7 @@ fn installation(version: &str, scripts: ShellIntegration, shells_file: &str) -> 
     )
 }
 
-pub(super) struct RemoteIntegration {
+pub struct RemoteIntegration {
     pub history_enabled: bool,
 }
 impl SessionSetup for RemoteIntegration {

@@ -1,6 +1,15 @@
 //! Application-owned integration policy over the public SSH API.
-use crate::local_server;
+#[cfg(unix)]
+#[path = "../../ssh/examples/local_server.rs"]
+mod local_server;
+
+#[cfg(unix)]
+use alacrterm::shell_integration::VERSION;
+#[cfg(unix)]
+use alacrterm::shell_integration::protocol::decode;
+use alacrterm::shell_integration::remote::RemoteIntegration;
 use futures::StreamExt as _;
+#[cfg(unix)]
 use local_server::{BANNER, PASSWORD, PROMPT};
 use ssh::{HostKeyDecision, HostKeyPolicy, SshEvent, SshParams, SshSession, SshSize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -83,7 +92,7 @@ async fn native_openssh_loads_persistent_integration_in_an_isolated_account() {
         params,
         SshSize::cells(80, 24),
         sender,
-        Some(Arc::new(super::remote::RemoteIntegration {
+        Some(Arc::new(RemoteIntegration {
             history_enabled: true,
         })),
     )
@@ -141,7 +150,7 @@ async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
             params.clone(),
             SshSize::cells(80, 24),
             sender,
-            Some(Arc::new(super::remote::RemoteIntegration {
+            Some(Arc::new(RemoteIntegration {
                 history_enabled: true,
             })),
         )
@@ -164,7 +173,7 @@ async fn persistent_startup_install_is_reused_and_never_echoed_or_recorded() {
         let manifest =
             std::fs::read_to_string(home.path().join(".local/share/alacrterm/shell/version"))
                 .unwrap();
-        assert_eq!(manifest.lines().next(), Some(super::VERSION));
+        assert_eq!(manifest.lines().next(), Some(VERSION));
         assert!(manifest.lines().any(|line| line == "bash"));
         let rc = std::fs::read(home.path().join(".bashrc")).unwrap();
         if attempt == 0 {
@@ -209,7 +218,7 @@ async fn failed_install_revokes_activation_and_preserves_native_login() {
         params,
         SshSize::cells(80, 24),
         sender,
-        Some(Arc::new(super::remote::RemoteIntegration {
+        Some(Arc::new(RemoteIntegration {
             history_enabled: true,
         })),
     )
@@ -256,7 +265,7 @@ async fn installed_remote_history_travels_over_ssh_and_honors_disabled_activatio
         params.clone(),
         SshSize::cells(80, 24),
         sender,
-        Some(Arc::new(super::remote::RemoteIntegration {
+        Some(Arc::new(RemoteIntegration {
             history_enabled: true,
         })),
     )
@@ -283,7 +292,7 @@ async fn installed_remote_history_travels_over_ssh_and_honors_disabled_activatio
             .split('\x07')
             .filter_map(|part| {
                 let (_, payload) = part.rsplit_once("\x1b]")?;
-                match super::protocol::decode(payload.as_bytes())? {
+                match decode(payload.as_bytes())? {
                     terminal::ShellMetadata::History(terminal::HistoryEvent::Entry {
                         command,
                         ..

@@ -107,7 +107,7 @@ pub(crate) fn request_with_completion(
 }
 
 impl AppRoot {
-    pub(crate) fn should_close(root: &WeakEntity<Self>, window: &mut Window, cx: &mut App) -> bool {
+    pub fn should_close(root: &WeakEntity<Self>, window: &mut Window, cx: &mut App) -> bool {
         request(
             root.clone(),
             window,
@@ -180,7 +180,7 @@ pub(crate) fn allow_sparkle_restart(_root: &WeakEntity<AppRoot>, _cx: &mut App) 
 }
 
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn attach_native(root: WeakEntity<AppRoot>, window: &mut Window, cx: &mut App) {
+pub fn attach_native(root: WeakEntity<AppRoot>, window: &mut Window, cx: &mut App) {
     assert!(native::install(), "无法安装 macOS 退出协调器");
     window
         .spawn(cx, async move |cx| {
