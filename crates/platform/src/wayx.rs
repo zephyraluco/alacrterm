@@ -393,12 +393,14 @@ impl Wayx {
                 continue;
             }
             let directory = std::env::temp_dir().join(format!("alacrterm-wayx-{display}"));
-            let mut builder = std::fs::DirBuilder::new();
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             match builder.create(&directory) {
                 Ok(()) => {
                     reservation = Some((display, directory));

@@ -98,7 +98,7 @@ pub fn status() -> String {
 pub fn state() -> i32 {
     #[cfg(sparkle)]
     unsafe {
-        return alacrterm_sparkle_state();
+        alacrterm_sparkle_state()
     }
     #[cfg(not(sparkle))]
     0
@@ -106,7 +106,7 @@ pub fn state() -> i32 {
 pub fn changed() -> bool {
     #[cfg(sparkle)]
     unsafe {
-        return alacrterm_sparkle_changed();
+        alacrterm_sparkle_changed()
     }
     #[cfg(not(sparkle))]
     false
@@ -114,7 +114,7 @@ pub fn changed() -> bool {
 pub fn take_restart_request() -> bool {
     #[cfg(sparkle)]
     unsafe {
-        return alacrterm_sparkle_restart_requested();
+        alacrterm_sparkle_restart_requested()
     }
     #[cfg(not(sparkle))]
     false
