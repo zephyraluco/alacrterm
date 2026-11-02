@@ -13,7 +13,6 @@ use gpui::{
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Placement, Sizable as _,
     button::{Button, ButtonVariants as _},
-    chart::LineChart,
     h_flex,
 };
 
@@ -422,25 +421,45 @@ impl Render for SystemMonitor {
                 bytes(data.memory_total as f64)
             );
             let cpu_history = div()
-                .w(px(72.))
+                .relative()
+                .w(px(48.))
                 .h(px(18.))
                 .flex_none()
                 .overflow_hidden()
+                .bg(cx.theme().background)
+                .children((1..4).map(|row| {
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px((row * 18 / 4) as f32))
+                        .w_full()
+                        .h(px(1.))
+                        .bg(cx.theme().border)
+                }))
+                .children((1..6).map(|column| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(px((column * 8) as f32))
+                        .h_full()
+                        .w(px(1.))
+                        .bg(cx.theme().border)
+                }))
                 .child(
-                    LineChart::new(self.history.iter().copied().enumerate())
-                        .id("monitor-cpu-history")
-                        .x(|(index, _)| index.to_string())
-                        .y(|(_, cpu)| cpu.clamp(0.0, 100.0))
-                        .natural()
-                        .stroke(cx.theme().primary)
-                        .y_domain(0.0, 100.0)
-                        .y_padding(1.0, 1.0)
-                        .point_count(24)
-                        .x_axis(false)
-                        .y_axis(false)
-                        .grid(false)
-                        .interactive(false)
-                        .appear(false),
+                    h_flex()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .items_end()
+                        .gap_0()
+                        .children(self.history.iter().map(|sample| {
+                            div()
+                                .flex_none()
+                                .w(px(2.))
+                                .h(px((sample.clamp(0.0, 100.0) / 100.0 * 18.).max(1.)))
+                                .bg(cx.theme().primary)
+                        })),
                 );
             bar = bar
                 .child(item(
@@ -454,7 +473,7 @@ impl Render for SystemMonitor {
                     "monitor-cpu",
                     IconName::Cpu,
                     cpu,
-                    format!("CPU 总使用率 · {} 个逻辑核心 · 每 2 秒刷新 · 曲线为最近 48 秒历史（0–100%）", data.cores),
+                    format!("CPU 总使用率 · {} 个逻辑核心 · 每 2 秒刷新 · 竖线为最近 48 秒历史，每根代表一次采样（0–100%）", data.cores),
                     cx,
                 ))
                 .child(cpu_history)
