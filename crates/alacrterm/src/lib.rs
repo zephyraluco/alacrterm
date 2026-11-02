@@ -392,11 +392,13 @@ impl AppRoot {
                 let tab = tab.read(cx);
                 let exec = tab.focused_view().read(cx).remote_exec(cx)?;
                 let fs = tab.remote_fs(cx)?;
-                Some((
-                    (tab.focused_id(), fs.session_id()),
-                    exec,
-                    fs.host().to_string(),
-                ))
+                Some(system_monitor::MonitorTarget {
+                    id: (tab.focused_id(), fs.session_id()),
+                    client: exec,
+                    host: fs.host().to_string(),
+                    endpoint: tab.remote_endpoint()?,
+                    directory: snapshot.directory.clone(),
+                })
             })
         } else {
             None
