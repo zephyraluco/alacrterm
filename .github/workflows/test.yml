@@ -11,8 +11,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   checks:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -29,11 +35,21 @@ jobs:
         with:
           shared-key: checks
       - name: Install native dependencies
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake clang libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libvulkan-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libasound2-dev
+      - uses: actions/cache@v5
+        if: runner.os == 'macOS'
+        with:
+          path: target/sparkle-download
+          key: sparkle-${{ runner.os }}-${{ hashFiles('scripts/packaging/fetch_sparkle.py') }}
+      - name: Prepare Sparkle
+        if: runner.os == 'macOS'
+        run: bash scripts/packaging/prepare_sparkle.sh
       - name: Sparkle state regression tests
+        if: runner.os != 'Windows'
         run: bash scripts/test/test_sparkle_state.sh
       - name: Python regression tests
-        run: python3 -m unittest discover -s scripts/test -p 'test_*.py'
+        run: python -m unittest discover -s scripts/test -p 'test_*.py'
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
   test:

@@ -145,7 +145,7 @@ fn posix_shell_parses_and_reports_prompt_context_without_fake_execution_events()
     let script = home.path().join("integration.sh");
     std::fs::write(
         &script,
-        include_str!("../../../../scripts/shell_integration/bash.sh"),
+        include_str!("../../../scripts/shell_integration/bash.sh"),
     )
     .unwrap();
     assert!(
