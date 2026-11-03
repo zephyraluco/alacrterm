@@ -341,6 +341,11 @@ impl SystemMonitor {
     fn start_remote(&mut self, client: ssh::SshExec, cx: &mut Context<Self>) {
         let command = monitor_command(self.directory.as_deref());
         self.task = Some(cx.spawn(async move |this, cx| {
+            // Coalesce connection/focus/initial-directory updates before opening
+            // a channel; dropping a superseded task prevents a redundant probe.
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
             let (sender, mut events) = mpsc::unbounded();
             // A dedicated non-PTY channel never writes probes into the user's shell.
             let channel = match client.exec(command, sender) {
@@ -735,10 +740,7 @@ impl Render for SystemMonitor {
                     140.,
                     IconName::SquareTerminal,
                     data.host.clone(),
-                    format!(
-                        "当前 SSH 远端：{}\n连接：{}\n",
-                        data.host, self.endpoint
-                    ),
+                    format!("当前 SSH 远端：{}\n连接：{}\n", data.host, self.endpoint),
                     cx,
                 ))
                 .child(
@@ -832,13 +834,12 @@ impl Render for SystemMonitor {
             if self.error.is_some() {
                 bar = bar.child(Icon::new(IconName::SquareTerminal).w(px(14.)).h(px(14.)));
             }
-            bar = bar
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(self.error.clone().unwrap_or_else(|| LOADING_MESSAGE.into())),
-                );
+            bar = bar.child(
+                div()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(self.error.clone().unwrap_or_else(|| LOADING_MESSAGE.into())),
+            );
             if self.error.is_some() && self.client.is_some() {
                 bar = bar.child(
                     h_flex()
@@ -1023,6 +1024,95 @@ mod tests {
             BTreeMap::from([("eth0".into(), (1, 1))]),
         );
         assert_eq!(rates.interfaces["eth0"], (None, None));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn script_caches_metadata_and_never_runs_cpu_topology_tools() {
+        use std::{
+            io::Read as _,
+            os::unix::fs::PermissionsExt as _,
+            process::{Command, Stdio},
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = fixture.path().join("work ' directory");
+        std::fs::create_dir(&directory).unwrap();
+        let calls = fixture.path().join("calls");
+        let sleeps = fixture.path().join("sleeps");
+        for (name, body) in [
+            (
+                "hostname",
+                "echo hostname >> \"$MONITOR_TEST_CALLS\"; echo test-host",
+            ),
+            ("id", "echo id >> \"$MONITOR_TEST_CALLS\"; echo alice"),
+            ("lscpu", "echo lscpu >> \"$MONITOR_TEST_CALLS\"; exit 1"),
+            (
+                "who",
+                "echo who >> \"$MONITOR_TEST_CALLS\"; echo 'alice pts/0 2026-11-03 12:00 . 100 (127.0.0.1)'",
+            ),
+            (
+                "df",
+                "echo df >> \"$MONITOR_TEST_CALLS\"; printf 'Filesystem Type 1K-blocks Used Available Use%% Mounted\\n/dev/root ext4 1000 400 600 40%% /\\ntmpfs tmpfs 500 100 400 20%% /tmp\\ntmpfs tmpfs 600 200 400 33%% /tmp/not-a-prefix\\n'",
+            ),
+            (
+                "sleep",
+                "test \"$1\" = 2 || exit 1; n=0; test ! -f \"$MONITOR_TEST_SLEEPS\" || read -r n < \"$MONITOR_TEST_SLEEPS\"; n=$((n+1)); echo \"$n\" > \"$MONITOR_TEST_SLEEPS\"; test \"$n\" -lt 17",
+            ),
+        ] {
+            let path = fixture.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(monitor_command(directory.to_str()))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    fixture.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("MONITOR_TEST_CALLS", &calls)
+            .env("MONITOR_TEST_SLEEPS", sleeps)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut output = String::new();
+            let result = stdout.read_to_string(&mut output).map(|_| output);
+            let _ = sender.send(result);
+        });
+        let output = receiver.recv_timeout(Duration::from_secs(10));
+        let _ = child.kill();
+        let _ = child.wait();
+        reader.join().unwrap();
+        let output = output.unwrap().unwrap();
+        let frames: Vec<_> = output
+            .split(FRAME_END)
+            .filter(|frame| !frame.trim().is_empty())
+            .collect();
+        assert_eq!(frames.len(), 17);
+        let log = std::fs::read_to_string(calls).unwrap();
+        assert_eq!(log.lines().filter(|name| *name == "hostname").count(), 1);
+        assert_eq!(log.lines().filter(|name| *name == "id").count(), 1);
+        assert_eq!(log.lines().filter(|name| *name == "who").count(), 4);
+        assert_eq!(log.lines().filter(|name| *name == "df").count(), 2);
+        assert!(!log.lines().any(|name| name == "lscpu"));
+        let mut sampler = RemoteSampler::default();
+        let first = sampler.parse(frames[0]).unwrap();
+        assert!(first.disk.is_none());
+        for frame in frames.iter().skip(1) {
+            let sample = sampler.parse(frame).unwrap();
+            assert_eq!(sample.sessions, Some(1));
+            assert_eq!(sample.logins.len(), 1);
+            assert_eq!(sample.partitions.len(), 3);
+            assert_eq!(sample.disk.unwrap().mount, "/tmp");
+        }
     }
 
     #[cfg(target_os = "linux")]
