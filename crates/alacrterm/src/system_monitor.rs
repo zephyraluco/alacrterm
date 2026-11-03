@@ -11,12 +11,7 @@ use gpui::{
     App, Context, EntityId, InteractiveElement as _, IntoElement, ParentElement, Render,
     Styled as _, Task, Window, div, px,
 };
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, Placement, Sizable as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    tooltip::Tooltip,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, tooltip::Tooltip};
 
 use crate::assets::IconName;
 
@@ -459,6 +454,14 @@ impl SystemMonitor {
 }
 
 fn bytes(value: f64) -> String {
+    format_bytes(value, 1)
+}
+
+fn precise_bytes(value: f64) -> String {
+    format_bytes(value, 2)
+}
+
+fn format_bytes(value: f64, precision: usize) -> String {
     let (scaled, unit) = if value >= 1024_f64.powi(3) {
         (value / 1024_f64.powi(3), "GiB")
     } else if value >= 1024_f64.powi(2) {
@@ -468,11 +471,11 @@ fn bytes(value: f64) -> String {
     } else {
         (value, "B")
     };
-    format!("{scaled:.1} {unit}")
+    format!("{scaled:.precision$} {unit}")
 }
 fn rate(value: Option<f64>) -> String {
     value
-        .map(|value| format!("{}/s", bytes(value)))
+        .map(|value| format!("{}/s", precise_bytes(value)))
         .unwrap_or_else(|| "—".into())
 }
 fn uptime(seconds: u64) -> String {
@@ -497,6 +500,7 @@ fn monitor_command(directory: Option<&str>) -> String {
 }
 
 impl Snapshot {
+    #[cfg(test)]
     fn cpu_tooltip(&self) -> String {
         let cores = if self.cores > 0 {
             self.cores.to_string()
@@ -512,11 +516,11 @@ impl Snapshot {
     fn memory_tooltip(&self) -> String {
         format!(
             "Memory\ntotal: {}\nused: {}\navailable: {}\ncached: {}\nfree: {}",
-            bytes(self.memory_total as f64),
-            bytes(self.memory_used as f64),
-            bytes(self.memory_available as f64),
-            bytes(self.memory_cached as f64),
-            bytes(self.memory_free as f64)
+            precise_bytes(self.memory_total as f64),
+            precise_bytes(self.memory_used as f64),
+            precise_bytes(self.memory_available as f64),
+            precise_bytes(self.memory_cached as f64),
+            precise_bytes(self.memory_free as f64)
         )
     }
 
@@ -539,7 +543,7 @@ impl Snapshot {
             text.push_str(&format!(
                 "\n{name}    {}    {}",
                 rate(speed),
-                bytes(total as f64)
+                precise_bytes(total as f64)
             ));
         }
         text
@@ -563,7 +567,7 @@ impl Snapshot {
 enum StatusTooltip {
     Text(String),
     Partitions(Vec<Partition>),
-    Hidden(String),
+    Hidden,
 }
 impl From<String> for StatusTooltip {
     fn from(value: String) -> Self {
@@ -600,33 +604,31 @@ fn item(
     cx: &App,
 ) -> impl IntoElement + ParentElement {
     let tooltip = tooltip.into();
-    let accessibility = match &tooltip {
-        StatusTooltip::Hidden(description) => description.clone(),
-        _ => text.clone(),
-    };
-    let row = h_flex()
+    let label = div()
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .child(text);
+    let mut row = h_flex()
         .id(id)
         .w(px(width))
         .h(super::status_bar::STATUS_BAR_ITEM_HEIGHT)
         .flex_none()
         .items_center()
+        .gap_0()
+        .px(px(2.))
         .border_r_1()
         .border_color(cx.theme().border)
-        .child(
-            Button::new(id)
-                .ghost()
-                .small()
-                .h(super::status_bar::STATUS_BAR_ITEM_HEIGHT)
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .px_1()
-                .icon(icon)
-                .accessibility_label(accessibility)
-                .label(text)
-                .text_color(cx.theme().muted_foreground),
-        );
-    if matches!(tooltip, StatusTooltip::Hidden(_)) {
+        .text_color(cx.theme().muted_foreground)
+        .child(Icon::new(icon).w(px(14.)).h(px(14.)).flex_none());
+    if id == "monitor-cpu" {
+        row = row
+            .child(label.w(px(42.)).flex_none())
+            .child(div().flex_1().min_w_0());
+    } else {
+        row = row.child(label.flex_1().min_w_0());
+    }
+    if matches!(tooltip, StatusTooltip::Hidden) {
         return row;
     }
     row.tooltip(move |window, cx| {
@@ -665,7 +667,7 @@ fn item(
                         ]));
                     }
                 }
-                StatusTooltip::Hidden(_) => {}
+                StatusTooltip::Hidden => {}
             }
             body
         })
@@ -676,13 +678,18 @@ fn item(
 impl Render for SystemMonitor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut bar = h_flex()
+            .id("system-monitor-strip")
             .w_full()
             .h(super::status_bar::STATUS_BAR_ITEM_HEIGHT)
             .min_w_0()
-            .overflow_hidden()
+            .overflow_x_scroll()
             .items_center()
             .gap_0()
-            .text_size(px(11.))
+            .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                "tnum".into(),
+                1,
+            )])))
+            .text_size(px(14.))
             .whitespace_nowrap();
         if let Some(data) = &self.snapshot {
             let cpu = data
@@ -691,8 +698,8 @@ impl Render for SystemMonitor {
                 .unwrap_or_else(|| "—".into());
             let memory = format!(
                 "{} / {}",
-                bytes(data.memory_used as f64),
-                bytes(data.memory_total as f64)
+                precise_bytes(data.memory_used as f64),
+                precise_bytes(data.memory_total as f64)
             );
             let cpu_history = div()
                 .relative()
@@ -745,7 +752,7 @@ impl Render for SystemMonitor {
             bar = bar
                 .child(item(
                     "monitor-host",
-                    112.,
+                    140.,
                     IconName::SquareTerminal,
                     data.host.clone(),
                     format!(
@@ -757,17 +764,17 @@ impl Render for SystemMonitor {
                 .child(
                     item(
                         "monitor-cpu",
-                        112.,
+                        130.,
                         IconName::Cpu,
                         cpu,
-                        StatusTooltip::Hidden(data.cpu_tooltip()),
+                        StatusTooltip::Hidden,
                         cx,
                     )
                     .child(cpu_history),
                 )
                 .child(item(
                     "monitor-memory",
-                    156.,
+                    200.,
                     IconName::MemoryStick,
                     memory,
                     data.memory_tooltip(),
@@ -775,7 +782,7 @@ impl Render for SystemMonitor {
                 ))
                 .child(item(
                     "monitor-upload",
-                    100.,
+                    132.,
                     IconName::Upload,
                     rate(data.upload),
                     data.network_tooltip(true),
@@ -783,7 +790,7 @@ impl Render for SystemMonitor {
                 ))
                 .child(item(
                     "monitor-download",
-                    100.,
+                    132.,
                     IconName::Download,
                     rate(data.download),
                     data.network_tooltip(false),
@@ -791,7 +798,7 @@ impl Render for SystemMonitor {
                 ))
                 .child(item(
                     "monitor-uptime",
-                    80.,
+                    110.,
                     IconName::Clock,
                     uptime(data.uptime),
                     "系统运行时间".to_string(),
@@ -799,7 +806,7 @@ impl Render for SystemMonitor {
                 ))
                 .child(item(
                     "monitor-user",
-                    104.,
+                    140.,
                     IconName::User,
                     data.sessions
                         .map(|count| format!("{} (×{count})", data.user))
@@ -835,7 +842,7 @@ impl Render for SystemMonitor {
             };
             bar = bar.child(item(
                 "monitor-disk",
-                112.,
+                150.,
                 IconName::HardDrive,
                 label,
                 tooltip,
@@ -843,7 +850,7 @@ impl Render for SystemMonitor {
             ));
         } else if self.remote {
             bar = bar
-                .child(Icon::new(IconName::SquareTerminal).size_3())
+                .child(Icon::new(IconName::SquareTerminal).w(px(14.)).h(px(14.)))
                 .child(
                     div()
                         .overflow_hidden()
@@ -852,13 +859,14 @@ impl Render for SystemMonitor {
                 );
             if self.failed && self.client.is_some() {
                 bar = bar.child(
-                    Button::new("monitor-retry")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Replace)
-                        .tooltip("重新连接系统监控")
-                        .tooltip_placement(Placement::Top)
-                        .accessibility_label("重新连接系统监控")
+                    h_flex()
+                        .id("monitor-retry")
+                        .h(super::status_bar::STATUS_BAR_ITEM_HEIGHT)
+                        .px(px(2.))
+                        .flex_none()
+                        .items_center()
+                        .child(Icon::new(IconName::Replace).w(px(14.)).h(px(14.)))
+                        .tooltip(|window, cx| Tooltip::new("重新连接系统监控").build(window, cx))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(client) = this.client.clone() {
                                 this.task = None;
@@ -923,7 +931,7 @@ mod tests {
     #[test]
     fn compact_units_preserve_rate_and_uptime_meaning() {
         assert_eq!(rate(None), "—");
-        assert_eq!(rate(Some(2048.0)), "2.0 KiB/s");
+        assert_eq!(rate(Some(2048.0)), "2.00 KiB/s");
         assert_eq!(uptime(90061), "1天 1时");
     }
 
@@ -951,10 +959,10 @@ mod tests {
         );
         assert!(data.cpu_tooltip().contains("核心数: 4\n线程数: 8"));
         let tx = data.network_tooltip(true);
-        assert!(tx.contains("eth0    —    2.0 KiB"));
+        assert!(tx.contains("eth0    —    2.00 KiB"));
         assert!(!tx.contains("errors"));
         let rx = data.network_tooltip(false);
-        assert!(rx.contains("eth0    —    1.0 KiB"));
+        assert!(rx.contains("eth0    —    1.00 KiB"));
         assert!(!rx.contains("dropped"));
         assert!(
             data.connection_tooltip("alice@server:22")
