@@ -16,6 +16,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, tooltip::Tooltip};
 use crate::assets::IconName;
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(12);
+const LOADING_MESSAGE: &str = "Loading remote monitoring, please wait...";
 const FRAME_END: &str = "__ALACRTERM_STATUS_END__\n";
 const REMOTE_SCRIPT: &str = include_str!("../../../scripts/system_status.sh");
 type Traffic = BTreeMap<String, (u64, u64)>;
@@ -279,7 +280,6 @@ impl RemoteSampler {
 pub(crate) struct MonitorTarget {
     pub(crate) id: (EntityId, ssh::SessionId),
     pub(crate) client: ssh::SshExec,
-    pub(crate) host: String,
     pub(crate) endpoint: String,
     pub(crate) directory: Option<String>,
 }
@@ -288,12 +288,10 @@ pub(crate) struct SystemMonitor {
     target: Option<(EntityId, ssh::SessionId)>,
     remote: bool,
     snapshot: Option<Snapshot>,
-    message: String,
+    error: Option<String>,
     task: Option<Task<()>>,
     client: Option<ssh::SshExec>,
-    host: String,
     history: VecDeque<f32>,
-    failed: bool,
     directory: Option<String>,
     endpoint: String,
 }
@@ -303,12 +301,10 @@ impl SystemMonitor {
             target: None,
             remote: false,
             snapshot: None,
-            message: String::new(),
+            error: None,
             task: None,
             client: None,
-            host: String::new(),
             history: VecDeque::new(),
-            failed: false,
             directory: None,
             endpoint: String::new(),
         }
@@ -330,27 +326,14 @@ impl SystemMonitor {
         self.task = None;
         self.snapshot = None;
         self.history.clear();
-        self.failed = false;
+        self.error = None;
         self.client = None;
-        self.host.clear();
         self.endpoint.clear();
         self.directory = directory;
-        self.message = if remote {
-            "等待远端系统状态…"
-        } else {
-            ""
-        }
-        .into();
-        match target {
-            Some(target) => {
-                self.client = Some(target.client.clone());
-                self.host = target.host;
-                self.endpoint = target.endpoint;
-                self.message = format!("{} · 正在采样…", self.host);
-                self.start_remote(target.client, cx);
-            }
-            _ if !remote => {}
-            _ => self.message = "SSH 未连接 · 系统监控暂停".into(),
+        if let Some(target) = target {
+            self.client = Some(target.client.clone());
+            self.endpoint = target.endpoint;
+            self.start_remote(target.client, cx);
         }
         cx.notify();
     }
@@ -406,7 +389,7 @@ impl SystemMonitor {
                                             }
                                             this.history.push_back(cpu);
                                         }
-                                        this.failed = false;
+                                        this.error = None;
                                         this.snapshot = Some(snapshot);
                                         cx.notify();
                                     }
@@ -447,8 +430,7 @@ impl SystemMonitor {
 
     fn fail(&mut self, message: &str, cx: &mut Context<Self>) {
         self.snapshot = None;
-        self.failed = true;
-        self.message = format!("系统监控不可用 · {message}");
+        self.error = Some(format!("系统监控不可用 · {message}"));
         cx.notify();
     }
 }
@@ -500,17 +482,15 @@ fn monitor_command(directory: Option<&str>) -> String {
 }
 
 impl Snapshot {
-    #[cfg(test)]
-    fn cpu_tooltip(&self) -> String {
-        let cores = if self.cores > 0 {
-            self.cores.to_string()
-        } else {
-            "远端未提供".into()
-        };
-        format!(
-            "CPU\n核心数: {cores}\n线程数: {}\n在线线程: {}\n每 2 秒采样 · 历史范围 0–100%",
-            self.threads, self.online_threads
-        )
+    fn is_initialized(&self) -> bool {
+        !self.host.is_empty()
+            && !self.user.is_empty()
+            && self.cpu.is_some()
+            && self.memory_total > 0
+            && self.upload.is_some()
+            && self.download.is_some()
+            && self.sessions.is_some()
+            && self.disk.as_ref().is_some_and(|disk| disk.total > 0)
     }
 
     fn memory_tooltip(&self) -> String {
@@ -616,15 +596,15 @@ fn item(
         .flex_none()
         .items_center()
         .gap_0()
-        .px(px(2.))
+        .px(px(8.))
         .border_r_1()
         .border_color(cx.theme().border)
         .text_color(cx.theme().muted_foreground)
-        .child(Icon::new(icon).w(px(14.)).h(px(14.)).flex_none());
-    if id == "monitor-cpu" {
-        row = row
-            .child(label.w(px(42.)).flex_none())
-            .child(div().flex_1().min_w_0());
+        .child(Icon::new(icon).flex_none().mr(px(6.)));
+    if id == "monitor-host" {
+        row = row.w_auto().child(label.flex_none());
+    } else if id == "monitor-cpu" {
+        row = row.child(label.w(px(42.)).flex_none());
     } else {
         row = row.child(label.flex_1().min_w_0());
     }
@@ -691,7 +671,7 @@ impl Render for SystemMonitor {
             )])))
             .text_size(px(14.))
             .whitespace_nowrap();
-        if let Some(data) = &self.snapshot {
+        if let Some(data) = self.snapshot.as_ref().filter(|data| data.is_initialized()) {
             let cpu = data
                 .cpu
                 .map(|cpu| format!("{cpu:.0}%"))
@@ -756,7 +736,7 @@ impl Render for SystemMonitor {
                     IconName::SquareTerminal,
                     data.host.clone(),
                     format!(
-                        "当前 SSH 远端：{}\n连接：{}\n系统：Linux",
+                        "当前 SSH 远端：{}\n连接：{}\n",
                         data.host, self.endpoint
                     ),
                     cx,
@@ -764,7 +744,7 @@ impl Render for SystemMonitor {
                 .child(
                     item(
                         "monitor-cpu",
-                        130.,
+                        128.,
                         IconName::Cpu,
                         cpu,
                         StatusTooltip::Hidden,
@@ -774,7 +754,7 @@ impl Render for SystemMonitor {
                 )
                 .child(item(
                     "monitor-memory",
-                    200.,
+                    170.,
                     IconName::MemoryStick,
                     memory,
                     data.memory_tooltip(),
@@ -782,7 +762,7 @@ impl Render for SystemMonitor {
                 ))
                 .child(item(
                     "monitor-upload",
-                    132.,
+                    120.,
                     IconName::Upload,
                     rate(data.upload),
                     data.network_tooltip(true),
@@ -790,7 +770,7 @@ impl Render for SystemMonitor {
                 ))
                 .child(item(
                     "monitor-download",
-                    132.,
+                    120.,
                     IconName::Download,
                     rate(data.download),
                     data.network_tooltip(false),
@@ -798,7 +778,7 @@ impl Render for SystemMonitor {
                 ))
                 .child(item(
                     "monitor-uptime",
-                    110.,
+                    96.,
                     IconName::Clock,
                     uptime(data.uptime),
                     "系统运行时间".to_string(),
@@ -806,7 +786,7 @@ impl Render for SystemMonitor {
                 ))
                 .child(item(
                     "monitor-user",
-                    140.,
+                    96.,
                     IconName::User,
                     data.sessions
                         .map(|count| format!("{} (×{count})", data.user))
@@ -842,22 +822,24 @@ impl Render for SystemMonitor {
             };
             bar = bar.child(item(
                 "monitor-disk",
-                150.,
+                96.,
                 IconName::HardDrive,
                 label,
                 tooltip,
                 cx,
             ));
         } else if self.remote {
+            if self.error.is_some() {
+                bar = bar.child(Icon::new(IconName::SquareTerminal).w(px(14.)).h(px(14.)));
+            }
             bar = bar
-                .child(Icon::new(IconName::SquareTerminal).w(px(14.)).h(px(14.)))
                 .child(
                     div()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .child(self.message.clone()),
+                        .child(self.error.clone().unwrap_or_else(|| LOADING_MESSAGE.into())),
                 );
-            if self.failed && self.client.is_some() {
+            if self.error.is_some() && self.client.is_some() {
                 bar = bar.child(
                     h_flex()
                         .id("monitor-retry")
@@ -870,9 +852,8 @@ impl Render for SystemMonitor {
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(client) = this.client.clone() {
                                 this.task = None;
-                                this.failed = false;
+                                this.error = None;
                                 this.history.clear();
-                                this.message = format!("{} · 正在采样…", this.host);
                                 this.start_remote(client, cx);
                                 cx.notify();
                             }
@@ -887,6 +868,35 @@ impl Render for SystemMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_strip_waits_until_all_metrics_are_initialized() {
+        let mut data = Snapshot {
+            host: "server".into(),
+            user: "tester".into(),
+            memory_total: 1024,
+            sessions: Some(1),
+            disk: Some(Partition {
+                device: "/dev/root".into(),
+                mount: "/".into(),
+                used: 0,
+                total: 1024,
+                available: 1024,
+                filesystem_type: "ext4".into(),
+                used_percent: "0%".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!data.is_initialized());
+        data.cpu = Some(0.0);
+        assert!(!data.is_initialized());
+        data.upload = Some(0.0);
+        assert!(!data.is_initialized());
+        data.download = Some(0.0);
+        assert!(data.is_initialized());
+        data.disk = None;
+        assert!(!data.is_initialized());
+    }
 
     #[test]
     fn rates_use_elapsed_time_and_ignore_new_or_reset_interfaces() {
@@ -957,7 +967,6 @@ mod tests {
             ),
             (1000 * 1024, 600 * 1024, 400 * 1024, 200 * 1024, 100 * 1024)
         );
-        assert!(data.cpu_tooltip().contains("核心数: 4\n线程数: 8"));
         let tx = data.network_tooltip(true);
         assert!(tx.contains("eth0    —    2.00 KiB"));
         assert!(!tx.contains("errors"));
@@ -977,17 +986,13 @@ mod tests {
     #[test]
     fn physical_core_count_is_not_guessed_from_thread_count() {
         let data = RemoteSampler::default().parse("host arm\nthreads 8\nphysical_cores 0\ncpu 1 0 1 8\nmem MemTotal: 1000 kB\nuptime 60 0\n").unwrap();
-        assert!(data.cpu_tooltip().contains("核心数: 远端未提供\n线程数: 8"));
+        assert_eq!((data.cores, data.threads, data.online_threads), (0, 8, 8));
     }
 
     #[test]
     fn configured_cpu_topology_overrides_a_partial_online_view() {
         let data = RemoteSampler::default().parse("host server\nthreads 4\nphysical_cores 2\nconfigured_threads 8\nconfigured_cores 4\ncpu 1 0 1 8\nmem MemTotal: 1000 kB\nuptime 60 0\n").unwrap();
         assert_eq!((data.cores, data.threads, data.online_threads), (4, 8, 4));
-        assert!(
-            data.cpu_tooltip()
-                .contains("核心数: 4\n线程数: 8\n在线线程: 4")
-        );
     }
 
     #[test]

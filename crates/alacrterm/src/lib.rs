@@ -395,7 +395,6 @@ impl AppRoot {
                 Some(system_monitor::MonitorTarget {
                     id: (tab.focused_id(), fs.session_id()),
                     client: exec,
-                    host: fs.host().to_string(),
                     endpoint: tab.remote_endpoint()?,
                     directory: snapshot.directory.clone(),
                 })
