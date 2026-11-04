@@ -49,7 +49,7 @@ pub(super) fn row_shell(ix: usize, depth: usize, selected: bool, cx: &mut App) -
 /// 行的内容：前导图标 + 类型图标 + 名字。
 pub(super) fn row_content(
     leading: Option<IconName>,
-    icon: IconName,
+    icon: impl IntoElement,
     label: SharedString,
 ) -> AnyElement {
     let content = h_flex().gap_x_2().items_center();
@@ -58,7 +58,7 @@ pub(super) fn row_content(
         None => content,
     };
     content
-        .child(Icon::new(icon).size_3())
+        .child(icon)
         .child(ellipsis_label(label))
         .into_any_element()
 }

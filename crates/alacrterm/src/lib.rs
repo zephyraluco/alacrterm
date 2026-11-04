@@ -17,6 +17,7 @@ pub mod completion;
 mod components;
 pub mod config;
 mod dialog;
+mod file_icons;
 use util::format;
 pub mod exit_coordinator;
 pub mod keymap;

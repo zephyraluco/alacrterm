@@ -1282,10 +1282,8 @@ fn row_menu(
 
 /// 画当前目录的一行；文件夹和文件对齐，不显示树形展开箭头。
 fn row_element(ix: usize, row: &FileRow, selected: bool, cx: &mut App) -> ListItem {
-    let icon = match row.kind {
-        RowKind::Dir => IconName::Folder,
-        RowKind::File => IconName::File,
-    };
+    let icon =
+        crate::file_icons::file_icon(&row.label, matches!(row.kind, RowKind::Dir), false, cx);
     row_shell(ix, 0, selected, cx)
         .cursor(CursorStyle::Arrow)
         .child(row_content(None, icon, row.label.clone()))

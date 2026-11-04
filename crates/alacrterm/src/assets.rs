@@ -18,7 +18,7 @@ impl RenderOnce for IconName {
     }
 }
 
-/// gpui 资产源：嵌入 `assets/` 目录（`icons/**/*`）。
+/// gpui 资产源：嵌入操作图标与 Material Icon Theme 的文件图标。
 #[derive(RustEmbed)]
 #[folder = "../../assets"]
 #[include = "icons/**/*"]
@@ -35,11 +35,17 @@ pub struct KeymapAssets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path == "licenses/material-icons.md" {
+            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "../../../docs/material-icons.md"
+            ))));
+        }
         Ok(Self::get(path).map(|f| f.data))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(Self::iter()
+            .chain(std::iter::once("licenses/material-icons.md".into()))
             .filter_map(|p| {
                 if p.starts_with(path) {
                     Some(p.into())
