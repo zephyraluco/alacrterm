@@ -61,6 +61,9 @@ pub(crate) struct ImeState {
 /// 光标闪烁间隔。
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// 终端视图四周的内边距（px）：让网格不贴着窗口/分屏边缘，避免光标闪烁时被遮挡。
+const TERMINAL_VIEW_PADDING: f32 = 4.;
+
 /// 终端的 key context。
 ///
 /// 打在终端视图根节点上，让 keymap 里 `"context": "Terminal"` 的绑定只在终端聚焦时生效
@@ -961,6 +964,7 @@ impl Render for TerminalView {
             // （`TerminalElement` 自己不贡献 element id）。
             .id(("terminal-view", cx.entity_id()))
             .size_full()
+            .p(gpui::px(TERMINAL_VIEW_PADDING))
             .relative()
             .key_context(TERMINAL_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
