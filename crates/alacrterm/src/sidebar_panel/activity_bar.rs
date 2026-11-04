@@ -26,13 +26,14 @@ use crate::status_bar::{STATUS_BAR_ITEM_HEIGHT, new_status_bar};
 pub(super) fn status_bar(
     sidebar: &Sidebar,
     right: &Entity<Sidebar>,
+    monitor: Entity<crate::system_monitor::SystemMonitor>,
     cx: &mut Context<Sidebar>,
 ) -> AnyElement {
     let files_enabled = right.read(cx).files_view_available(cx);
     SidebarView::ALL
         .into_iter()
         .filter(|view| view.visible_with(files_enabled))
-        .fold(new_status_bar(), |bar, view| {
+        .fold(new_status_bar().child(monitor), |bar, view| {
             let (state, selected) = match view {
                 SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
                 SidebarView::Files => (right.downgrade(), right.read(cx).panel_visible(cx)),

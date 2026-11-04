@@ -481,6 +481,13 @@ impl TabPane {
         self.target.is_ssh()
     }
 
+    pub(crate) fn remote_endpoint(&self) -> Option<String> {
+        match &self.target {
+            TerminalTarget::Ssh(params) => Some(params.endpoint()),
+            TerminalTarget::Local(_) => None,
+        }
+    }
+
     /// 分屏用的参数：本页的会话目标 + 当前格子的工作目录（远端没有本地路径 ⇒ `None`）。
     ///
     /// 这是「标签页内分屏应该在同一个环境里」的落点：远端标签页分屏还是连那台主机，

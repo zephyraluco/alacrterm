@@ -62,4 +62,4 @@ pub use fs::{
 };
 pub use handler::{HOST_KEY_TIMEOUT, HostKeyDecision, HostKeyPrompt};
 pub use params::{DEFAULT_TERM, HostKeyPolicy, SshAuth, SshParams, SshSize};
-pub use session::{SshEvent, SshOutput, SshSession};
+pub use session::{SshEvent, SshExec, SshExecChannel, SshOutput, SshSession};

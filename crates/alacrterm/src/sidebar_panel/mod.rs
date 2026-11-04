@@ -156,9 +156,10 @@ impl Sidebar {
     pub(crate) fn render_status_bar(
         &self,
         right: &Entity<Sidebar>,
+        monitor: Entity<crate::system_monitor::SystemMonitor>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        activity_bar::status_bar(self, right, cx)
+        activity_bar::status_bar(self, right, monitor, cx)
     }
 
     pub(crate) fn panel_visible(&self, cx: &App) -> bool {

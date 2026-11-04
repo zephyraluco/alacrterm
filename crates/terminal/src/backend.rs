@@ -104,6 +104,13 @@ impl TerminalBackend {
             Self::Ssh(session) => Some(session.fs()),
         }
     }
+
+    pub(crate) fn remote_exec(&self) -> Option<ssh::SshExec> {
+        match self {
+            Self::Pty { .. } => None,
+            Self::Ssh(session) => Some(session.exec_client()),
+        }
+    }
 }
 
 /// 建 SSH 会话时申请 PTY 的**初始**尺寸。

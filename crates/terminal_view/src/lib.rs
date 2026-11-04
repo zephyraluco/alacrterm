@@ -868,6 +868,12 @@ impl TerminalView {
             .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.remote_fs()))
     }
 
+    pub fn remote_exec(&self, cx: &App) -> Option<terminal::SshExec> {
+        self.terminal
+            .as_ref()
+            .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.remote_exec()))
+    }
+
     /// 会话是否正在运行（本地已退出或远端已断开时为 false）。
     pub fn is_connected(&self, cx: &App) -> bool {
         self.terminal

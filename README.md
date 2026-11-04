@@ -36,6 +36,7 @@ Alacrterm is a desktop terminal built with Rust, GPUI, and gpui-kit, with termin
 - **File management:** Browse local or SFTP directories, navigate with path suggestions, preview and edit files, and upload or download them.
 - **X11 forwarding:** Manage a bundled WayX X Server and connect SSH X11 channels to the local display service.
 - **Themes and keybindings:** Switch UI themes and terminal palettes, reload external theme resources, and customize keyboard shortcuts.
+- **SSH system monitor:** The active SSH terminal shows remote CPU history, memory, network rates, uptime, user sessions, and current partition usage. CPU, memory, network rates and uptime refresh every two seconds; login records refresh about every ten seconds and filesystem metadata about every thirty seconds. Monitoring uses a separate read-only exec channel multiplexed over the terminal’s existing SSH connection and currently supports Linux hosts with `/proc`; local terminals do not display system metrics.
 - **Online updates:** Update through an installer on Windows, Sparkle on macOS, or the system's deb installation tools on Linux.
 
 ## Getting started

@@ -152,6 +152,107 @@ async fn collect_failure_answering(
 
 // ---------------------------------------------------------------- 用例
 
+async fn expect_text(
+    events: &mut futures::channel::mpsc::UnboundedReceiver<SshEvent>,
+    expected: &str,
+) -> String {
+    let (text, _) = collect_until(events, Duration::from_secs(10), None, |text, _| {
+        text.contains(expected)
+    })
+    .await;
+    assert!(
+        text.contains(expected),
+        "expected {expected:?}, received {text:?}"
+    );
+    text
+}
+
+#[tokio::test]
+async fn multiplexed_exec_reuses_authentication_and_closes_without_affecting_shell() {
+    use std::sync::atomic::Ordering;
+    let (port, stats) = local_server::serve_counted().await.unwrap();
+    let known_hosts = temp_known_hosts("multiplexed-exec");
+    let (session, mut terminal) = connect(port, known_hosts.clone(), SshSize::cells(80, 24)).await;
+    expect_text(&mut terminal, PROMPT).await;
+    let client = session.exec_client();
+    let (tx, mut monitor) = futures::channel::mpsc::unbounded();
+    let channel = client.exec("monitor-hold", tx).unwrap();
+    expect_text(&mut monitor, "MONITOR_READY").await;
+    session.write(b"while-monitor-runs\r");
+    let output = expect_text(&mut terminal, "REPLY:while-monitor-runs").await;
+    assert!(
+        !output.contains("MONITOR_READY"),
+        "exec output must never reach the PTY"
+    );
+    drop(channel);
+    collect_until(&mut monitor, Duration::from_secs(10), None, |_, _| false).await;
+    let (tx, mut next) = futures::channel::mpsc::unbounded();
+    let _channel = client.exec("exit 7", tx).unwrap();
+    let (output, code) = collect_until(&mut next, Duration::from_secs(10), None, |_, code| {
+        code.is_some()
+    })
+    .await;
+    assert!(output.contains("EXEC:exit 7"));
+    assert_eq!(code, Some(7));
+    session.write(b"after-monitor-close\r");
+    expect_text(&mut terminal, "REPLY:after-monitor-close").await;
+    assert_eq!(stats.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(stats.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        stats.ptys.load(Ordering::SeqCst),
+        1,
+        "exec channels must not request a PTY"
+    );
+    session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+async fn rejected_exec_channel_does_not_disconnect_interactive_terminal() {
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("rejected-multiplexed-exec");
+    let (session, mut terminal) = connect(port, known_hosts.clone(), SshSize::cells(80, 24)).await;
+    expect_text(&mut terminal, PROMPT).await;
+    let (tx, mut events) = futures::channel::mpsc::unbounded();
+    let _channel = session.exec_client().exec("monitor-reject", tx).unwrap();
+    let reason = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = events.next().await {
+            if let SshEvent::Closed { reason, .. } = event {
+                return reason;
+            }
+        }
+        None
+    })
+    .await
+    .unwrap();
+    assert!(reason.is_some_and(|reason| reason.contains("rejected")));
+    session.write(b"still-connected\r");
+    expect_text(&mut terminal, "REPLY:still-connected").await;
+    session.disconnect();
+    let _ = std::fs::remove_file(known_hosts);
+}
+
+#[tokio::test]
+async fn terminal_disconnect_ends_all_multiplexed_exec_channels() {
+    let port = local_server::serve().await.unwrap();
+    let known_hosts = temp_known_hosts("disconnect-multiplexed-exec");
+    let (session, mut terminal) = connect(port, known_hosts.clone(), SshSize::cells(80, 24)).await;
+    expect_text(&mut terminal, PROMPT).await;
+    let client = session.exec_client();
+    let (tx, mut events) = futures::channel::mpsc::unbounded();
+    let _channel = client.exec("monitor-hold", tx).unwrap();
+    expect_text(&mut events, "MONITOR_READY").await;
+    session.disconnect();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while events.next().await.is_some() {}
+    })
+    .await
+    .unwrap();
+    let (tx, _) = futures::channel::mpsc::unbounded();
+    assert!(client.exec("must-not-reconnect", tx).is_err());
+    let _ = std::fs::remove_file(known_hosts);
+}
+
 /// 主路径:连接 → 密码认证 → PTY → shell → 收远端字节 → 发本地字节 → resize → 退出码。
 #[tokio::test]
 async fn connects_authenticates_and_round_trips_bytes() {
