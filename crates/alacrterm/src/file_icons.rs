@@ -32,8 +32,25 @@ struct Manifest {
 }
 
 static MANIFEST: LazyLock<Manifest> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../../../assets/icons/material/manifest.json"))
-        .unwrap_or_default()
+    let mut manifest: Manifest =
+        serde_json::from_str(include_str!("../../../assets/icons/material/manifest.json"))
+            .unwrap_or_default();
+    // Upstream contains mixed-case keys; apply the same normalization as lookup
+    // once, including light-theme overrides and compound extension mappings.
+    for associations in [&mut manifest.default, &mut manifest.light] {
+        for table in [
+            &mut associations.file_names,
+            &mut associations.file_extensions,
+            &mut associations.folder_names,
+            &mut associations.folder_names_expanded,
+        ] {
+            *table = std::mem::take(table)
+                .into_iter()
+                .map(|(key, icon)| (key.to_lowercase(), icon))
+                .collect();
+        }
+    }
+    manifest
 });
 
 fn associated_icon<'a>(
@@ -128,6 +145,27 @@ mod tests {
         assert!(icon_path("index.d.ts", false, false, false).ends_with("/typescript-def.svg"));
         assert!(icon_path("APP.PY", false, false, false).ends_with("/python.svg"));
         assert!(icon_path(".gitignore", false, false, false).ends_with("/git.svg"));
+    }
+
+    #[test]
+    fn mixed_case_manifest_names_keep_their_specific_icons() {
+        for (name, icon) in [
+            ("CLAUDE.md", "claude"),
+            ("Caddyfile", "caddy"),
+            ("PKGBUILD", "console"),
+            ("CMakePresets.json", "cmake"),
+        ] {
+            for light in [false, true] {
+                assert!(
+                    icon_path(name, false, false, light).ends_with(&format!("/{icon}.svg")),
+                    "{name}"
+                );
+                assert_eq!(
+                    icon_path(name, false, false, light),
+                    icon_path(&name.to_lowercase(), false, false, light)
+                );
+            }
+        }
     }
 
     #[test]
