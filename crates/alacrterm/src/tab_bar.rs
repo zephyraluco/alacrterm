@@ -414,6 +414,11 @@ impl TerminalTabBar {
             .and_then(|handle| handle.tab_name(cx))
             .unwrap_or_else(|| panel.panel_name(cx).into());
 
+        let system_icon = PanelHandle::of(panel)
+            .and_then(|handle| handle.view().downcast::<TabPane>().ok())
+            .map(|pane| pane.read(cx).system_icon(cx))
+            .unwrap_or_default();
+
         // id 带组节点，避免同下标撞车。
         let tab_id = (group.node().as_u64() as usize) << 8 | ix;
         // 相邻标签的竖线。
@@ -499,6 +504,7 @@ impl TerminalTabBar {
                         drag.set_preview_size(DRAG_PREVIEW_SIZE);
                         cx.new(|_| TabDragPreview {
                             title: title.clone(),
+                            icon: system_icon,
                         })
                     }
                 })
@@ -519,14 +525,7 @@ impl TerminalTabBar {
                     .on_drop(on_drop_panel)
                 }
             })
-            .child(
-                svg()
-                    .path(IconName::SquareTerminal.path())
-                    .flex_none()
-                    .w(TAB_ICON_SIZE)
-                    .h(TAB_ICON_SIZE)
-                    .text_color(if selected { tab_active_fg } else { muted_fg }),
-            )
+            .child(system_icon.element(TAB_ICON_SIZE))
             .child(
                 div()
                     .flex_1()
@@ -543,6 +542,7 @@ impl TerminalTabBar {
 
 struct TabDragPreview {
     title: SharedString,
+    icon: crate::system_icons::SystemIcon,
 }
 
 impl Render for TabDragPreview {
@@ -554,12 +554,7 @@ impl Render for TabDragPreview {
             .rounded(px(6.))
             .bg(cx.theme().tab_active)
             .text_color(cx.theme().tab_active_foreground)
-            .child(
-                svg()
-                    .path(IconName::SquareTerminal.path())
-                    .w(TAB_ICON_SIZE)
-                    .h(TAB_ICON_SIZE),
-            )
+            .child(self.icon.element(TAB_ICON_SIZE))
             .child(self.title.clone())
     }
 }

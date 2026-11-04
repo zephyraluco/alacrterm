@@ -9,6 +9,7 @@
 //! 本地仍是同一个 shell），并尽量落在当前格子的工作目录里 —— 见
 //! [`AppRoot::split_active_session`]。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -399,6 +400,8 @@ pub(crate) struct TabPane {
     group: Option<WeakEntity<TabGroup>>,
     /// 每格一台终端。
     panes: Vec<Entity<TerminalView>>,
+    system_icons: HashMap<EntityId, (SessionId, crate::system_icons::SystemIcon)>,
+    local_system_icon: crate::system_icons::SystemIcon,
     /// 与 `panes` 一一对应的订阅（终端标题 / 焦点变化时要重绘标签栏）。
     subs: Vec<Subscription>,
     /// 格子布局。
@@ -421,12 +424,20 @@ impl TabPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let sub = Self::observe_pane(&view, window, cx);
+        let local_system_icon = match &target {
+            TerminalTarget::Local(shell) => {
+                crate::system_icons::SystemIcon::shell(&shell.program())
+            }
+            TerminalTarget::Ssh(_) => Default::default(),
+        };
         Self {
             root,
             name,
             target,
             group: None,
             panes: vec![view],
+            system_icons: HashMap::new(),
+            local_system_icon,
             subs: vec![sub],
             layout: Layout::single(),
             next_node: 0,
@@ -475,6 +486,37 @@ impl TabPane {
         self.name
             .clone()
             .unwrap_or_else(|| self.focused_view().read(cx).title())
+    }
+
+    pub(crate) fn system_icon(&self, cx: &App) -> crate::system_icons::SystemIcon {
+        match &self.target {
+            TerminalTarget::Local(_) => self.local_system_icon,
+            TerminalTarget::Ssh(_) => self
+                .remote_session(cx)
+                .and_then(|session| {
+                    self.system_icons
+                        .get(&self.focused_id())
+                        .filter(|(stored, _)| *stored == session)
+                })
+                .map(|(_, icon)| *icon)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn set_system_icon(
+        &mut self,
+        target: (EntityId, SessionId),
+        icon: crate::system_icons::SystemIcon,
+        cx: &mut Context<Self>,
+    ) {
+        self.system_icons
+            .retain(|id, _| self.panes.iter().any(|pane| pane.entity_id() == *id));
+        if self.panes.iter().any(|pane| pane.entity_id() == target.0)
+            && self.system_icons.get(&target.0) != Some(&(target.1, icon))
+        {
+            self.system_icons.insert(target.0, (target.1, icon));
+            cx.notify();
+        }
     }
 
     pub(crate) fn is_remote(&self) -> bool {

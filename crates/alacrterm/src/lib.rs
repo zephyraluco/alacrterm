@@ -29,6 +29,7 @@ mod settings_window;
 pub mod shell_integration;
 mod sidebar_panel;
 mod status_bar;
+mod system_icons;
 mod system_monitor;
 mod tab_bar;
 mod terminal_panel;
@@ -76,6 +77,7 @@ fn needs_context_apply(
 /// 定义在库根：各子模块用 `impl AppRoot` 挂方法。字段保持私有（crate 根对全 crate 可见）。
 pub struct AppRoot {
     system_monitor: Entity<system_monitor::SystemMonitor>,
+    _system_monitor_sub: Subscription,
     /// 所有标签页（每页内部自己分屏）。
     tabs: Vec<Entity<TabPane>>,
     /// 当前标签页下标。
@@ -223,8 +225,21 @@ impl AppRoot {
                 }
             }
         });
+        let system_monitor = cx.new(system_monitor::SystemMonitor::new);
+        let system_monitor_sub = cx.subscribe(
+            &system_monitor,
+            |root: &mut Self, _, event: &system_monitor::SystemIdentified, cx| {
+                for tab in &root.tabs {
+                    tab.update(cx, |tab, cx| {
+                        tab.set_system_icon(event.target, event.icon, cx)
+                    });
+                }
+                cx.notify();
+            },
+        );
         let mut this = Self {
-            system_monitor: cx.new(system_monitor::SystemMonitor::new),
+            system_monitor,
+            _system_monitor_sub: system_monitor_sub,
             tabs: Vec::new(),
             active: 0,
             sidebar,
