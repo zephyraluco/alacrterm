@@ -8,10 +8,26 @@ status_dir=${status_dir:-${HOME:-/}}
 status_dir=$(cd "$status_dir" 2>/dev/null && pwd -P) || status_dir=/
 monitor_host=$(hostname)
 monitor_user=$(id -un)
+# Read release metadata as data, never source a remote file as shell code.
+monitor_os_id=
+monitor_os_like=
+monitor_release=/etc/os-release
+test -r "$monitor_release" || monitor_release=/usr/lib/os-release
+if test -r "$monitor_release"; then
+    while IFS='=' read -r key value || test -n "$key"; do
+        value=${value#\"}; value=${value%\"}
+        value=${value#\'}; value=${value%\'}
+        case $key in
+            ID) monitor_os_id=$value ;;
+            ID_LIKE) monitor_os_like=$value ;;
+        esac
+    done < "$monitor_release"
+fi
 monitor_logins=
 monitor_partitions=
 monitor_sample=0
 while :; do
+    printf 'os_kernel Linux\nos_id %s\nos_like %s\n' "$monitor_os_id" "$monitor_os_like"
     printf 'host %s\nuser %s\n' "$monitor_host" "$monitor_user"
     printf '%s\n' "$monitor_logins" "$monitor_partitions"
     # One process reads all fast counters. CPU topology is not displayed, so

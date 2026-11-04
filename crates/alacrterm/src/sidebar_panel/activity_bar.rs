@@ -43,7 +43,7 @@ pub(super) fn status_bar(
                 .small()
                 .h(STATUS_BAR_ITEM_HEIGHT)
                 .w(STATUS_BAR_ITEM_HEIGHT)
-                .icon(view.icon())
+                .icon(crate::assets::ui_icon(view.icon()))
                 .tooltip(view.tooltip())
                 .tooltip_placement(Placement::Top)
                 .accessibility_label(view.tooltip())
@@ -148,9 +148,9 @@ pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElem
 /// | 上一目录 | `ArrowUp` | [`FilesState::navigate_up`] |
 /// | 下载 | `Download` | [`FilesState::download_selected`]（**路径问用户**）|
 /// | 上传 | `Upload` | `upload_via_dialog`（只问文件）|
-/// | 刷新 | `Replace` | [`FilesState::refresh`] |
+/// | 刷新 | `Refresh` | [`FilesState::refresh`] |
 /// | 新建文件夹 | `FolderPlus` | 名字对话框 → [`FilesState::create_dir`] |
-/// | 新建文件 | `File` | 名字对话框 → [`FilesState::create_file`] |
+/// | 新建文件 | `NewFile` | 名字对话框 → [`FilesState::create_file`] |
 /// | 重命名 | `CaseSensitive` | 名字对话框（预填旧名）→ [`FilesState::rename_selected`] |
 ///
 /// 判据每帧现取一次（[`FilesState::status`]）⇒ 跳目录 / 改选中项 / 断会话都会让相应的按钮
@@ -217,7 +217,7 @@ fn files_toolbar(files: Entity<FilesState>, cx: &mut Context<Sidebar>) -> AnyEle
         let files = files.clone();
         tool_button(
             "files-refresh",
-            IconName::Replace,
+            IconName::Refresh,
             "刷新",
             ready,
             move |_, cx| {
@@ -256,7 +256,7 @@ fn files_toolbar(files: Entity<FilesState>, cx: &mut Context<Sidebar>) -> AnyEle
         let files = files.clone();
         tool_button(
             "files-new-file",
-            IconName::File,
+            IconName::NewFile,
             "新建文件",
             ready,
             move |window, cx| {
@@ -331,7 +331,7 @@ fn tool_button(
     Button::new(id)
         .ghost()
         .xsmall()
-        .icon(icon)
+        .icon(crate::assets::ui_icon(icon))
         .tooltip(tooltip)
         .tooltip_placement(Placement::Top)
         .disabled(!enabled)
@@ -381,14 +381,14 @@ fn files_panel(panel: SidebarPanel<SidebarContent>, files: Entity<FilesState>) -
             let refresh = refresh_target.clone();
             menu.item(
                 PopupMenuItem::new("上传文件…")
-                    .icon(IconName::Upload)
+                    .icon(crate::assets::ui_icon(IconName::Upload))
                     .on_click(move |_, _, cx| {
                         upload_via_dialog(&upload, false, cx);
                     }),
             )
             .item(
                 PopupMenuItem::new("上传文件夹…")
-                    .icon(IconName::Upload)
+                    .icon(crate::assets::ui_icon(IconName::Upload))
                     .on_click(move |_, _, cx| {
                         upload_via_dialog(&folder, true, cx);
                     }),
@@ -396,7 +396,7 @@ fn files_panel(panel: SidebarPanel<SidebarContent>, files: Entity<FilesState>) -
             .separator()
             .item(
                 PopupMenuItem::new("刷新")
-                    .icon(IconName::Replace)
+                    .icon(crate::assets::ui_icon(IconName::Refresh))
                     .on_click(move |_, _, cx| {
                         refresh.update(cx, |files, cx| files.refresh(cx));
                     }),

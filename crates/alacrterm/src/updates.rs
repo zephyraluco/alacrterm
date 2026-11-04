@@ -660,7 +660,7 @@ impl gpui::Render for Updates {
                     Button::new("update-status")
                         .ghost()
                         .small()
-                        .icon(crate::assets::IconName::Download)
+                        .icon(crate::assets::ui_icon(crate::assets::IconName::Download))
                         .label(self.phase.title_bar_label())
                         .tooltip(self.status())
                         .accessibility_label("打开软件更新")

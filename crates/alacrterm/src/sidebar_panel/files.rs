@@ -41,7 +41,7 @@ use gpui::{
     Subscription, WeakEntity, Window, div, px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _,
+    ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::InputState,
@@ -1182,7 +1182,7 @@ fn transfer_element(
             h_flex()
                 .gap_x_2()
                 .items_center()
-                .child(Icon::new(IconName::LoaderCircle).size_3())
+                .child(crate::assets::ui_icon(IconName::LoaderCircle))
                 .child(div().flex_1().min_w_0().child(ellipsis_label(label)))
                 .child(
                     div()
@@ -1196,7 +1196,7 @@ fn transfer_element(
                     Button::new(format!("transfer-cancel-{id}"))
                         .ghost()
                         .xsmall()
-                        .icon(IconName::Close)
+                        .icon(crate::assets::ui_icon(IconName::Close))
                         .tooltip("取消")
                         .disabled(transfer.cancelling)
                         .on_click(move |_, _, cx| {
@@ -1230,7 +1230,7 @@ fn row_menu(
         let open_path = path.clone();
         menu = menu.item(
             PopupMenuItem::new("打开")
-                .icon(IconName::FileText)
+                .icon(crate::assets::ui_icon(IconName::FileText))
                 .on_click(move |_, _, cx| {
                     let _ =
                         open_state.update(cx, |files, cx| files.open_file(open_path.clone(), cx));
@@ -1247,7 +1247,7 @@ fn row_menu(
             "另存为…"
         };
         PopupMenuItem::new(label)
-            .icon(IconName::Download)
+            .icon(crate::assets::ui_icon(IconName::Download))
             .on_click(move |_, _, cx| {
                 let _ = state.update(cx, |files, cx| files.download_as(path.clone(), cx));
             })
@@ -1262,7 +1262,7 @@ fn row_menu(
             format!("下载到下载目录/{name}").into()
         };
         PopupMenuItem::new(label)
-            .icon(IconName::Download)
+            .icon(crate::assets::ui_icon(IconName::Download))
             .on_click(move |_, _, cx| {
                 let _ = state.update(cx, |files, cx| {
                     files.download_to_download_dir(path.clone(), cx)
@@ -1273,7 +1273,7 @@ fn row_menu(
     menu.separator().item({
         let copy_remote = remote.clone();
         PopupMenuItem::new("复制远端路径")
-            .icon(IconName::Copy)
+            .icon(crate::assets::ui_icon(IconName::Copy))
             .on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_remote.clone()));
             })
@@ -1282,10 +1282,8 @@ fn row_menu(
 
 /// 画当前目录的一行；文件夹和文件对齐，不显示树形展开箭头。
 fn row_element(ix: usize, row: &FileRow, selected: bool, cx: &mut App) -> ListItem {
-    let icon = match row.kind {
-        RowKind::Dir => IconName::Folder,
-        RowKind::File => IconName::File,
-    };
+    let icon =
+        crate::file_icons::file_icon(&row.label, matches!(row.kind, RowKind::Dir), false, cx);
     row_shell(ix, 0, selected, cx)
         .cursor(CursorStyle::Arrow)
         .child(row_content(None, icon, row.label.clone()))

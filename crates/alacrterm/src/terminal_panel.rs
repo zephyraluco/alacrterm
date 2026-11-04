@@ -9,6 +9,7 @@
 //! 本地仍是同一个 shell），并尽量落在当前格子的工作目录里 —— 见
 //! [`AppRoot::split_active_session`]。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use gpui::{
     relative,
 };
 use gpui_kit::component::{
-    Icon, Sizable as _,
+    Sizable as _,
     button::{Button, ButtonVariants as _},
     dock::{
         BasePanel, DockPlacement, InsertTarget, Panel, PanelControl, PanelEvent, PanelId, TabGroup,
@@ -399,6 +400,8 @@ pub(crate) struct TabPane {
     group: Option<WeakEntity<TabGroup>>,
     /// 每格一台终端。
     panes: Vec<Entity<TerminalView>>,
+    system_icons: HashMap<EntityId, (SessionId, crate::system_icons::SystemIcon)>,
+    local_system_icon: crate::system_icons::SystemIcon,
     /// 与 `panes` 一一对应的订阅（终端标题 / 焦点变化时要重绘标签栏）。
     subs: Vec<Subscription>,
     /// 格子布局。
@@ -421,12 +424,20 @@ impl TabPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let sub = Self::observe_pane(&view, window, cx);
+        let local_system_icon = match &target {
+            TerminalTarget::Local(shell) => {
+                crate::system_icons::SystemIcon::shell(&shell.program())
+            }
+            TerminalTarget::Ssh(_) => Default::default(),
+        };
         Self {
             root,
             name,
             target,
             group: None,
             panes: vec![view],
+            system_icons: HashMap::new(),
+            local_system_icon,
             subs: vec![sub],
             layout: Layout::single(),
             next_node: 0,
@@ -475,6 +486,37 @@ impl TabPane {
         self.name
             .clone()
             .unwrap_or_else(|| self.focused_view().read(cx).title())
+    }
+
+    pub(crate) fn system_icon(&self, cx: &App) -> crate::system_icons::SystemIcon {
+        match &self.target {
+            TerminalTarget::Local(_) => self.local_system_icon,
+            TerminalTarget::Ssh(_) => self
+                .remote_session(cx)
+                .and_then(|session| {
+                    self.system_icons
+                        .get(&self.focused_id())
+                        .filter(|(stored, _)| *stored == session)
+                })
+                .map(|(_, icon)| *icon)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn set_system_icon(
+        &mut self,
+        target: (EntityId, SessionId),
+        icon: crate::system_icons::SystemIcon,
+        cx: &mut Context<Self>,
+    ) {
+        self.system_icons
+            .retain(|id, _| self.panes.iter().any(|pane| pane.entity_id() == *id));
+        if self.panes.iter().any(|pane| pane.entity_id() == target.0)
+            && self.system_icons.get(&target.0) != Some(&(target.1, icon))
+        {
+            self.system_icons.insert(target.0, (target.1, icon));
+            cx.notify();
+        }
     }
 
     pub(crate) fn is_remote(&self) -> bool {
@@ -799,7 +841,7 @@ impl TabPane {
         let root = self.root.clone();
         let group = self.group.clone();
         Button::new("new-terminal")
-            .icon(IconName::Plus)
+            .icon(crate::assets::ui_icon(IconName::Plus))
             .tooltip("新建终端")
             .xsmall()
             .ghost()
@@ -810,7 +852,7 @@ impl TabPane {
                 let menu = menu
                     .item(
                         PopupMenuItem::new("本地终端")
-                            .icon(IconName::SquareTerminal)
+                            .icon(crate::assets::ui_icon(IconName::SquareTerminal))
                             .on_click(move |_, _, cx| {
                                 let group = local_group.clone();
                                 AppRoot::defer_after_update(
@@ -859,7 +901,7 @@ fn saved_session_menu(
                 let root = root.clone();
                 let group = group.clone();
                 menu.submenu_with_icon(
-                    Some(Icon::new(IconName::Folder)),
+                    Some(crate::assets::ui_icon(IconName::Folder)),
                     name.clone(),
                     window,
                     cx,
@@ -870,7 +912,7 @@ fn saved_session_menu(
             }
             SessionMenuEntry::Folder { name, .. } => menu.item(
                 PopupMenuItem::new(name.clone())
-                    .icon(IconName::Folder)
+                    .icon(crate::assets::ui_icon(IconName::Folder))
                     .disabled(true),
             ),
             SessionMenuEntry::Session { id, name } => {
@@ -879,7 +921,7 @@ fn saved_session_menu(
                 let group = group.clone();
                 menu.item(
                     PopupMenuItem::new(name.clone())
-                        .icon(IconName::SquareTerminal)
+                        .icon(crate::assets::ui_icon(IconName::SquareTerminal))
                         .on_click(move |_, _, cx| {
                             let group = group.clone();
                             AppRoot::defer_after_update(

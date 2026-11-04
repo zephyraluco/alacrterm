@@ -1213,7 +1213,7 @@ impl PreviewWindow {
                     Button::new("preview-save")
                         .ghost()
                         .xsmall()
-                        .icon(IconName::Save)
+                        .icon(crate::assets::ui_icon(IconName::Save))
                         .tooltip("保存到远端 (Ctrl+S)")
                         .disabled(text.is_saving() || !text.is_dirty())
                         .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
@@ -1222,7 +1222,7 @@ impl PreviewWindow {
                     Button::new("preview-close")
                         .ghost()
                         .xsmall()
-                        .icon(IconName::WindowClose)
+                        .icon(crate::assets::ui_icon(IconName::WindowClose))
                         .tooltip("关闭标签 (Ctrl+W)")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.request_close_self(window, cx)),
@@ -1277,7 +1277,7 @@ impl PreviewWindow {
                     Button::new("preview-goto-line")
                         .ghost()
                         .xsmall()
-                        .icon(IconName::Hash)
+                        .icon(crate::assets::ui_icon(IconName::Hash))
                         .tooltip("跳转到行")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.open_goto_line(window, cx)),
@@ -1288,7 +1288,7 @@ impl PreviewWindow {
                     Button::new("preview-soft-wrap")
                         .ghost()
                         .xsmall()
-                        .icon(IconName::TextWrap)
+                        .icon(crate::assets::ui_icon(IconName::TextWrap))
                         .tooltip("自动换行")
                         .selected(text.soft_wrap)
                         .on_click(
@@ -1335,7 +1335,7 @@ impl PreviewWindow {
                     Button::new(("preview-tab-close", ix))
                         .ghost()
                         .xsmall()
-                        .icon(IconName::WindowClose)
+                        .icon(crate::assets::ui_icon(IconName::WindowClose))
                         .tooltip("关闭标签 (Ctrl+W)")
                         .occlude()
                         .on_click(close),
@@ -1365,7 +1365,12 @@ impl PreviewWindow {
             return div().size_full().into_any_element();
         };
         match &tab.body {
-            Body::Loading => centered(Icon::new(tab.kind.icon()).size_8(), "正在读取…", None, cx),
+            Body::Loading => centered(
+                crate::assets::ui_icon(tab.kind.icon()),
+                "正在读取…",
+                None,
+                cx,
+            ),
             Body::Image => div()
                 .size_full()
                 .flex()
@@ -1387,13 +1392,13 @@ impl PreviewWindow {
             // 这里**不给** `.readonly(..)`:文本是能改的,改完 Ctrl+S 写回远端(见 `Self::save`)。
             Body::Text(text) => Editor::new(&text.editor).size_full().into_any_element(),
             Body::External(note) => centered(
-                Icon::new(tab.kind.icon()).size_8(),
+                crate::assets::ui_icon(tab.kind.icon()),
                 tab.request.name.as_ref(),
                 Some(note),
                 cx,
             ),
             Body::Failed(message) => centered(
-                Icon::new(IconName::TriangleAlert).size_8(),
+                crate::assets::ui_icon(IconName::TriangleAlert),
                 "打不开这个文件",
                 Some(message.as_str()),
                 cx,
@@ -1422,8 +1427,7 @@ impl PreviewWindow {
             .gap_2()
             .items_center()
             .child(
-                Icon::new(IconName::Globe)
-                    .size_3p5()
+                crate::assets::ui_icon(IconName::Globe)
                     .flex_none()
                     .text_color(cx.theme().muted_foreground),
             )
@@ -1709,7 +1713,7 @@ fn action_button(
     Button::new(id)
         .ghost()
         .xsmall()
-        .icon(icon)
+        .icon(crate::assets::ui_icon(icon))
         .tooltip(tooltip)
         .on_click(move |_, window, cx| window.dispatch_action(Box::new(action.clone()), cx))
 }

@@ -360,10 +360,10 @@ fn session_row_element(
     let click_path = row.path.clone();
     let menu_path = row.path.clone();
     let is_folder = row.is_folder;
-    let icon = match (row.is_folder, row.expanded) {
-        (true, true) => IconName::FolderOpen,
-        (true, false) => IconName::Folder,
-        (false, _) => IconName::Globe,
+    let icon = if row.is_folder {
+        crate::file_icons::file_icon(&row.label, true, row.expanded, cx).into_any_element()
+    } else {
+        crate::assets::ui_icon(IconName::Globe).into_any_element()
     };
     let caret = (row.is_folder && row.has_children).then_some({
         if row.expanded {

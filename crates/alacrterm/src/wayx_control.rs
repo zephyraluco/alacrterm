@@ -5,7 +5,7 @@ use gpui::{
     Styled as _, Window, div, px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, WindowExt as _,
+    ActiveTheme as _, Disableable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogClose, DialogFooter},
 };
@@ -22,12 +22,21 @@ impl AppRoot {
             )
         };
         let (icon, label) = match self.wayx_status {
-            WayxStatus::Stopped => (Icon::new(IconName::X11).text_color(stopped), "启动 WayX"),
-            WayxStatus::Starting => (Icon::new(IconName::LoaderCircle), "WayX 正在启动"),
-            WayxStatus::Running => (Icon::new(IconName::X11).text_color(running), "停止 WayX"),
-            WayxStatus::Stopping => (Icon::new(IconName::Loader), "WayX 正在停止"),
+            WayxStatus::Stopped => (
+                crate::assets::ui_icon(IconName::X11).text_color(stopped),
+                "启动 WayX",
+            ),
+            WayxStatus::Starting => (
+                crate::assets::ui_icon(IconName::LoaderCircle),
+                "WayX 正在启动",
+            ),
+            WayxStatus::Running => (
+                crate::assets::ui_icon(IconName::X11).text_color(running),
+                "停止 WayX",
+            ),
+            WayxStatus::Stopping => (crate::assets::ui_icon(IconName::Loader), "WayX 正在停止"),
             WayxStatus::Failed => (
-                Icon::new(IconName::TriangleAlert).text_color(danger),
+                crate::assets::ui_icon(IconName::TriangleAlert).text_color(danger),
                 "重试启动 WayX",
             ),
         };
@@ -40,7 +49,7 @@ impl AppRoot {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 Button::new("wayx-control")
-                    .icon(icon)
+                    .icon(crate::assets::ui_icon(icon))
                     .ghost()
                     .accessibility_label(label)
                     .disabled(matches!(

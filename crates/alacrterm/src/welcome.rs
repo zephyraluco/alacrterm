@@ -13,9 +13,9 @@ use crate::assets::IconName;
 
 const WELCOME_CONTENT_WIDTH: Pixels = px(420.);
 const LOGO_BOX_SIZE: Pixels = px(52.);
-const LOGO_ICON_SIZE: Pixels = px(28.);
+const LOGO_ICON_SIZE: Pixels = px(16.);
 const ACTION_ROW_HEIGHT: Pixels = px(26.);
-const ACTION_ICON_SIZE: Pixels = px(14.);
+const ACTION_ICON_SIZE: Pixels = px(16.);
 /// 「新建终端」的快捷键提示（与 `assets/keymaps/default-*.json` 里的绑定一致）。
 const NEW_TERMINAL_SHORTCUT: &str = if cfg!(target_os = "macos") {
     "⌘ ⇧ N"

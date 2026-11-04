@@ -61,7 +61,7 @@ fn view_menu(
     Button::new("sidebar-menu")
         .ghost()
         .xsmall()
-        .icon(IconName::Ellipsis)
+        .icon(crate::assets::ui_icon(IconName::Ellipsis))
         .tooltip("视图")
         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _window, _cx| {
             SidebarView::ALL

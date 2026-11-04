@@ -11,9 +11,10 @@ use gpui::{
     App, Context, EntityId, InteractiveElement as _, IntoElement, ParentElement, Render,
     Styled as _, Task, Window, div, px,
 };
-use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, tooltip::Tooltip};
+use gpui_kit::component::{ActiveTheme as _, h_flex, tooltip::Tooltip};
 
 use crate::assets::IconName;
+use crate::system_icons::SystemIcon;
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(12);
 const LOADING_MESSAGE: &str = "Loading remote monitoring, please wait...";
@@ -43,6 +44,7 @@ struct Partition {
 #[derive(Clone, Default, Debug)]
 struct Snapshot {
     host: String,
+    system_icon: SystemIcon,
     user: String,
     cores: usize,
     threads: usize,
@@ -112,6 +114,7 @@ struct RemoteSampler {
 impl RemoteSampler {
     fn parse(&mut self, frame: &str) -> anyhow::Result<Snapshot> {
         let mut snapshot = Snapshot::default();
+        let (mut os_id, mut os_like, mut os_kernel) = ("", "", "");
         let (mut total, mut idle) = (None, None);
         let (mut free, mut available, mut cached, mut buffers, mut reclaimable, mut shared) =
             (0, None, 0, 0, 0, 0);
@@ -123,6 +126,9 @@ impl RemoteSampler {
                 continue;
             };
             match key {
+                "os_id" => os_id = value.trim(),
+                "os_like" => os_like = value.trim(),
+                "os_kernel" => os_kernel = value.trim(),
                 "host" => snapshot.host = value.trim().into(),
                 "user" => snapshot.user = value.trim().into(),
                 "cpu" => {
@@ -273,6 +279,7 @@ impl RemoteSampler {
         } else {
             self.rates = Rates::default();
         }
+        snapshot.system_icon = SystemIcon::remote(os_id, os_like, os_kernel);
         Ok(snapshot)
     }
 }
@@ -283,6 +290,12 @@ pub(crate) struct MonitorTarget {
     pub(crate) endpoint: String,
     pub(crate) directory: Option<String>,
 }
+
+pub(crate) struct SystemIdentified {
+    pub(crate) target: (EntityId, ssh::SessionId),
+    pub(crate) icon: SystemIcon,
+}
+impl gpui::EventEmitter<SystemIdentified> for SystemMonitor {}
 
 pub(crate) struct SystemMonitor {
     target: Option<(EntityId, ssh::SessionId)>,
@@ -388,6 +401,15 @@ impl SystemMonitor {
                             if this
                                 .update(cx, |this, cx| match result {
                                     Ok(snapshot) => {
+                                        if this.snapshot.as_ref().map(|old| old.system_icon)
+                                            != Some(snapshot.system_icon)
+                                            && let Some(target) = this.target
+                                        {
+                                            cx.emit(SystemIdentified {
+                                                target,
+                                                icon: snapshot.system_icon,
+                                            });
+                                        }
                                         if let Some(cpu) = snapshot.cpu {
                                             if this.history.len() == 24 {
                                                 this.history.pop_front();
@@ -583,7 +605,7 @@ fn partition_row(fields: [String; 7]) -> gpui::AnyElement {
 fn item(
     id: &'static str,
     width: f32,
-    icon: IconName,
+    icon: impl IntoElement,
     text: String,
     tooltip: impl Into<StatusTooltip>,
     cx: &App,
@@ -605,7 +627,7 @@ fn item(
         .border_r_1()
         .border_color(cx.theme().border)
         .text_color(cx.theme().muted_foreground)
-        .child(Icon::new(icon).flex_none().mr(px(6.)));
+        .child(div().flex_none().mr(px(6.)).child(icon));
     if id == "monitor-host" {
         row = row.w_auto().child(label.flex_none());
     } else if id == "monitor-cpu" {
@@ -738,7 +760,7 @@ impl Render for SystemMonitor {
                 .child(item(
                     "monitor-host",
                     140.,
-                    IconName::SquareTerminal,
+                    data.system_icon.element(),
                     data.host.clone(),
                     format!("当前 SSH 远端：{}\n连接：{}\n", data.host, self.endpoint),
                     cx,
@@ -765,7 +787,7 @@ impl Render for SystemMonitor {
                 .child(item(
                     "monitor-upload",
                     120.,
-                    IconName::Upload,
+                    IconName::CloudUpload,
                     rate(data.upload),
                     data.network_tooltip(true),
                     cx,
@@ -773,7 +795,7 @@ impl Render for SystemMonitor {
                 .child(item(
                     "monitor-download",
                     120.,
-                    IconName::Download,
+                    IconName::CloudDownload,
                     rate(data.download),
                     data.network_tooltip(false),
                     cx,
@@ -832,7 +854,7 @@ impl Render for SystemMonitor {
             ));
         } else if self.remote {
             if self.error.is_some() {
-                bar = bar.child(Icon::new(IconName::SquareTerminal).w(px(14.)).h(px(14.)));
+                bar = bar.child(SystemIcon::default().element());
             }
             bar = bar.child(
                 div()
@@ -848,7 +870,7 @@ impl Render for SystemMonitor {
                         .px(px(2.))
                         .flex_none()
                         .items_center()
-                        .child(Icon::new(IconName::Replace).w(px(14.)).h(px(14.)))
+                        .child(crate::assets::ui_icon(IconName::Refresh))
                         .tooltip(|window, cx| Tooltip::new("重新连接系统监控").build(window, cx))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(client) = this.client.clone() {
@@ -897,6 +919,18 @@ mod tests {
         assert!(data.is_initialized());
         data.disk = None;
         assert!(!data.is_initialized());
+    }
+
+    #[test]
+    fn remote_frames_share_the_distribution_icon_and_default_to_bash() {
+        let mut sampler = RemoteSampler::default();
+        let frame = "host server\ncpu 10 0 10 80\nmem MemTotal: 1000 kB\nuptime 1 0\n";
+        assert_eq!(sampler.parse(frame).unwrap().system_icon, SystemIcon::Bash);
+        let frame = format!("{frame}os_id linuxmint\nos_like ubuntu debian\nos_kernel Linux\n");
+        assert_eq!(
+            sampler.parse(&frame).unwrap().system_icon,
+            SystemIcon::Ubuntu
+        );
     }
 
     #[test]
@@ -1039,6 +1073,16 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         let calls = fixture.path().join("calls");
         let sleeps = fixture.path().join("sleeps");
+        let release = fixture.path().join("os-release");
+        let injected = fixture.path().join("must-not-exist");
+        std::fs::write(
+            &release,
+            format!(
+                "ID='ubuntu'\nID_LIKE=\"debian\"\nPRETTY_NAME=\"$(touch {})\"\n",
+                injected.display()
+            ),
+        )
+        .unwrap();
         for (name, body) in [
             (
                 "hostname",
@@ -1065,7 +1109,10 @@ mod tests {
         }
         let mut child = Command::new("sh")
             .arg("-c")
-            .arg(monitor_command(directory.to_str()))
+            .arg(monitor_command(directory.to_str()).replace(
+                "monitor_release=/etc/os-release",
+                &format!("monitor_release='{}'", release.display()),
+            ))
             .env(
                 "PATH",
                 format!(
@@ -1106,6 +1153,8 @@ mod tests {
         let mut sampler = RemoteSampler::default();
         let first = sampler.parse(frames[0]).unwrap();
         assert!(first.disk.is_none());
+        assert_eq!(first.system_icon, SystemIcon::Ubuntu);
+        assert!(!injected.exists());
         for frame in frames.iter().skip(1) {
             let sample = sampler.parse(frame).unwrap();
             assert_eq!(sample.sessions, Some(1));
