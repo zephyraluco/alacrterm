@@ -606,7 +606,7 @@ impl Render for AppRoot {
                                 .child(
                                     Button::new("settings-control")
                                         .ghost()
-                                        .icon(assets::IconName::Settings)
+                                        .icon(crate::assets::ui_icon(assets::IconName::Settings))
                                         .tooltip("设置")
                                         .accessibility_label("设置")
                                         .on_click(|_, window, cx| {

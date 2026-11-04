@@ -11,7 +11,7 @@ use gpui::{
     App, Context, EntityId, InteractiveElement as _, IntoElement, ParentElement, Render,
     Styled as _, Task, Window, div, px,
 };
-use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, tooltip::Tooltip};
+use gpui_kit::component::{ActiveTheme as _, h_flex, tooltip::Tooltip};
 
 use crate::assets::IconName;
 use crate::system_icons::SystemIcon;
@@ -760,7 +760,7 @@ impl Render for SystemMonitor {
                 .child(item(
                     "monitor-host",
                     140.,
-                    data.system_icon.element(px(14.)),
+                    data.system_icon.element(),
                     data.host.clone(),
                     format!("当前 SSH 远端：{}\n连接：{}\n", data.host, self.endpoint),
                     cx,
@@ -854,7 +854,7 @@ impl Render for SystemMonitor {
             ));
         } else if self.remote {
             if self.error.is_some() {
-                bar = bar.child(SystemIcon::default().element(px(14.)));
+                bar = bar.child(SystemIcon::default().element());
             }
             bar = bar.child(
                 div()
@@ -870,7 +870,7 @@ impl Render for SystemMonitor {
                         .px(px(2.))
                         .flex_none()
                         .items_center()
-                        .child(Icon::new(IconName::Replace).w(px(14.)).h(px(14.)))
+                        .child(crate::assets::ui_icon(IconName::Replace))
                         .tooltip(|window, cx| Tooltip::new("重新连接系统监控").build(window, cx))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(client) = this.client.clone() {

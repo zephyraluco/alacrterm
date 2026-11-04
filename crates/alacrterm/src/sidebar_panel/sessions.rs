@@ -8,7 +8,7 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
     Window, div, px,
 };
-use gpui_kit::component::{ActiveTheme as _, Icon, menu::ContextMenuExt as _};
+use gpui_kit::component::{ActiveTheme as _, menu::ContextMenuExt as _};
 
 use super::empty_state;
 use super::shared::{DragPreview, RowCache, row_content, row_shell};
@@ -363,7 +363,7 @@ fn session_row_element(
     let icon = if row.is_folder {
         crate::file_icons::file_icon(&row.label, true, row.expanded, cx).into_any_element()
     } else {
-        Icon::new(IconName::Globe).size_3().into_any_element()
+        crate::assets::ui_icon(IconName::Globe).into_any_element()
     };
     let caret = (row.is_folder && row.has_children).then_some({
         if row.expanded {

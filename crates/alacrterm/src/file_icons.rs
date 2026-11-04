@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, sync::LazyLock};
 
-use gpui::{App, Img, SharedString, Styled as _, img, px};
+use gpui::{App, Img};
 use gpui_kit::component::ActiveTheme as _;
 use serde::Deserialize;
 
@@ -108,15 +108,12 @@ fn icon_path(name: &str, directory: bool, expanded: bool, light: bool) -> &'stat
 
 pub(crate) fn file_icon(name: &str, directory: bool, expanded: bool, cx: &App) -> Img {
     // img preserves SVG colors; the UI Icon component renders a monochrome mask.
-    img(SharedString::from(icon_path(
+    crate::assets::colored_icon(icon_path(
         name,
         directory,
         expanded,
         !cx.theme().mode.is_dark(),
-    )))
-    .w(px(16.))
-    .h(px(16.))
-    .flex_shrink_0()
+    ))
 }
 
 #[cfg(test)]

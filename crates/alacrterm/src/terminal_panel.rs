@@ -20,7 +20,7 @@ use gpui::{
     relative,
 };
 use gpui_kit::component::{
-    Icon, Sizable as _,
+    Sizable as _,
     button::{Button, ButtonVariants as _},
     dock::{
         BasePanel, DockPlacement, InsertTarget, Panel, PanelControl, PanelEvent, PanelId, TabGroup,
@@ -841,7 +841,7 @@ impl TabPane {
         let root = self.root.clone();
         let group = self.group.clone();
         Button::new("new-terminal")
-            .icon(IconName::Plus)
+            .icon(crate::assets::ui_icon(IconName::Plus))
             .tooltip("新建终端")
             .xsmall()
             .ghost()
@@ -852,7 +852,7 @@ impl TabPane {
                 let menu = menu
                     .item(
                         PopupMenuItem::new("本地终端")
-                            .icon(IconName::SquareTerminal)
+                            .icon(crate::assets::ui_icon(IconName::SquareTerminal))
                             .on_click(move |_, _, cx| {
                                 let group = local_group.clone();
                                 AppRoot::defer_after_update(
@@ -901,7 +901,7 @@ fn saved_session_menu(
                 let root = root.clone();
                 let group = group.clone();
                 menu.submenu_with_icon(
-                    Some(Icon::new(IconName::Folder)),
+                    Some(crate::assets::ui_icon(IconName::Folder)),
                     name.clone(),
                     window,
                     cx,
@@ -912,7 +912,7 @@ fn saved_session_menu(
             }
             SessionMenuEntry::Folder { name, .. } => menu.item(
                 PopupMenuItem::new(name.clone())
-                    .icon(IconName::Folder)
+                    .icon(crate::assets::ui_icon(IconName::Folder))
                     .disabled(true),
             ),
             SessionMenuEntry::Session { id, name } => {
@@ -921,7 +921,7 @@ fn saved_session_menu(
                 let group = group.clone();
                 menu.item(
                     PopupMenuItem::new(name.clone())
-                        .icon(IconName::SquareTerminal)
+                        .icon(crate::assets::ui_icon(IconName::SquareTerminal))
                         .on_click(move |_, _, cx| {
                             let group = group.clone();
                             AppRoot::defer_after_update(

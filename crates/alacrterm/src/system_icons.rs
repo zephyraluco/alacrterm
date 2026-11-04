@@ -1,5 +1,5 @@
 //! Shared colored icons for terminal tabs and the remote host status item.
-use gpui::{Img, Pixels, SharedString, Styled as _, img};
+use gpui::Img;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SystemIcon {
@@ -62,11 +62,8 @@ impl SystemIcon {
         }
     }
 
-    pub(crate) fn element(self, size: Pixels) -> Img {
-        img(SharedString::from(self.path()))
-            .w(size)
-            .h(size)
-            .flex_shrink_0()
+    pub(crate) fn element(self) -> Img {
+        crate::assets::colored_icon(self.path())
     }
 }
 

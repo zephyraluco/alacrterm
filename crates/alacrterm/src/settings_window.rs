@@ -7,7 +7,7 @@ use gpui::{
     WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Root, Sizable as _, ThemeMode, TitleBar,
+    ActiveTheme as _, Disableable as _, Root, Sizable as _, ThemeMode, TitleBar,
     button::Button,
     h_flex,
     setting::{
@@ -56,7 +56,7 @@ impl SettingsWindow {
     /// 「主题」页。
     fn theme_page(&self, cx: &App) -> SettingPage {
         SettingPage::new("主题")
-            .icon(Icon::new(IconName::Moon))
+            .icon(crate::assets::ui_icon(IconName::Moon))
             .group(
             SettingGroup::new()
                 .item(
@@ -79,7 +79,7 @@ impl SettingsWindow {
     /// 「终端」页。
     fn terminal_page(&self, cx: &App) -> SettingPage {
         SettingPage::new("终端")
-            .icon(Icon::new(IconName::SquareTerminal))
+            .icon(crate::assets::ui_icon(IconName::SquareTerminal))
             .default_open(true)
             .group(
                 SettingGroup::new()

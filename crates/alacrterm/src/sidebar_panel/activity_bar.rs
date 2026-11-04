@@ -43,7 +43,7 @@ pub(super) fn status_bar(
                 .small()
                 .h(STATUS_BAR_ITEM_HEIGHT)
                 .w(STATUS_BAR_ITEM_HEIGHT)
-                .icon(view.icon())
+                .icon(crate::assets::ui_icon(view.icon()))
                 .tooltip(view.tooltip())
                 .tooltip_placement(Placement::Top)
                 .accessibility_label(view.tooltip())
@@ -331,7 +331,7 @@ fn tool_button(
     Button::new(id)
         .ghost()
         .xsmall()
-        .icon(icon)
+        .icon(crate::assets::ui_icon(icon))
         .tooltip(tooltip)
         .tooltip_placement(Placement::Top)
         .disabled(!enabled)
@@ -381,14 +381,14 @@ fn files_panel(panel: SidebarPanel<SidebarContent>, files: Entity<FilesState>) -
             let refresh = refresh_target.clone();
             menu.item(
                 PopupMenuItem::new("上传文件…")
-                    .icon(IconName::Upload)
+                    .icon(crate::assets::ui_icon(IconName::Upload))
                     .on_click(move |_, _, cx| {
                         upload_via_dialog(&upload, false, cx);
                     }),
             )
             .item(
                 PopupMenuItem::new("上传文件夹…")
-                    .icon(IconName::Upload)
+                    .icon(crate::assets::ui_icon(IconName::Upload))
                     .on_click(move |_, _, cx| {
                         upload_via_dialog(&folder, true, cx);
                     }),
@@ -396,7 +396,7 @@ fn files_panel(panel: SidebarPanel<SidebarContent>, files: Entity<FilesState>) -
             .separator()
             .item(
                 PopupMenuItem::new("刷新")
-                    .icon(IconName::Replace)
+                    .icon(crate::assets::ui_icon(IconName::Replace))
                     .on_click(move |_, _, cx| {
                         refresh.update(cx, |files, cx| files.refresh(cx));
                     }),

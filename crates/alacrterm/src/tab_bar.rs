@@ -12,12 +12,12 @@ use gpui::{
     AnyElement, AnyView, App, AppContext as _, Axis, Context, CursorStyle, FocusHandle,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Render,
     ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement,
-    Styled as _, WeakEntity, Window, WindowControlArea, div, prelude::FluentBuilder as _, px, svg,
+    Styled as _, WeakEntity, Window, WindowControlArea, div, prelude::FluentBuilder as _, px,
 };
 use gpui_kit::{
     base::ResizeHandleContext,
     component::{
-        ActiveTheme as _, IconNamed as _, Sizable as _, TITLE_BAR_HEIGHT,
+        ActiveTheme as _, Sizable as _, TITLE_BAR_HEIGHT,
         button::{Button, ButtonVariants as _},
         dock::{
             BasePanelView, DockArea, DockAreaRenderer, DockContext, DockSkin, DragPanel,
@@ -35,10 +35,8 @@ const TAB_BAR_HEIGHT: Pixels = TITLE_BAR_HEIGHT;
 const TAB_WIDTH: Pixels = px(200.);
 const TAB_PADDING_X: Pixels = px(8.);
 const TAB_GAP: Pixels = px(6.);
-const TAB_ICON_SIZE: Pixels = px(12.);
 /// 关闭按钮槽位（隐藏时占位）。
 const TAB_CLOSE_SLOT: Pixels = px(16.);
-const TAB_CLOSE_ICON: Pixels = px(10.);
 const DRAG_PREVIEW_SIZE: gpui::Size<gpui::Pixels> = gpui::size(px(96.), px(30.));
 
 /// dock 区渲染器：只替换标签栏。
@@ -365,11 +363,11 @@ impl TerminalTabBar {
                                 .xsmall()
                                 .ghost()
                                 .tab_stop(false)
-                                .icon(if group.is_zoomed() {
+                                .icon(crate::assets::ui_icon(if group.is_zoomed() {
                                     IconName::Minimize
                                 } else {
                                     IconName::Maximize
-                                })
+                                }))
                                 .tooltip(if group.is_zoomed() {
                                     "还原终端布局"
                                 } else {
@@ -446,13 +444,7 @@ impl TerminalTabBar {
                         let _ =
                             root.update(cx, |root, cx| root.close_panel_id(panel_id, window, cx));
                     })
-                    .child(
-                        svg()
-                            .path(IconName::Close.path())
-                            .w(TAB_CLOSE_ICON)
-                            .h(TAB_CLOSE_ICON)
-                            .text_color(muted_fg),
-                    )
+                    .child(crate::assets::ui_icon(IconName::Close).text_color(muted_fg))
                     .into_any_element()
             }
         };
@@ -525,7 +517,7 @@ impl TerminalTabBar {
                     .on_drop(on_drop_panel)
                 }
             })
-            .child(system_icon.element(TAB_ICON_SIZE))
+            .child(system_icon.element())
             .child(
                 div()
                     .flex_1()
@@ -554,7 +546,7 @@ impl Render for TabDragPreview {
             .rounded(px(6.))
             .bg(cx.theme().tab_active)
             .text_color(cx.theme().tab_active_foreground)
-            .child(self.icon.element(TAB_ICON_SIZE))
+            .child(self.icon.element())
             .child(self.title.clone())
     }
 }

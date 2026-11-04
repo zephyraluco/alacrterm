@@ -6,7 +6,6 @@ use gpui::{
     Render, Styled as _, Subscription, Window, px,
 };
 use gpui_kit::component::{
-    Icon,
     empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
     resizable::ResizableState,
 };
@@ -46,7 +45,7 @@ pub(super) fn empty_state(
         .media(
             EmptyMedia::new()
                 .with_variant(EmptyMediaVariant::Icon)
-                .child(Icon::new(icon)),
+                .child(crate::assets::ui_icon(icon)),
         )
         .title(EmptyTitle::new().child(title));
     let header = match description {

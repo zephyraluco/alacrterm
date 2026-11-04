@@ -6,7 +6,7 @@ use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement as _, Pixels, Render, SharedString,
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_kit::component::{ActiveTheme as _, Icon, StyledExt as _, h_flex, list::ListItem};
+use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, list::ListItem};
 
 use crate::assets::IconName;
 
@@ -54,7 +54,7 @@ pub(super) fn row_content(
 ) -> AnyElement {
     let content = h_flex().gap_x_2().items_center();
     let content = match leading {
-        Some(leading) => content.child(Icon::new(leading).size_3()),
+        Some(leading) => content.child(crate::assets::ui_icon(leading)),
         None => content,
     };
     content
