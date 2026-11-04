@@ -86,7 +86,7 @@ Configuration covers app preferences, terminal settings, saved sessions, custom 
 
 Theme resources live in `themes/global` and `themes/terminal`. Runtime logs are retained for seven days by default. See the [architecture document](docs/architecture.md#配置资源与日志) for log locations and `RUST_LOG` behavior.
 
-File and folder icons use [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) (MIT); bundled assets and update instructions are in [docs/material-icons.md](docs/material-icons.md).
+File and folder icons use [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) (MIT).
 
 ## Development
 

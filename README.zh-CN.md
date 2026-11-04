@@ -86,7 +86,7 @@ sudo apt install ./alacrterm-<版本>-linux-x64.deb
 
 主题资源位于 `themes/global` 和 `themes/terminal`。运行时日志默认保留七天，路径和 `RUST_LOG` 用法见[架构文档](docs/architecture.md#配置资源与日志)。
 
-文件与文件夹图标采用 [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)（MIT）；内置资源与更新方式见 [docs/material-icons.md](docs/material-icons.md)。
+文件与文件夹图标采用 [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)（MIT）。
 
 ## 开发
 

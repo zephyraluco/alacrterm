@@ -58,17 +58,11 @@ pub struct KeymapAssets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if path == "licenses/material-icons.md" {
-            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
-                "../../../docs/material-icons.md"
-            ))));
-        }
         Ok(Self::get(path).map(|f| f.data))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(Self::iter()
-            .chain(std::iter::once("licenses/material-icons.md".into()))
             .filter_map(|p| {
                 if p.starts_with(path) {
                     Some(p.into())
@@ -77,5 +71,29 @@ impl AssetSource for Assets {
                 }
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svg_assets_use_material_style_roots_and_remain_valid() {
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        for path in Assets::iter().filter(|path| path.ends_with(".svg")) {
+            let asset = Assets::get(&path).unwrap();
+            let source = std::str::from_utf8(&asset.data).unwrap();
+            assert!(source.starts_with("<svg "), "{path}");
+            let root = source.split_once('>').unwrap().0;
+            assert!(root.contains("viewBox="), "{path}");
+            assert!(
+                !root.contains(" width=") && !root.contains(" height="),
+                "{path}"
+            );
+            renderer
+                .parse_svg(&asset.data)
+                .unwrap_or_else(|error| panic!("{path}: {error}"));
+        }
     }
 }

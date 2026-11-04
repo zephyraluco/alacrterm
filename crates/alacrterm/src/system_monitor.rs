@@ -787,7 +787,7 @@ impl Render for SystemMonitor {
                 .child(item(
                     "monitor-upload",
                     120.,
-                    IconName::Upload,
+                    IconName::CloudUpload,
                     rate(data.upload),
                     data.network_tooltip(true),
                     cx,
@@ -795,7 +795,7 @@ impl Render for SystemMonitor {
                 .child(item(
                     "monitor-download",
                     120.,
-                    IconName::Download,
+                    IconName::CloudDownload,
                     rate(data.download),
                     data.network_tooltip(false),
                     cx,
@@ -870,7 +870,7 @@ impl Render for SystemMonitor {
                         .px(px(2.))
                         .flex_none()
                         .items_center()
-                        .child(crate::assets::ui_icon(IconName::Replace))
+                        .child(crate::assets::ui_icon(IconName::Refresh))
                         .tooltip(|window, cx| Tooltip::new("重新连接系统监控").build(window, cx))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(client) = this.client.clone() {
