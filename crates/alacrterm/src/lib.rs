@@ -20,11 +20,11 @@ mod dialog;
 mod file_icons;
 mod file_open;
 use util::format;
+mod editor_window;
 pub mod exit_coordinator;
 pub mod keymap;
 mod pane_layout;
 pub mod preview_cache;
-mod preview_window;
 mod resource_registry;
 mod settings_window;
 pub mod shell_integration;
@@ -105,8 +105,8 @@ pub struct AppRoot {
     pending_session_group: Option<WeakEntity<TabGroup>>,
     /// 设置窗口句柄。
     settings_window: Option<WindowHandle<Root>>,
-    /// 文件预览窗口句柄(一个窗口装多个标签,见 [`crate::preview_window`])。
-    preview_window: Option<WindowHandle<Root>>,
+    /// 文件预览窗口句柄(一个窗口装多个标签,见 [`crate::editor_window`])。
+    editor_window: Option<WindowHandle<Root>>,
     /// 「背景」焦点。
     background_focus: FocusHandle,
     /// 上一次已经应用过的活动上下文（见 [`AppRoot::sync_active_context`]）。
@@ -257,7 +257,7 @@ impl AppRoot {
             dock_layout_sub: None,
             pending_session_group: None,
             settings_window: None,
-            preview_window: None,
+            editor_window: None,
             background_focus: cx.focus_handle(),
             last_context: None,
             context_sync_scheduled: false,
@@ -344,7 +344,7 @@ impl AppRoot {
     /// 让「文件管理器」把某个远端目录重读一次。
     ///
     /// 给预览窗口用:它把改过的文本写回远端之后,树里那份目录项(大小)就旧了(见
-    /// [`crate::preview_window::PreviewWindow::refresh_parent_dir`])。
+    /// [`crate::editor_window::EditorWindow::refresh_parent_dir`])。
     /// `session` = 写回那条连接；文件树已经切到别的连接时这次刷新会被忽略。
     pub(crate) fn reload_files_dir(
         &mut self,

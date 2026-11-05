@@ -8,7 +8,33 @@ use std::{
 use gpui::{App, Context};
 use gpui_kit::component::notification::Notification;
 
-use crate::{AppRoot, preview_window::PreviewRequest};
+use crate::AppRoot;
+use gpui::{SharedString, WeakEntity};
+use std::path::PathBuf;
+use terminal::SshFs;
+
+/// Downloaded file identity and cache lease shared by opening routes.
+#[derive(Clone)]
+pub(crate) struct FileOpenRequest {
+    /// 显示名(远端文件名)。
+    pub(crate) name: SharedString,
+    /// 远端主机名 —— 状态栏左侧那条「主机:路径」用(见 [`EditorWindow::render_status_bar`])。
+    pub(crate) host: String,
+    /// 远端路径(文本保存时写回的就是它)。
+    pub(crate) remote_path: String,
+    /// 这条预览所属的连接实例 —— 不同连接的同名路径是两个标签。
+    pub(crate) session: terminal::SessionId,
+    /// 已经下到本地的缓存文件。
+    pub(crate) local_path: PathBuf,
+    /// 缓存文件的租约：标签活着就一直持有，关闭时自动删（见 [`crate::preview_cache`]）。
+    pub(crate) _lease: crate::preview_cache::CacheLease,
+    /// 字节数(远端报的;0 = 不知道)。
+    pub(crate) size: u64,
+    /// 远端文件系统句柄 —— 文本保存写回远端用(别的类型用不上)。
+    pub(crate) fs: SshFs,
+    /// 保存成功后让文件管理器把所在目录重读一次(见 [`crate::editor_window`])。
+    pub(crate) app_root: WeakEntity<AppRoot>,
+}
 
 const SAMPLE_BYTES: usize = 8192;
 
@@ -69,7 +95,11 @@ fn should_edit(path: &Path, name: &str) -> io::Result<bool> {
 }
 
 impl AppRoot {
-    pub(crate) fn open_downloaded_file(&mut self, request: PreviewRequest, cx: &mut Context<Self>) {
+    pub(crate) fn open_downloaded_file(
+        &mut self,
+        request: FileOpenRequest,
+        cx: &mut Context<Self>,
+    ) {
         if self.closing {
             return;
         }
@@ -85,7 +115,7 @@ impl AppRoot {
                     return;
                 }
                 match result {
-                    Ok(true) => root.open_preview_window(request, cx),
+                    Ok(true) => root.open_editor_window(request, cx),
                     Ok(false) => open_in_system(request, cx),
                     Err(error) => {
                         root.notify(Notification::error(format!("无法打开文件：{error}")), cx)
@@ -97,7 +127,7 @@ impl AppRoot {
     }
 }
 
-pub(crate) fn open_in_system(request: PreviewRequest, cx: &mut App) {
+pub(crate) fn open_in_system(request: FileOpenRequest, cx: &mut App) {
     let path = request.local_path.clone();
     let opening = cx
         .background_executor()

@@ -3,10 +3,10 @@ use gpui::{AsyncApp, Context, EventEmitter, SharedString, WeakEntity};
 use std::collections::HashMap;
 use terminal::{SessionId, SshError, SshFs, Transfer, TransferEvent, TransferProgress};
 
-use crate::preview_window::PreviewRequest;
+use crate::file_open::FileOpenRequest;
 
 pub(crate) enum TransferDone {
-    OpenFile(PreviewRequest),
+    OpenFile(FileOpenRequest),
     Nothing,
 }
 

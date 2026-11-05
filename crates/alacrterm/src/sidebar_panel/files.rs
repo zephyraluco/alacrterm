@@ -10,7 +10,7 @@
 //!   先问远端是不是目录,是才换根。
 //! - **打开 / 编辑**(双击文件行 / 行右键「打开」):先把远端文件下到本地缓存
 //!   ([`FilesState::open_file`])。下载完成后，文本进入
-//!   [`crate::preview_window`] 的独立文本编辑器；非文本统一交给系统默认程序。
+//!   [`crate::editor_window`] 的独立文本编辑器；非文本统一交给系统默认程序。
 //! - **下载**(工具栏「下载」/ 行右键「另存为…」= [`FilesState::download_as`],**路径问用户**;
 //!   行右键「下载到下载目录」/ 工具栏「更多」里的同名项 = [`FilesState::download_to_download_dir`]):
 //! - **上传**(拖进侧边栏 / 右键「上传文件…」/ 工具栏「上传」):落到当前选中项所在的远端目录。
@@ -56,9 +56,9 @@ use super::empty_state;
 use super::shared::{RowCache, ellipsis_label, row_content, row_shell};
 use crate::AppRoot;
 use crate::assets::IconName;
+use crate::file_open::FileOpenRequest;
 use crate::format;
 use crate::preview_cache::PreviewCache;
-use crate::preview_window::PreviewRequest;
 use crate::transfer_manager::{TransferDone, TransferManager, TransferState};
 
 mod path_input;
@@ -581,7 +581,7 @@ impl FilesState {
     /// 「打开」:先把远端文件下到本地缓存,下完按类型交给预览窗口或系统程序。
     ///
     /// 只处理文件 —— 行上的双击与「打开」菜单项都只对文件摆。文本在那个窗口里**能改**,
-    /// Ctrl+S 把内容写回远端(见 [`crate::preview_window::PreviewWindow::save`]),所以请求里
+    /// Ctrl+S 把内容写回远端(见 [`crate::editor_window::EditorWindow::save`]),所以请求里
     /// 还要捎上 [`SshFs`] 句柄与根实体(后者用来在写回之后让本视图把所在目录重读一次)。
     ///
     /// Classification happens after download; external opens retain their cache
@@ -595,7 +595,7 @@ impl FilesState {
         let lease = cache.allocate(&name);
         let local = lease.path().to_path_buf();
         let transfer = fs.download_one(remote.clone(), local.clone());
-        let done = TransferDone::OpenFile(PreviewRequest {
+        let done = TransferDone::OpenFile(FileOpenRequest {
             name: name.clone(),
             host: fs.host().to_string(),
             remote_path: remote,
