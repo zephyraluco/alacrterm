@@ -39,6 +39,7 @@ pub(super) struct TextFormat {
     pub(super) bom: bool,
     endings: Vec<LineEnding>,
     preferred: LineEnding,
+    baseline: String,
 }
 impl TextFormat {
     pub(super) fn decode(source: &str) -> (String, Self) {
@@ -68,11 +69,12 @@ impl TextFormat {
         }
         let preferred = endings.first().copied().unwrap_or(LineEnding::Lf);
         (
-            text,
+            text.clone(),
             Self {
                 bom,
                 endings,
                 preferred,
+                baseline: text,
             },
         )
     }
@@ -92,21 +94,31 @@ impl TextFormat {
     pub(super) fn encode(&self, text: &str) -> Vec<u8> {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         let text = normalized.as_str();
+        let lines: Vec<_> = text.split_inclusive('\n').collect();
+        let mut endings = vec![self.preferred; lines.len()];
+        if self.endings.iter().any(|ending| *ending != self.preferred) {
+            let old: Vec<_> = self.baseline.split_inclusive('\n').collect();
+            // Reconcile lines against the saved snapshot, rather than reusing indices
+            // that shift whenever a line is inserted or deleted.
+            let diff = similar::TextDiff::configure()
+                .algorithm(similar::Algorithm::Patience)
+                .diff_slices(&old, &lines);
+            for op in diff.ops() {
+                for (old_index, new_index) in op.old_range().zip(op.new_range()) {
+                    if let Some(ending) = self.endings.get(old_index) {
+                        endings[new_index] = *ending;
+                    }
+                }
+            }
+        }
         let mut bytes = Vec::with_capacity(text.len());
         if self.bom {
             bytes.extend_from_slice(&[0xef, 0xbb, 0xbf]);
         }
-        for (index, line) in text.split_inclusive('\n').enumerate() {
+        for (index, line) in lines.into_iter().enumerate() {
             if let Some(line) = line.strip_suffix('\n') {
                 bytes.extend_from_slice(line.as_bytes());
-                bytes.extend_from_slice(
-                    self.endings
-                        .get(index)
-                        .copied()
-                        .unwrap_or(self.preferred)
-                        .text()
-                        .as_bytes(),
-                );
+                bytes.extend_from_slice(endings[index].text().as_bytes());
             } else {
                 bytes.extend_from_slice(line.as_bytes());
             }
@@ -177,6 +189,7 @@ impl Revisions {
 
 /// 一次在跑的写回。
 pub(super) struct Saving {
+    pub(super) format: TextFormat,
     pub(super) version: RemoteVersion,
     pub(super) phase: SavePhase,
     pub(super) id: SaveOperationId,
@@ -260,6 +273,31 @@ mod tests {
         let (_, format) = TextFormat::decode("first\r\n");
         assert_eq!(format.encode("first\nadded\n"), b"first\r\nadded\r\n");
         assert_eq!(format.encode("first\r\nadded\r\n"), b"first\r\nadded\r\n");
+    }
+    #[test]
+    fn mixed_endings_follow_unchanged_lines_after_insertions_and_deletions() {
+        let (_, format) = TextFormat::decode("first\r\nsecond\nthird\r");
+        assert_eq!(format.encode("second\nthird\n"), b"second\nthird\r");
+        assert_eq!(
+            format.encode("first\ninserted\nsecond\nthird\n"),
+            b"first\r\ninserted\r\nsecond\nthird\r"
+        );
+        assert_eq!(
+            format.encode("first\nchanged\nthird\n"),
+            b"first\r\nchanged\nthird\r"
+        );
+    }
+    #[test]
+    fn subsequent_saves_use_the_saved_snapshot_for_mixed_endings() {
+        let (_, format) = TextFormat::decode("\u{feff}first\r\nsecond\nthird\r");
+        let saved = format.encode("inserted\nfirst\nsecond\nthird\n");
+        let (_, saved_format) = TextFormat::decode(std::str::from_utf8(&saved).unwrap());
+        // A later edit (including one made while the previous upload ran) must
+        // reconcile against the uploaded snapshot, not the original line indices.
+        assert_eq!(
+            saved_format.encode("inserted\nsecond\nthird\n"),
+            "\u{feff}inserted\r\nsecond\nthird\r".as_bytes()
+        );
     }
     #[test]
     fn same_size_content_changes_have_different_remote_versions() {

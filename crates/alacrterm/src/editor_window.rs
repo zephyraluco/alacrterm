@@ -801,6 +801,7 @@ mod tests {
         let old = super::SaveOperationId::new();
         let current = super::SaveOperationId::new();
         let saving = super::Saving {
+            format: super::TextFormat::decode("test").1,
             phase: super::SavePhase::Uploading,
             version: super::RemoteVersion::of(b"test"),
             id: current,

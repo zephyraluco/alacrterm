@@ -34,6 +34,10 @@ impl EditorWindow {
         let total = contents.len() as u64;
         let operation_id = SaveOperationId::new();
         text.document.saving = Some(Saving {
+            format: TextFormat::decode(
+                std::str::from_utf8(&contents).expect("encoded editor text is UTF-8"),
+            )
+            .1,
             version: new_version,
             phase: SavePhase::Checking,
             id: operation_id,
@@ -327,6 +331,7 @@ impl EditorWindow {
                 Ok(()) => {
                     text.document.revisions.mark_saved(saving.revision);
                     text.document.version = saving.version;
+                    text.document.format = saving.format;
                     text.document.outcome = Some(Ok(()));
                     Ok(saving.total)
                 }

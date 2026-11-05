@@ -30,6 +30,7 @@ futures.workspace = true
 log.workspace = true
 open = "5.4.5"
 sha2 = "0.10"
+similar = "2.7"
 rust-embed = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
