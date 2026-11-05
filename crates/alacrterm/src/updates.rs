@@ -684,37 +684,42 @@ pub fn attach_sparkle_guard(
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
                     .await;
-                let result = root.update_in(cx, |_root, window, cx| {
+                let result = cx.update(|window, cx| {
                     let update = model(cx);
                     if matches!(update.read(cx).phase, Phase::Disabled) {
                         return;
                     }
                     if updater::macos::changed() {
+                        let state = updater::macos::State::from_code(updater::macos::state());
+                        log::info!("Sparkle update state: {state:?}");
+                        if matches!(
+                            state,
+                            updater::macos::State::Idle | updater::macos::State::Failed
+                        ) {
+                            crate::exit_coordinator::revoke_sparkle_restart();
+                        }
                         update.update(cx, |update, cx| {
-                            update.phase = Phase::Native(updater::macos::State::from_code(
-                                updater::macos::state(),
-                            ));
+                            update.phase = Phase::Native(state);
                             cx.notify();
                         });
                     }
-                    if !updater::macos::take_restart_request() {
+                    if !crate::exit_coordinator::take_native_request(
+                        cx,
+                        updater::macos::take_restart_request,
+                    ) {
                         return;
                     }
-                    let root = cx.weak_entity();
-                    window.defer(cx, move |window, cx| {
-                        let approved_root = root.clone();
-                        crate::exit_coordinator::request(
-                            root,
-                            window,
-                            cx,
-                            "重启并更新",
-                            Box::new(move |_, cx| {
-                                platform::shutdown_wayx();
-                                crate::exit_coordinator::allow_sparkle_restart(&approved_root, cx);
-                                Ok(())
-                            }),
-                        )
-                    });
+                    crate::exit_coordinator::request(
+                        root.clone(),
+                        window,
+                        cx,
+                        "重启并更新",
+                        Box::new(move |_, _| {
+                            crate::exit_coordinator::allow_sparkle_restart()?;
+                            platform::shutdown_wayx();
+                            Ok(())
+                        }),
+                    )
                 });
                 if result.is_err() {
                     break;

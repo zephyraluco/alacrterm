@@ -11,7 +11,7 @@ unsafe extern "C" {
     fn alacrterm_sparkle_state() -> i32;
     fn alacrterm_sparkle_changed() -> bool;
     fn alacrterm_sparkle_restart_requested() -> bool;
-    fn alacrterm_sparkle_allow_restart();
+    fn alacrterm_sparkle_allow_restart() -> bool;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,11 +119,13 @@ pub fn take_restart_request() -> bool {
     #[cfg(not(sparkle))]
     false
 }
-pub fn allow_restart() {
+pub fn allow_restart() -> bool {
     #[cfg(sparkle)]
     unsafe {
-        alacrterm_sparkle_allow_restart();
+        alacrterm_sparkle_allow_restart()
     }
+    #[cfg(not(sparkle))]
+    false
 }
 
 #[cfg(test)]
