@@ -208,7 +208,13 @@ impl EditorWindow {
             // `input.rs` 里那个 `h_auto()` 分支)⇒ 编辑器会缩成两行、后面的内容全被裁掉,
             // 滚动条还会压在第二行上。官方 story 也是显式 `.size_full()` 才铺满的。
             // 这里**不给** `.readonly(..)`:文本是能改的,改完 Ctrl+S 写回远端(见 `Self::save`)。
-            Body::Text(text) => Editor::new(&text.editor).size_full().into_any_element(),
+            Body::Text(text) => Editor::new(&text.editor)
+                .appearance(false)
+                .bordered(false)
+                .rounded_none()
+                .p_0()
+                .size_full()
+                .into_any_element(),
             Body::Failed(message) => centered(
                 crate::assets::ui_icon(IconName::TriangleAlert),
                 "打不开这个文件",
@@ -340,8 +346,8 @@ impl Render for EditorWindow {
             // 嵌菜单栏(见模块文档):当前文件叫什么在标签条与状态栏上,窗口标题由
             // `set_window_title` 另设。
             .child(TitleBar::new())
-            .child(self.render_tab_bar(cx))
             .child(self.render_toolbar(cx))
+            .child(self.render_tab_bar(cx))
             .child(
                 div()
                     .flex_1()
