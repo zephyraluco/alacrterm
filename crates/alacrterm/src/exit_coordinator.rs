@@ -50,7 +50,7 @@ pub(crate) fn request_with_completion(
         for tab in &root.tabs {
             sources.extend(tab.update(cx, |tab, cx| tab.shutdown(cx)));
         }
-        (sources, root.preview_window.take())
+        (sources, root.editor_window.take())
     }) else {
         completed(false, cx);
         return;
@@ -60,7 +60,7 @@ pub(crate) fn request_with_completion(
             if let Ok(view) = root
                 .view()
                 .clone()
-                .downcast::<crate::preview_window::PreviewWindow>()
+                .downcast::<crate::editor_window::EditorWindow>()
             {
                 sources.extend(view.update(cx, |preview, _| preview.shutdown_sources()));
             }
