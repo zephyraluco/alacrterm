@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=native/exit.m");
+    println!("cargo:rerun-if-changed=native/exit_state.h");
     println!("cargo:rerun-if-changed=../../assets/app-icon.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let icon = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())

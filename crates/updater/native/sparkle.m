@@ -117,10 +117,12 @@ const char *alacrterm_sparkle_status(void) { return statusText.UTF8String; }
 int alacrterm_sparkle_state(void) { return updateState; }
 bool alacrterm_sparkle_changed(void) { bool value = changed; changed = false; return value; }
 bool alacrterm_sparkle_restart_requested(void) { bool value = restartRequested; restartRequested = false; return value; }
-void alacrterm_sparkle_allow_restart(void) {
+bool alacrterm_sparkle_allow_restart(void) {
     if (pendingInstallation != nil) {
         void (^handler)(void) = pendingInstallation;
         pendingInstallation = nil;
         dispatch_async(dispatch_get_main_queue(), handler);
+        return true;
     }
+    return false;
 }

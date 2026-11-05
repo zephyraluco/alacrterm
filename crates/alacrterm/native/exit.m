@@ -1,20 +1,17 @@
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 #include <stdbool.h>
+#include "exit_state.h"
 
 // GPUI exposes applicationWillTerminate, which is too late to reject termination.
 // Add the cancellable AppKit delegate entry point without replacing GPUI's delegate.
 static bool installed;
-static bool requested;
-static bool permitted;
-static bool awaitingReply;
+static AlacrtermExitState state;
 static NSApplicationTerminateReply (*originalShouldTerminate)(id, SEL, NSApplication *);
 static NSApplicationTerminateReply shouldTerminate(id self, SEL selector, NSApplication *app) {
-    if (permitted) {
-        permitted = false;
+    if (alacrterm_exit_should_allow(&state)) {
         return originalShouldTerminate ? originalShouldTerminate(self, selector, app) : NSTerminateNow;
     }
-    if (!awaitingReply) { requested = true; awaitingReply = true; }
     return NSTerminateLater;
 }
 bool alacrterm_exit_install(void) {
@@ -34,23 +31,31 @@ bool alacrterm_exit_install(void) {
     installed = true;
     return true;
 }
-bool alacrterm_exit_requested(void) { bool value = requested; requested = false; return value; }
-void alacrterm_exit_permit(void) { permitted = true; }
+bool alacrterm_exit_requested(void) { bool value = state.requested; state.requested = false; return value; }
+void alacrterm_exit_permit(void) { state.permitted = true; }
+void alacrterm_exit_prepare_restart(void) {
+    if (alacrterm_exit_prepare(&state)) {
+        [NSApp replyToApplicationShouldTerminate:NO];
+    }
+}
+void alacrterm_exit_revoke(void) { state.permitted = false; }
 void alacrterm_exit_allow(void) {
-    if (awaitingReply) {
-        awaitingReply = false;
+    if (state.awaiting_reply) {
+        state.awaiting_reply = false;
+        state.requested = false;
         [NSApp replyToApplicationShouldTerminate:YES];
         return;
     }
-    permitted = true;
+    state.permitted = true;
     [NSApp terminate:nil];
     // If a future GPUI delegate cancels termination, the permission must not leak.
-    permitted = false;
+    state.permitted = false;
 }
 
 void alacrterm_exit_cancel(void) {
-    if (awaitingReply) {
-        awaitingReply = false;
+    if (state.awaiting_reply) {
+        state.awaiting_reply = false;
+        state.requested = false;
         [NSApp replyToApplicationShouldTerminate:NO];
     }
 }
