@@ -11,13 +11,13 @@
 //! 文件的生命周期由 [`CacheLease`] 管：`Clone` 是共享同一份文件，**最后一个**句柄析构时
 //! 删除。下载、预览标签、保存流程各持一份，谁先结束都不会提前删掉别人还要用的文件。
 //!
-//! 交给系统播放器的副本（音频 / 视频）用 [`FileCache::allocate_detached`]：不挂租约，
+//! 外部程序使用的副本通过 [`CacheLease::detach`] 或 [`FileCache::allocate_detached`] 保留：
 //! 应用退出时不强删（播放器可能还在读），留给下一次启动的实例清理。
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 实例目录里的锁文件。
@@ -53,6 +53,7 @@ impl FileCache {
     pub fn allocate(&self, name: &str) -> CacheLease {
         CacheLease(Arc::new(LeaseInner {
             path: self.next_path(name),
+            detached: AtomicBool::new(false),
         }))
     }
 
@@ -101,10 +102,14 @@ pub struct CacheLease(Arc<LeaseInner>);
 
 struct LeaseInner {
     path: PathBuf,
+    detached: AtomicBool,
 }
 
 impl Drop for LeaseInner {
     fn drop(&mut self) {
+        if self.detached.load(Ordering::Relaxed) {
+            return;
+        }
         match fs::remove_file(&self.path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -114,6 +119,12 @@ impl Drop for LeaseInner {
 }
 
 impl CacheLease {
+    /// Keep this shared file for an external application, including after this
+    /// process exits. A later cache instance reclaims it through stale cleanup.
+    pub fn detach(&self) {
+        self.0.detached.store(true, Ordering::Relaxed);
+    }
+
     pub fn path(&self) -> &Path {
         &self.0.path
     }
@@ -193,6 +204,25 @@ mod tests {
 
         drop(shared);
         assert!(!path.exists(), "最后一份租约释放后应当删除");
+    }
+
+    #[test]
+    fn a_download_lease_can_be_retained_for_an_external_application() {
+        let root = temp_root("retained-open");
+        let cache = FileCache::new(&root);
+        let lease = cache.allocate("document.pdf");
+        let shared = lease.clone();
+        let path = lease.path().to_path_buf();
+        fs::write(&path, b"downloaded").unwrap();
+        lease.detach();
+        drop(lease);
+        drop(shared);
+        assert!(path.exists());
+        drop(cache);
+        assert!(path.exists());
+        let next = FileCache::new(&root);
+        assert!(!path.exists());
+        drop(next);
     }
 
     #[test]

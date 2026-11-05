@@ -18,6 +18,7 @@ mod components;
 pub mod config;
 mod dialog;
 mod file_icons;
+mod file_open;
 use util::format;
 pub mod exit_coordinator;
 pub mod keymap;
@@ -175,15 +176,14 @@ impl AppRoot {
             }
             if event.result.is_ok() {
                 match &event.done {
-                    TransferDone::Preview(request) => {
+                    TransferDone::OpenFile(request) => {
                         let request = request.clone();
                         let root = cx.weak_entity();
                         cx.defer(move |cx| {
                             let _ =
-                                root.update(cx, |root, cx| root.open_preview_window(request, cx));
+                                root.update(cx, |root, cx| root.open_downloaded_file(request, cx));
                         });
                     }
-                    TransferDone::OpenExternally(path) => cx.open_with_system(path),
                     TransferDone::Nothing => {}
                 }
             }

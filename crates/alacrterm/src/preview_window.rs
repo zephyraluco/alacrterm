@@ -1,68 +1,14 @@
-//! 「打开文件」的预览窗口:**一个窗口装多个标签**,每个文件一个标签(照 [`crate::settings_window`]
-//! 的模式 —— 独立顶层窗口、自绘标题栏、外层包 gpui-kit `Root`)。
-//!
-//! ## 为什么是独立窗口
-//!
-//! 预览正文(编辑器 / 图片)与终端是两种东西:塞进 dock 就得把
-//! `terminal_panel::TabPane` 从「一堆终端」泛化成「一堆视图」,而终端那条线上每个假设
-//! (`focused_view().read(cx).remote_fs()`、标签名取自终端标题、格子布局与焦点…)都得改。
-//! 独立窗口对现有代码**零改动**,而且大图 / 长文本本来就该有一块自己的地方。
-//!
-//! ## 看的是本地缓存,文本能改回去
-//!
-//! 远端文件由文件管理器**先下到本地缓存**(见 [`crate::sidebar_panel::files`])再看。这样
-//! 文本 / 图片都只需要认识一个本地路径(图片走 gpui 的图片元素),不必为「远端」再各写一套
-//! 解码。窗口关掉时把缓存文件删掉。
-//!
-//! **文本是一个编辑器**:行号 + 语法高亮(语言按扩展名认,见 [`Language`])+ 可改。
-//! Ctrl+S(或工具条那枚「保存」)把编辑器里那份快照写回**远端**(见 [`PreviewWindow::save`]);
-//! 还没写回就关窗口会先问一句(见 [`PreviewWindow::should_close`])。图片只看不动。
-//!
-//! ## 一个窗口,多个标签
-//!
-//! 打开多个文件时**只开一个预览窗口**,每个文件一个标签(照普通桌面编辑器):自绘标题栏里
-//! 只有窗口控制按钮,**不显示当前文件名** —— 文件名在标签条与状态栏上。
-//! 文件管理器「打开」第二个文件时,[`AppRoot::open_preview_window`] 发现窗口已开,就把请求塞
-//! 进去加一个标签(见 [`PreviewWindow::add_request`]),不再另开窗口。
-//!
-//! ## 窗口的几层(照普通桌面文本编辑器的摆法)
-//!
-//! ```text
-//! 自绘标题栏   窗口控制(右端)
-//! 工具条       保存 关闭 | 撤销 重做 | 剪切 复制 粘贴 | 查找 替换 跳转行 | 自动换行
-//! 标签条       文件名 ●  × | 文件名 ●  × | …
-//! 正文         编辑器 / 图片 / 占位说明(当前标签的)
-//! 状态栏       主机:远端路径  大小  写回状态 … 语言 | 编码 | Row·Col·Pos | 行数·字符数
-//! ```
-//!
-//! - **工具条 / 正文 / 状态栏都作用在当前标签上**:工具条里那些编辑动作派发到当前标签的
-//!   编辑器。⚠️ 「保存 / 关闭 / 撤销…」那一排只按**当前标签**是不是文本来摆(图片 / 其他
-//!   没有编辑器,摆了也没东西可编辑)。
-//! - **工具条里那些编辑动作不是本窗口实现的**(撤销 / 重做 / 剪切 / 复制 / 粘贴 / 查找 /
-//!   替换):它们派发 gpui-base 编辑器自带的 action,由编辑器自己接(见 [`action_button`])。
-//!   窗口级那几个动作(保存 / 关闭 / 自动换行 / 跳转行)才由本窗口实现,
-//!   注册在 `actions.rs`。
-//!
-//! ## 什么在应用内、什么交给系统
-//!
-//! | 类型 | 界面 |
-//! |---|---|
-//! | 文本 | **编辑器**(行号 + 语法高亮 + 可改):工具条上是标准编辑动作,Ctrl+S 写回远端;超过 [`MAX_TEXT_BYTES`] 或不是 UTF-8 就不加载 |
-//! | 图片 | `img` 元素等比缩小放进窗口(`ObjectFit::ScaleDown`,小图不放大) |
-//! | 其他 | 占位说明(没有内嵌预览的类型) |
-//!
-//! ⚠️ **音频 / 视频不在这里** —— 进程里没有解码器(内嵌播放要么用 Windows Media Foundation
-//! 自己写一层 unsafe 的 COM,要么引来 ffmpeg),所以由文件管理器下完缓存**直接交给系统默认
-//! 程序**(见 [`crate::sidebar_panel::files`] 的 `open_file`);这个窗口收不到这两种类型。
+//! Text-only remote file editor with multiple tabs, syntax highlighting and write-back.
+//! Downloads are classified before entry; non-text files use the system application.
+//! Cache leases, save revisions and close confirmation protect in-flight edits.
 
 use std::path::{Path, PathBuf};
 
 use futures::StreamExt as _;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
-    Styled as _, StyledImage as _, Subscription, WeakEntity, Window, WindowBounds, WindowKind,
-    WindowOptions, div, img, px, size,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, WeakEntity, Window, WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Root, Selectable as _, Sizable as _, TitleBar,
@@ -123,165 +69,6 @@ pub(crate) struct PreviewRequest {
     /// 保存成功后让文件管理器把所在目录重读一次(见 [`PreviewWindow::refresh_parent_dir`])。
     pub(crate) app_root: WeakEntity<AppRoot>,
 }
-
-/// 按扩展名分的类型。
-///
-/// 两个用途:**走哪条路打开**(文本 / 图片开预览窗口,音频 / 视频交给系统,其余进占位窗口)
-/// 与**工具条上怎么标**。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FileKind {
-    Text,
-    Image,
-    Audio,
-    Video,
-    Other,
-}
-
-impl FileKind {
-    /// 要不要**跳过预览窗口**、由文件管理器下完缓存直接交给系统默认程序打开。
-    ///
-    /// 只有音频 / 视频走这条(应用里没有解码器,见模块文档);判定放在这里是因为分类清单只此一份
-    /// (见 [`Self::of`]),调用方在 [`crate::sidebar_panel::files`] 的 `open_file`。
-    pub(crate) fn handed_to_system(self) -> bool {
-        matches!(self, Self::Audio | Self::Video)
-    }
-
-    /// 按文件名(扩展名)判断。⚠️ 图片那一条**直接用** gpui 图片元素的扩展名清单
-    /// ([`gpui::Img::extensions`]),免得这里的清单和它支持的解码器悄悄走散。
-    pub(crate) fn of(name: &str) -> Self {
-        let lower = name.to_ascii_lowercase();
-        let extension = lower.rsplit_once('.').map(|(_, extension)| extension);
-        if let Some(extension) = extension {
-            if gpui::Img::extensions().contains(&extension) {
-                return Self::Image;
-            }
-            if matches!(
-                extension,
-                "mp3" | "wav" | "flac" | "ogg" | "oga" | "opus" | "m4a" | "aac" | "wma" | "aiff"
-            ) {
-                return Self::Audio;
-            }
-            if matches!(
-                extension,
-                "mp4"
-                    | "mkv"
-                    | "webm"
-                    | "avi"
-                    | "mov"
-                    | "wmv"
-                    | "flv"
-                    | "m4v"
-                    | "mpg"
-                    | "mpeg"
-                    | "ts"
-                    | "3gp"
-            ) {
-                return Self::Video;
-            }
-            if TEXT_EXTENSIONS.contains(&extension) {
-                return Self::Text;
-            }
-            return Self::Other;
-        }
-        // 没有扩展名的:认那几个常见的纯文本文件名,其余当「其他」。
-        if matches!(
-            lower.as_str(),
-            "makefile" | "dockerfile" | "license" | "readme" | "changelog" | "gitignore"
-        ) {
-            Self::Text
-        } else {
-            Self::Other
-        }
-    }
-
-    /// 工具条上的类型名。
-    fn label(self) -> &'static str {
-        match self {
-            Self::Text => "文本",
-            Self::Image => "图片",
-            Self::Audio => "音频",
-            Self::Video => "视频",
-            Self::Other => "文件",
-        }
-    }
-
-    fn icon(self) -> IconName {
-        match self {
-            Self::Text => IconName::FileText,
-            Self::Image => IconName::Image,
-            Self::Audio => IconName::Music,
-            Self::Video => IconName::Video,
-            Self::Other => IconName::File,
-        }
-    }
-}
-
-/// 「这个文件算不算文本」的扩展名(决定 [`FileKind::Text`],与具体染哪种颜色无关 ——
-/// 那件事归 [`Language`])。宽一点没关系:多认一种文本只是多一个能看的文件。
-const TEXT_EXTENSIONS: [&str; 62] = [
-    "txt",
-    "text",
-    "md",
-    "markdown",
-    "rst",
-    "log",
-    "csv",
-    "tsv",
-    "json",
-    "jsonc",
-    "json5",
-    "toml",
-    "yaml",
-    "yml",
-    "ini",
-    "cfg",
-    "conf",
-    "properties",
-    "env",
-    "xml",
-    "html",
-    "htm",
-    "css",
-    "scss",
-    "less",
-    "js",
-    "mjs",
-    "cjs",
-    "ts",
-    "tsx",
-    "jsx",
-    "vue",
-    "svelte",
-    "rs",
-    "py",
-    "pyi",
-    "rb",
-    "go",
-    "c",
-    "h",
-    "cc",
-    "cpp",
-    "cxx",
-    "hpp",
-    "hxx",
-    "java",
-    "kt",
-    "kts",
-    "swift",
-    "php",
-    "pl",
-    "lua",
-    "sh",
-    "bash",
-    "zsh",
-    "fish",
-    "ps1",
-    "bat",
-    "cmd",
-    "sql",
-    "diff",
-    "patch",
-];
 
 /// 预览编辑器认得的语言。
 ///
@@ -409,11 +196,6 @@ enum Body {
     Loading,
     /// 编辑器 + 写回远端那本账(见 [`TextEditing`])。
     Text(TextEditing),
-    /// 图片:交给 `img` 元素读本地那份。
-    Image,
-    /// 没有内嵌预览的类型:只摆一句说明(音频 / 视频不会走到这里,它们由文件管理器直接交给
-    /// 系统默认程序,见模块文档)。
-    External(&'static str),
     /// 打不开(太大 / 不是文本 / 本地读失败)。
     Failed(String),
 }
@@ -573,7 +355,6 @@ pub(crate) struct PreviewTab {
     id: PreviewId,
     /// 打开它时的那些信息(远端路径 / 主窗口句柄 / 缓存文件…)。
     request: PreviewRequest,
-    kind: FileKind,
     body: Body,
     /// 「保存并关闭」:关这个标签那个确认框里点了「保存」时为真,写回成功了这个标签才真关。
     close_after_save: bool,
@@ -593,7 +374,7 @@ pub(crate) struct PreviewWindow {
     root_focus: FocusHandle,
 }
 
-/// 建一个标签:按类型定初始正文,文本的还要起后台读。
+/// Create a text tab and load its downloaded content in the background.
 ///
 /// 返回建好的标签,**不**往窗口里放(调用方决定放哪 / 是不是当前标签)。
 fn new_tab(
@@ -601,25 +382,13 @@ fn new_tab(
     window: &mut Window,
     cx: &mut Context<PreviewWindow>,
 ) -> PreviewTab {
-    let kind = FileKind::of(&request.name);
-    let body = match kind {
-        FileKind::Text => Body::Loading,
-        FileKind::Image => Body::Image,
-        // 音频 / 视频由文件管理器直接交给系统默认程序,到不了这个窗口(见 [`FileKind::handed_to_system`])。
-        FileKind::Audio | FileKind::Video | FileKind::Other => {
-            Body::External("这个类型没有内嵌预览。")
-        }
-    };
     let mut tab = PreviewTab {
         id: PreviewId::new(),
         request,
-        kind,
-        body,
+        body: Body::Loading,
         close_after_save: false,
     };
-    if kind == FileKind::Text {
-        load_text(&mut tab, window, cx);
-    }
+    load_text(&mut tab, window, cx);
     tab
 }
 
@@ -710,8 +479,7 @@ impl PreviewWindow {
         cx.notify();
     }
 
-    /// 把焦点交给当前标签的编辑器(不是文本就没有编辑器,不动焦点 —— 照原来「图片 / 其他
-    /// 不抢焦点」的行为)。
+    /// Focus the active editor once text has loaded; loading/error states keep focus.
     fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 先取句柄、再动窗口(`cx` 要借出去)。
         let Some(focus) = self.active().and_then(|tab| editor_focus(tab, cx)) else {
@@ -1189,8 +957,7 @@ impl PreviewWindow {
     /// `Context<PreviewWindow>`,直说比「派发给当前焦点」少一层不确定性(焦点不在编辑器上时
     /// 派发也会到,但那是运气)。
     ///
-    /// ⚠️ 「保存 / 关闭 / 撤销…」那一排**只在当前标签是文本时摆**(图片 / 其他没有编辑器,
-    /// 摆了也没东西可编辑):当前标签不是文本时工具条是空的(只剩那条底边)。
+    /// Editing actions appear after the active document has loaded successfully.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let text = match self.active().map(|tab| &tab.body) {
             Some(Body::Text(text)) => Some(text),
@@ -1366,43 +1133,31 @@ impl PreviewWindow {
         };
         match &tab.body {
             Body::Loading => centered(
-                crate::assets::ui_icon(tab.kind.icon()),
+                crate::assets::ui_icon(IconName::FileText),
                 "正在读取…",
                 None,
                 cx,
-            ),
-            Body::Image => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .overflow_hidden()
-                .p_3()
-                .child(
-                    // `ScaleDown`:等比缩到装得下,小图不放大(预览不该把 16×16 拉成满屏)。
-                    img(tab.request.local_path.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::ScaleDown),
-                )
-                .into_any_element(),
+            )
+            .into_any_element(),
             // ⚠️ `size_full()` 不能省。多行编辑器没给高度时按**内容行数**撑高,而
             // `LayoutMode::CodeEditor` 的默认 `rows` 是 **2**(见 gpui-kit 的 `mode.rs` 与
             // `input.rs` 里那个 `h_auto()` 分支)⇒ 编辑器会缩成两行、后面的内容全被裁掉,
             // 滚动条还会压在第二行上。官方 story 也是显式 `.size_full()` 才铺满的。
             // 这里**不给** `.readonly(..)`:文本是能改的,改完 Ctrl+S 写回远端(见 `Self::save`)。
             Body::Text(text) => Editor::new(&text.editor).size_full().into_any_element(),
-            Body::External(note) => centered(
-                crate::assets::ui_icon(tab.kind.icon()),
-                tab.request.name.as_ref(),
-                Some(note),
-                cx,
-            ),
             Body::Failed(message) => centered(
                 crate::assets::ui_icon(IconName::TriangleAlert),
                 "打不开这个文件",
                 Some(message.as_str()),
                 cx,
-            ),
+            )
+            .child({
+                let request = tab.request.clone();
+                Button::new("preview-open-externally")
+                    .label("使用系统程序打开")
+                    .on_click(move |_, _, cx| crate::file_open::open_in_system(request.clone(), cx))
+            })
+            .into_any_element(),
         }
     }
 
@@ -1473,7 +1228,7 @@ impl PreviewWindow {
             }
             // 没有编辑器的:至少把类型标出来(大小在左边那簇里)。
             _ => {
-                bar = bar.right(tab.kind.label());
+                bar = bar.right("文本");
             }
         }
         bar.into_any_element()
@@ -1785,6 +1540,9 @@ fn read_text(path: &Path) -> Result<Loaded, String> {
         ));
     }
     let bytes = std::fs::read(path).map_err(|error| format!("本地文件出错:{error}"))?;
+    if bytes.contains(&0) {
+        return Err("文件包含二进制内容，请使用系统程序打开。".into());
+    }
     // ⚠️ BOM 留在文本里(编辑器把它当一个零宽字符)⇒ 存回远端时一模一样。
     let bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
     match String::from_utf8(bytes) {
@@ -1799,7 +1557,7 @@ fn centered(
     title: impl Into<SharedString>,
     note: Option<&str>,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui::Div {
     let mut body = v_flex()
         .size_full()
         .items_center()
@@ -1826,7 +1584,7 @@ fn centered(
                 .child(note.to_string()),
         );
     }
-    body.into_any_element()
+    body
 }
 
 /// 工具条上那行「写回」小字:在写 ⇒ 进度;写完了 ⇒ 已写回 / 失败。
@@ -1912,7 +1670,25 @@ impl AppRoot {
 
 #[cfg(test)]
 mod tests {
-    use super::FileKind;
+
+    #[test]
+    fn text_loading_preserves_bom_and_rejects_binary_or_oversized_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.txt");
+        std::fs::write(&path, b"\xef\xbb\xbfhello\n").unwrap();
+        let loaded = super::read_text(&path).unwrap();
+        assert_eq!(loaded.text, "\u{feff}hello\n");
+        assert!(loaded.bom);
+        std::fs::write(&path, b"text\0binary").unwrap();
+        assert!(super::read_text(&path).is_err());
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(super::read_text(&path).is_err());
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(super::MAX_TEXT_BYTES + 1)
+            .unwrap();
+        assert!(super::read_text(&path).err().unwrap().contains("上限"));
+    }
 
     #[test]
     fn preview_identity_is_not_reused_after_close() {
@@ -1944,66 +1720,6 @@ mod tests {
         assert!(!super::Saving::matches(Some(&saving), old));
         assert!(super::Saving::matches(Some(&saving), current));
         assert!(!super::Saving::matches(None, current));
-    }
-
-    /// 分类错了会走错界面(拿图片当文本读 / 把音频当成能在应用里看),所以这里逐类钉一遍。
-    #[test]
-    fn kinds_follow_the_extension() {
-        for name in [
-            "a.txt",
-            "README",
-            "Makefile",
-            "notes.md",
-            "data.json",
-            "s.sh",
-        ] {
-            assert_eq!(FileKind::of(name), FileKind::Text, "{name} 应当是文本");
-        }
-        // 图片那一类的清单直接用 gpui 图片元素自己的(`Img::extensions`),所以这里只抽查
-        // 两个一定在清单里的,以及 `svg` 这种「看着像文本、其实走图片」的。
-        for name in ["photo.png", "img.JPEG", "logo.svg", "anim.gif", "pic.webp"] {
-            assert_eq!(FileKind::of(name), FileKind::Image, "{name} 应当是图片");
-        }
-        for name in ["song.mp3", "a.wav", "b.FLAC", "c.ogg", "d.m4a"] {
-            assert_eq!(FileKind::of(name), FileKind::Audio, "{name} 应当是音频");
-        }
-        for name in ["clip.mp4", "movie.MKV", "v.webm", "old.avi"] {
-            assert_eq!(FileKind::of(name), FileKind::Video, "{name} 应当是视频");
-        }
-        for name in ["a.bin", "no-extension", "thing.xyz", "archive.tar.gz"] {
-            assert_eq!(FileKind::of(name), FileKind::Other, "{name} 应当是其他");
-        }
-    }
-
-    /// 大小写不敏感(用户拿到的名字什么样都有)。
-    #[test]
-    fn kind_ignores_case() {
-        assert_eq!(FileKind::of("A.TXT"), FileKind::Text);
-        assert_eq!(FileKind::of("B.PNG"), FileKind::Image);
-    }
-
-    /// 音频 / 视频交给系统默认程序,其余在应用里看 —— 文件管理器那条分岔就靠它
-    /// (见 `FileKind::handed_to_system`)。
-    #[test]
-    fn only_media_is_handed_to_the_system() {
-        for name in ["song.mp3", "a.wav", "b.FLAC", "clip.mp4", "movie.MKV"] {
-            assert!(
-                FileKind::of(name).handed_to_system(),
-                "{name} 应当交给系统默认程序打开"
-            );
-        }
-        for name in [
-            "notes.md",
-            "photo.png",
-            "a.bin",
-            "no-extension",
-            "archive.tar.gz",
-        ] {
-            assert!(
-                !FileKind::of(name).handed_to_system(),
-                "{name} 不该走系统程序(应用里有得看)"
-            );
-        }
     }
 
     use super::Revisions;

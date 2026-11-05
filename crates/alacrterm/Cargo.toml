@@ -28,6 +28,7 @@ dirs.workspace = true
 # 读传输进度通道(见 sidebar_panel/files.rs);`futures` 本来就在 workspace 依赖里。
 futures.workspace = true
 log.workspace = true
+open = "5.4.5"
 rust-embed = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }

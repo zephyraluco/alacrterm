@@ -1,13 +1,12 @@
 use futures::StreamExt as _;
 use gpui::{AsyncApp, Context, EventEmitter, SharedString, WeakEntity};
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 use terminal::{SessionId, SshError, SshFs, Transfer, TransferEvent, TransferProgress};
 
 use crate::preview_window::PreviewRequest;
 
 pub(crate) enum TransferDone {
-    Preview(PreviewRequest),
-    OpenExternally(PathBuf),
+    OpenFile(PreviewRequest),
     Nothing,
 }
 
