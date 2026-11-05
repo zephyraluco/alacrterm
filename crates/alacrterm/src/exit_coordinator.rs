@@ -6,8 +6,31 @@ use gpui_kit::component::{WindowExt as _, notification::Notification};
 #[derive(Default)]
 struct Coordinator {
     running: bool,
+    sources: Vec<terminal::SshFs>,
 }
 impl Global for Coordinator {}
+
+impl Coordinator {
+    fn start_cleanup(&mut self, sources: Vec<terminal::SshFs>) -> Vec<terminal::SshFs> {
+        for source in sources {
+            if !self.sources.contains(&source) {
+                self.sources.push(source);
+            }
+        }
+        self.running = true;
+        self.sources.clone()
+    }
+
+    fn finish_cleanup(&mut self, drained: bool) {
+        self.running = false;
+        // Timeout only ends this attempt. Direct editor uploads are not tracked
+        // by the transfer manager, and their closed views cannot supply handles
+        // on retry. Release them only after every source has actually drained.
+        if drained {
+            self.sources.clear();
+        }
+    }
+}
 
 #[cfg(any(target_os = "macos", test))]
 impl Coordinator {
@@ -88,7 +111,7 @@ pub(crate) fn request_with_completion(
     for source in &sources {
         source.cancel_transfers();
     }
-    cx.global_mut::<Coordinator>().running = true;
+    let sources = cx.global_mut::<Coordinator>().start_cleanup(sources);
     log::info!("Exit cleanup started: {_title}");
     window
         .spawn(cx, async move |cx| {
@@ -108,7 +131,7 @@ pub(crate) fn request_with_completion(
                     Ok(false) => {
                         if started.elapsed() >= std::time::Duration::from_secs(30) {
                             let _ = cx.update(|window, cx| {
-                                cx.global_mut::<Coordinator>().running = false;
+                                cx.global_mut::<Coordinator>().finish_cleanup(false);
                                 let _ = root.update(cx, |root, _| root.closing = false);
                                 completed(false, cx);
                                 log::error!("Exit cleanup timed out: {_title}");
@@ -131,7 +154,7 @@ pub(crate) fn request_with_completion(
             let _ = cx.update(|window, cx| {
                 log::info!("Exit cleanup completed: {_title}");
                 completed(true, cx);
-                cx.global_mut::<Coordinator>().running = false;
+                cx.global_mut::<Coordinator>().finish_cleanup(true);
                 if let Err(error) = action(window, cx) {
                     let _ = root.update(cx, |root, _| root.closing = false);
                     window
@@ -288,7 +311,10 @@ mod tests {
     fn native_restart_stays_pending_until_cleanup_is_idle() {
         let pending = std::cell::Cell::new(true);
         let take = || pending.replace(false);
-        let mut coordinator = Coordinator { running: true };
+        let mut coordinator = Coordinator {
+            running: true,
+            ..Default::default()
+        };
         assert!(!coordinator.take_request(take));
         assert!(
             pending.get(),
@@ -301,5 +327,23 @@ mod tests {
     #[test]
     fn native_exit_watch_uses_the_window_context_on_all_test_platforms() {
         let _: fn(WeakEntity<AppRoot>, &mut Window, &mut App) = attach_native;
+    }
+    #[test]
+    fn retry_after_timeout_keeps_editor_sources_without_rediscovering_them() {
+        let source = terminal::SshFs::new(ssh::SshParams::new("localhost", 22, "tester"));
+        let mut coordinator = Coordinator::default();
+        let first = coordinator.start_cleanup(vec![source.clone()]);
+        coordinator.finish_cleanup(false);
+        drop(first);
+        // The editor and terminal have been removed by the first attempt. A
+        // retry cannot discover their handles again, even for direct writebacks.
+        let retry = coordinator.start_cleanup(Vec::new());
+        assert_eq!(retry.len(), 1, "the previous source must still be awaited");
+        assert_eq!(retry[0].session_id(), source.session_id());
+        coordinator.finish_cleanup(false);
+        let again = coordinator.start_cleanup(vec![source]);
+        assert_eq!(again.len(), 1, "rediscovered handles should not accumulate");
+        coordinator.finish_cleanup(true);
+        assert!(coordinator.start_cleanup(Vec::new()).is_empty());
     }
 }
