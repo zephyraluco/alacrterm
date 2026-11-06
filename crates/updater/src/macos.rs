@@ -12,6 +12,10 @@ unsafe extern "C" {
     fn alacrterm_sparkle_changed() -> bool;
     fn alacrterm_sparkle_restart_requested() -> bool;
     fn alacrterm_sparkle_allow_restart() -> bool;
+    fn alacrterm_sparkle_notes() -> *const std::ffi::c_char;
+    fn alacrterm_sparkle_progress() -> f64;
+    fn alacrterm_sparkle_install();
+    fn alacrterm_sparkle_defer();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +27,7 @@ pub enum State {
     WaitingRestart,
     Failed,
     Deferred,
+    Current,
 }
 impl State {
     pub fn from_code(code: i32) -> Self {
@@ -33,6 +38,7 @@ impl State {
             4 => Self::WaitingRestart,
             5 => Self::Failed,
             6 => Self::Deferred,
+            7 => Self::Current,
             _ => Self::Idle,
         }
     }
@@ -128,6 +134,43 @@ pub fn allow_restart() -> bool {
     false
 }
 
+pub fn notes() -> String {
+    #[cfg(sparkle)]
+    unsafe {
+        let text = alacrterm_sparkle_notes();
+        if !text.is_null() {
+            return std::ffi::CStr::from_ptr(text)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    String::new()
+}
+
+pub fn progress() -> Option<f32> {
+    #[cfg(sparkle)]
+    {
+        let value = unsafe { alacrterm_sparkle_progress() };
+        return (value.is_finite() && value >= 0.0).then_some(value.clamp(0.0, 100.0) as f32);
+    }
+    #[cfg(not(sparkle))]
+    None
+}
+
+pub fn install() {
+    #[cfg(sparkle)]
+    unsafe {
+        alacrterm_sparkle_install();
+    }
+}
+
+pub fn defer() {
+    #[cfg(sparkle)]
+    unsafe {
+        alacrterm_sparkle_defer();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::State;
@@ -140,7 +183,8 @@ mod tests {
             assert!(State::from_code(code).has_update());
             assert!(!State::from_code(code).busy());
         }
-        for code in [0, 5, 99] {
+        assert_eq!(State::from_code(7), State::Current);
+        for code in [0, 5, 7, 99] {
             assert!(!State::from_code(code).has_update());
         }
     }

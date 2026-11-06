@@ -335,6 +335,7 @@ impl Updates {
         #[cfg(target_os = "macos")]
         {
             if !matches!(self.phase, Phase::Disabled) {
+                self.phase = Phase::Native(updater::macos::State::Checking);
                 updater::macos::check();
                 cx.notify();
             }
@@ -514,15 +515,32 @@ impl Updates {
     }
 
     pub(crate) fn release_notes(&self) -> String {
+        #[cfg(any(target_os = "macos", test))]
+        if matches!(self.phase, Phase::Native(_)) {
+            return updater::macos::notes();
+        }
         self.release()
             .map(|release| release.notes.clone())
             .unwrap_or_default()
     }
 
     pub(crate) fn progress(&self) -> Option<f32> {
+        #[cfg(any(target_os = "macos", test))]
+        if matches!(self.phase, Phase::Native(_)) {
+            return updater::macos::progress();
+        }
         match self.phase {
             Phase::Downloading { percent, .. } => Some(percent as f32),
             _ => None,
+        }
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        match self.phase {
+            Phase::Current => true,
+            #[cfg(any(target_os = "macos", test))]
+            Phase::Native(updater::macos::State::Current) => true,
+            _ => false,
         }
     }
 

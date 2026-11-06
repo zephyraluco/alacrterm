@@ -11,5 +11,6 @@ int main(void) {
     assert(alacrterm_cycle_end_state(AlacrtermWaitingRestart, true) == AlacrtermWaitingRestart);
     assert(alacrterm_cycle_end_state(AlacrtermDeferred, false) == AlacrtermDeferred);
     assert(alacrterm_cycle_end_state(AlacrtermFailed, false) == AlacrtermFailed);
+    assert(alacrterm_cycle_end_state(AlacrtermCurrent, false) == AlacrtermCurrent);
     return 0;
 }

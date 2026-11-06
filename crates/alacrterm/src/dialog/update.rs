@@ -106,6 +106,10 @@ pub(crate) fn open(root: WeakEntity<AppRoot>, window: &mut Window, cx: &mut App)
 
 impl UpdateDialog {
     fn cancel(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", test))]
+        if matches!(self.updates.read(cx).phase, Phase::Native(_)) {
+            updater::macos::defer();
+        }
         let owned = self.intent.cancel();
         if owned && matches!(self.updates.read(cx).phase, Phase::Downloading { .. }) {
             self.updates
@@ -133,9 +137,8 @@ impl UpdateDialog {
             }
             #[cfg(any(target_os = "macos", test))]
             Phase::Native(_) => {
-                // Sparkle owns its native download/installation UI and restart handoff.
-                self.updates.update(cx, |update, cx| update.check(cx));
-                window.close_dialog(cx);
+                self.intent.begin(false);
+                updater::macos::install();
             }
             _ => {}
         }
@@ -169,6 +172,15 @@ impl UpdateDialog {
                 self.intent.active = false;
                 self.intent.owns_download = false;
             }
+            #[cfg(any(target_os = "macos", test))]
+            Phase::Native(
+                updater::macos::State::Failed
+                | updater::macos::State::Current
+                | updater::macos::State::Idle
+                | updater::macos::State::Deferred,
+            ) => {
+                self.intent.active = false;
+            }
             _ => {}
         }
     }
@@ -179,7 +191,7 @@ impl Render for UpdateDialog {
         let update = self.updates.read(cx);
         let available = update.phase.has_update();
         let busy = update.busy() || self.intent.active;
-        let current = matches!(update.phase, Phase::Current);
+        let current = update.is_current();
         let notes = update.release_notes();
         v_flex()
             .gap_3()
