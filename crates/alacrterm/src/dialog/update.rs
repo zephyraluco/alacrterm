@@ -157,14 +157,10 @@ impl UpdateDialog {
                     self.root.clone(),
                     window,
                     cx,
-                    move |success, window, cx| {
-                        let accepted = dialog
+                    move |success, _window, cx| {
+                        dialog
                             .update(cx, |dialog, _| dialog.intent.prepared(success))
-                            .unwrap_or(false);
-                        if accepted {
-                            window.close_dialog(cx);
-                        }
-                        accepted
+                            .unwrap_or(false)
                     },
                 );
             }
