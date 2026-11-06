@@ -226,6 +226,7 @@ dependencies = [
  "transfer",
  "updater",
  "util",
+ "zed-font-kit",
 ]
 
 [[package]]

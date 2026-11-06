@@ -31,6 +31,7 @@ log.workspace = true
 open = "5.4.5"
 sha2 = "0.10"
 similar = "2.7"
+font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
 rust-embed = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }

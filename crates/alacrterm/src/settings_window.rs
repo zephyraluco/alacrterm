@@ -1,7 +1,7 @@
 //! 独立窗口形式的「设置」界面：主题 / 终端 / 更新，入口 [`AppRoot::open_settings_window`]。
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, FontWeight, IntoElement,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FontWeight, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
     WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
@@ -9,6 +9,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, ThemeMode, TitleBar,
     button::Button,
     h_flex,
+    select::{SearchableVec, Select, SelectEvent, SelectState},
     setting::{
         AnySettingField, NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
         Settings,
@@ -31,6 +32,11 @@ struct SettingsWindow {
     app_root: WeakEntity<AppRoot>,
     _main_window_closed: Subscription,
     _updates: Subscription,
+    font_picker: Entity<SelectState<SearchableVec<SharedString>>>,
+    font_status: Option<SharedString>,
+    fonts_ready: bool,
+    _font_selection: Subscription,
+    _font_scan: gpui::Task<()>,
 }
 
 impl SettingsWindow {
@@ -38,10 +44,68 @@ impl SettingsWindow {
     fn new(
         main_window: AnyWindowHandle,
         app_root: WeakEntity<AppRoot>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let main_window_id = main_window.window_id();
+        let font_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::<SharedString>::new(Vec::new()),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        let root = app_root.clone();
+        let font_selection = cx.subscribe(
+            &font_picker,
+            move |_, _, event: &SelectEvent<SearchableVec<SharedString>>, cx| {
+                if let SelectEvent::Confirm(Some(family)) = event {
+                    let family = family.clone();
+                    update_render(&root, cx, |render| render.font_family = family);
+                }
+            },
+        );
+        let font_scan = cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { crate::system_fonts::scan() })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(families) => {
+                        this.fonts_ready = !families.is_empty();
+                        this.font_status = families.is_empty().then(|| "未发现系统等宽字体".into());
+                        let current = config::settings(cx).render.font_family.clone();
+                        this.font_picker.update(cx, |picker, cx| {
+                            picker.set_items(
+                                SearchableVec::new(
+                                    families
+                                        .into_iter()
+                                        .map(SharedString::from)
+                                        .collect::<Vec<_>>(),
+                                ),
+                                window,
+                                cx,
+                            );
+                            picker.set_selected_value(&current, window, cx);
+                        });
+                    }
+                    Err(error) => {
+                        log::warn!("System font scan failed: {error}");
+                        this.font_status = Some(error.into());
+                    }
+                }
+                cx.notify();
+            });
+        });
         Self {
+            font_picker,
+            font_status: Some("正在扫描系统等宽字体…".into()),
+            fonts_ready: false,
+            _font_selection: font_selection,
+            _font_scan: font_scan,
             app_root,
             _updates: cx.observe(&crate::updates::model(cx), |_, _, cx| cx.notify()),
             _main_window_closed: cx.on_window_closed(move |cx, closed| {
@@ -50,6 +114,34 @@ impl SettingsWindow {
                 }
             }),
         }
+    }
+
+    fn font_field(&self) -> SettingField<SharedString> {
+        let picker = self.font_picker.clone();
+        let status = self.font_status.clone();
+        let ready = self.fonts_ready;
+        SettingField::render(move |options, _, cx| {
+            v_flex()
+                .gap_1()
+                .w_full()
+                .child(
+                    Select::new(&picker)
+                        .w_full()
+                        .menu_max_h(px(280.))
+                        .search_placeholder("搜索字体…")
+                        .placeholder(config::settings(cx).render.font_family.clone())
+                        .accessibility_label("终端字体")
+                        .disabled(options.is_disabled() || !ready)
+                        .with_size(options.size()),
+                )
+                .children(status.clone().map(|text| {
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text)
+                }))
+                .into_any_element()
+        })
     }
 
     /// 「主题」页。
@@ -90,15 +182,7 @@ impl SettingsWindow {
                     .item(render_item(
                         "字体",
                         "终端字体族（系统里已安装的等宽字体）。",
-                        {
-                            let root = self.app_root.clone();
-                            SettingField::input(
-                                |cx: &App| config::settings(cx).render.font_family.clone(),
-                                move |value: SharedString, cx: &mut App| {
-                                    update_render(&root, cx, |render| render.font_family = value);
-                                },
-                            )
-                        },
+                        self.font_field(),
                     ))
                     .item(render_item(
                         "字号",
@@ -505,7 +589,7 @@ impl AppRoot {
         // 外层包一层 gpui-kit `Root`。
         let app_root = cx.entity().downgrade();
         match cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| SettingsWindow::new(main_window, app_root, cx));
+            let view = cx.new(|cx| SettingsWindow::new(main_window, app_root, window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         }) {
             Ok(handle) => self.settings_window = Some(handle),
