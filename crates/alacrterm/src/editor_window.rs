@@ -17,7 +17,6 @@ use gpui_kit::component::{
     h_flex,
     input::{Copy, Cut, Editor, EditorState, InputEvent, Paste, Redo, Replace, Search, Undo},
     notification::Notification,
-    tab::{Tab, TabBar},
     v_flex,
 };
 use terminal::{SshFs, TransferEvent};
@@ -126,6 +125,9 @@ pub(crate) struct EditorWindow {
     tabs: Vec<EditorTab>,
     /// 当前标签下标。
     active: usize,
+    tab_scroll: gpui::ScrollHandle,
+    last_active_tab: Option<DocumentId>,
+    hovered_tab: Option<DocumentId>,
     /// 主窗口;它关了就退出应用(照 [`crate::settings_window::SettingsWindow`])。
     _main_window_closed: Subscription,
     /// 窗口根节点的焦点句柄(`track_focus` 用,也是 [`Focusable`] 给的本窗口焦点)。
@@ -192,6 +194,9 @@ impl EditorWindow {
         let mut this = Self {
             tabs: vec![tab],
             active: 0,
+            tab_scroll: gpui::ScrollHandle::default(),
+            last_active_tab: None,
+            hovered_tab: None,
             _main_window_closed,
             root_focus: cx.focus_handle(),
         };

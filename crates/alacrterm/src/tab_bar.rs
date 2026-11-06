@@ -31,13 +31,62 @@ use crate::AppRoot;
 use crate::assets::IconName;
 use crate::terminal_panel::TabPane;
 
-const TAB_BAR_HEIGHT: Pixels = TITLE_BAR_HEIGHT;
-const TAB_WIDTH: Pixels = px(200.);
+pub(crate) const TAB_BAR_HEIGHT: Pixels = TITLE_BAR_HEIGHT;
+pub(crate) const TAB_WIDTH: Pixels = px(200.);
 const TAB_PADDING_X: Pixels = px(8.);
 const TAB_GAP: Pixels = px(6.);
 /// 关闭按钮槽位（隐藏时占位）。
 const TAB_CLOSE_SLOT: Pixels = px(16.);
 const DRAG_PREVIEW_SIZE: gpui::Size<gpui::Pixels> = gpui::size(px(96.), px(30.));
+
+/// Shared presentation for terminal and editor tabs; behavior belongs to callers.
+pub(crate) fn tab_frame(
+    id: impl Into<gpui::ElementId>,
+    index: usize,
+    active: usize,
+    cx: &App,
+) -> Stateful<gpui::Div> {
+    let selected = index == active;
+    let muted = cx.theme().muted;
+    h_flex()
+        .id(id)
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .flex_none()
+        .w(TAB_WIDTH)
+        .h_full()
+        .relative()
+        .gap(TAB_GAP)
+        .px(TAB_PADDING_X)
+        .border_color(cx.theme().border)
+        .when(index > 0 && index <= active, |this| this.border_l_1())
+        .when(index >= active, |this| this.border_r_1())
+        .when(selected, |this| {
+            this.bg(cx.theme().tab_active)
+                .text_color(cx.theme().tab_active_foreground)
+        })
+        .when(!selected, |this| {
+            this.text_color(cx.theme().tab_foreground)
+                .hover(move |style| style.bg(muted))
+        })
+        .cursor(CursorStyle::PointingHand)
+}
+
+pub(crate) fn tab_close_button(id: impl Into<gpui::ElementId>) -> Button {
+    // Use the same ghost-button foreground and interaction colors as toolbars.
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .p_0()
+        .size(TAB_CLOSE_SLOT)
+        .rounded(px(3.))
+        .icon(crate::assets::ui_icon(IconName::CloseSmall))
+        .occlude()
+}
+
+pub(crate) fn tab_close_placeholder() -> gpui::Div {
+    div().flex_none().size(TAB_CLOSE_SLOT)
+}
 
 /// dock 区渲染器：只替换标签栏。
 pub(crate) struct TerminalDockSkin {
@@ -393,12 +442,6 @@ impl TerminalTabBar {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let tab_active = cx.theme().tab_active;
-        let tab_active_fg = cx.theme().tab_active_foreground;
-        let tab_fg = cx.theme().tab_foreground;
-        let muted = cx.theme().muted;
-        let muted_fg = cx.theme().muted_foreground;
-        let border = cx.theme().border;
         let drag_border = cx.theme().drag_border;
 
         let panel = &group.panels()[ix];
@@ -419,9 +462,6 @@ impl TerminalTabBar {
 
         // id 带组节点，避免同下标撞车。
         let tab_id = (group.node().as_u64() as usize) << 8 | ix;
-        // 相邻标签的竖线。
-        let draw_left = ix > 0 && ix <= active_ix;
-        let draw_right = ix >= active_ix;
 
         let drag = if group.is_draggable() || group.is_zoomed() {
             group.drag_panel(ix, cx)
@@ -430,47 +470,21 @@ impl TerminalTabBar {
         };
 
         let close_slot = {
-            let slot = h_flex().flex_none().justify_center().size(TAB_CLOSE_SLOT);
             if !show_close {
-                slot.into_any_element()
+                tab_close_placeholder().into_any_element()
             } else {
                 let root = self.state.root.clone();
-                slot.id(("terminal-tab-close", tab_id))
-                    .rounded(px(3.))
-                    .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(muted))
+                tab_close_button(("terminal-tab-close", tab_id))
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ =
                             root.update(cx, |root, cx| root.close_panel_id(panel_id, window, cx));
                     })
-                    // VS Code 编辑器标签页用的 `close-small`(细一点的叉)，不是侧边栏那个
-                    // 粗叉(`close`)。
-                    .child(crate::assets::ui_icon(IconName::CloseSmall).text_color(muted_fg))
                     .into_any_element()
             }
         };
 
-        h_flex()
-            .id(("terminal-tab", tab_id))
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .flex_none()
-            .w(TAB_WIDTH)
-            .h_full()
-            .relative()
-            .gap(TAB_GAP)
-            .px(TAB_PADDING_X)
-            .border_color(border)
-            .when(draw_left, |this| this.border_l_1())
-            .when(draw_right, |this| this.border_r_1())
-            .when(selected, |this| {
-                this.bg(tab_active).text_color(tab_active_fg)
-            })
-            .when(!selected, |this| {
-                this.text_color(tab_fg).hover(|style| style.bg(muted))
-            })
-            .cursor(CursorStyle::PointingHand)
+        tab_frame(("terminal-tab", tab_id), ix, active_ix, cx)
             .on_hover({
                 let state = self.state.clone();
                 move |hovered: &bool, _, cx| state.set_hovered(hovered.then_some(ix), cx)

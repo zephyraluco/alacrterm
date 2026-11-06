@@ -1,5 +1,6 @@
 //! Editor window layout and presentation.
 use super::*;
+use gpui::prelude::FluentBuilder as _;
 
 impl EditorWindow {
     /// 工具条:图标按钮,按「文件 / 撤改 / 剪贴 / 查找 / 编辑器」分组,组间一条竖线。
@@ -124,71 +125,128 @@ impl EditorWindow {
         bar
     }
 
-    /// 标签条:**一个文件一枚标签**(见模块文档),标签上是文件名 + 关闭按钮。
-    ///
-    /// 用 gpui-kit 的 [`TabBar`] / [`Tab`]:`TabBar::max_width` 会给标签宽度封顶、长名字省略
-    /// 中段而**保住后面的关闭按钮**(那两条都有单测盯着),自己搭一套很难不把按钮挤没。
-    /// 点某一枚标签 = 切到那个标签(`TabBar::on_click` 给下标);标签上的 × 只关**它自己**
-    /// (⚠️ `TabBar::on_click` 会盖掉 `Tab` 自己的 `on_click`,所以 × 的关闭手势由它兜住)。
-    pub(super) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 与终端共用标签样式，仅保留编辑器的切换、关闭和未保存状态。
+    pub(super) fn render_tab_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::tab_bar::{
+            TAB_BAR_HEIGHT, TAB_WIDTH, tab_close_button, tab_close_placeholder, tab_frame,
+        };
+        let active = self.active().map(|tab| tab.id);
+        if self.last_active_tab != active {
+            self.last_active_tab = active;
+            self.tab_scroll.scroll_to_item(self.active);
+        }
         let mut tabs = Vec::with_capacity(self.tabs.len());
         for (ix, tab) in self.tabs.iter().enumerate() {
+            let id = tab.id;
             let dirty = matches!(&tab.body, Body::Text(text) if text.is_dirty());
             let description = format!("{}:{}", tab.request.host, tab.request.remote_path);
-            let mut built =
-                Tab::new()
-                    .label(tab.request.name.clone())
+            let close = if ix == self.active || self.hovered_tab == Some(id) {
+                tab_close_button(("preview-tab-close", id.0 as usize))
+                    .tooltip("关闭标签 (Ctrl+W)")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if let Some(ix) = this.tabs.iter().position(|tab| tab.id == id) {
+                            this.request_close_tab(ix, window, cx);
+                        }
+                    }))
+                    .into_any_element()
+            } else {
+                tab_close_placeholder().into_any_element()
+            };
+            tabs.push(
+                tab_frame(("preview-tab", id.0 as usize), ix, self.active, cx)
                     .tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(description.clone())
                             .build(window, cx)
-                    });
-            if dirty {
-                // 有没写回的改动:名字前面点一颗(状态栏那行小字写的是「写回成功 / 失败」,这里写的是
-                // 「还有东西没写回」)。
-                built = built.prefix(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(cx.theme().primary)
-                        .child("●"),
-                );
-            }
-            // 每一枚 × 只关**它自己**(最后一个也会走 `close_tab`,那里再决定要不要连窗口一起收)。
-            // ⚠️ 必须 `stop_propagation`:× 是标签的子节点,点它在冒泡阶段还会撞上标签自己的
-            // `on_click`(`TabBar::on_click` 那条「切标签」),不拦就会「先关掉这个标签、又被当成
-            // 点了它去切标签」(那时下标已经错位)。
-            let close = cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                this.request_close_tab(ix, window, cx)
-            });
-            tabs.push(
-                built.suffix(
-                    Button::new(("preview-tab-close", ix))
-                        .ghost()
-                        .xsmall()
-                        // 与终端标签栏同一个叉:细的 `close-small`(VS Code 编辑器标签页用的),
-                        // 不是窗口级那个粗叉 `window-close`。
-                        .icon(crate::assets::ui_icon(IconName::CloseSmall))
-                        .tooltip("关闭标签 (Ctrl+W)")
-                        .occlude()
-                        .on_click(close),
-                ),
+                    })
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        let next = if *hovered {
+                            Some(id)
+                        } else if this.hovered_tab == Some(id) {
+                            None
+                        } else {
+                            this.hovered_tab
+                        };
+                        if this.hovered_tab != next {
+                            this.hovered_tab = next;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(ix) = this.tabs.iter().position(|tab| tab.id == id) {
+                            this.select_tab(ix, window, cx);
+                        }
+                    }))
+                    .on_mouse_up(
+                        gpui::MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| {
+                            if let Some(ix) = this.tabs.iter().position(|tab| tab.id == id) {
+                                this.request_close_tab(ix, window, cx);
+                            }
+                        }),
+                    )
+                    .child(crate::file_icons::file_icon(
+                        &tab.request.name,
+                        false,
+                        false,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(tab.request.name.clone()),
+                    )
+                    .when(dirty, |tab| {
+                        tab.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(cx.theme().primary)
+                                .child("●"),
+                        )
+                    })
+                    .child(close)
+                    .into_any_element(),
             );
         }
-
         h_flex()
             .w_full()
+            .h(TAB_BAR_HEIGHT)
             .flex_none()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .bg(cx.theme().tab_bar)
             .child(
-                TabBar::new("preview-tabs")
-                    .small()
-                    .max_width(px(260.))
-                    .selected_index(self.active)
-                    .on_click(cx.listener(|this, ix, window, cx| this.select_tab(*ix, window, cx)))
-                    .children(tabs),
+                div()
+                    .relative()
+                    .size_full()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .w_full()
+                            .h(px(1.))
+                            .bg(cx.theme().border),
+                    )
+                    .child(
+                        h_flex()
+                            .size_full()
+                            .child(
+                                h_flex()
+                                    .id("preview-tabs")
+                                    .w(TAB_WIDTH * self.tabs.len() as f32)
+                                    .max_w_full()
+                                    .h_full()
+                                    .overflow_x_scroll()
+                                    .track_scroll(&self.tab_scroll)
+                                    .children(tabs),
+                            )
+                            .child(div().flex_1().min_w_0().h_full()),
+                    ),
             )
     }
 
