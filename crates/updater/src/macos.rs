@@ -157,7 +157,7 @@ pub fn progress() -> Option<f32> {
     #[cfg(sparkle)]
     {
         let value = unsafe { alacrterm_sparkle_progress() };
-        return (value.is_finite() && value >= 0.0).then_some(value.clamp(0.0, 100.0) as f32);
+        (value.is_finite() && value >= 0.0).then_some(value.clamp(0.0, 100.0) as f32)
     }
     #[cfg(not(sparkle))]
     None
