@@ -444,7 +444,9 @@ impl TerminalTabBar {
                         let _ =
                             root.update(cx, |root, cx| root.close_panel_id(panel_id, window, cx));
                     })
-                    .child(crate::assets::ui_icon(IconName::Close).text_color(muted_fg))
+                    // VS Code 编辑器标签页用的 `close-small`(细一点的叉)，不是侧边栏那个
+                    // 粗叉(`close`)。
+                    .child(crate::assets::ui_icon(IconName::CloseSmall).text_color(muted_fg))
                     .into_any_element()
             }
         };

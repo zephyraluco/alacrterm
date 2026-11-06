@@ -166,7 +166,9 @@ impl EditorWindow {
                     Button::new(("preview-tab-close", ix))
                         .ghost()
                         .xsmall()
-                        .icon(crate::assets::ui_icon(IconName::WindowClose))
+                        // 与终端标签栏同一个叉:细的 `close-small`(VS Code 编辑器标签页用的),
+                        // 不是窗口级那个粗叉 `window-close`。
+                        .icon(crate::assets::ui_icon(IconName::CloseSmall))
                         .tooltip("关闭标签 (Ctrl+W)")
                         .occlude()
                         .on_click(close),
