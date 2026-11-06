@@ -103,7 +103,7 @@ pub(crate) enum PreparedInstall {
     #[cfg(windows)]
     Windows(updater::windows::Handoff),
     #[cfg(target_os = "linux")]
-    Linux(PathBuf),
+    Linux,
 }
 impl PreparedInstall {
     pub(crate) fn install(self, cx: &mut App) -> anyhow::Result<()> {
@@ -121,26 +121,7 @@ impl PreparedInstall {
                     cx.quit();
                 }
                 #[cfg(target_os = "linux")]
-                Self::Linux(package) => {
-                    let entity = model(cx);
-                    entity.update(cx, |this, cx| {
-                        this.notice = if let Some(installer) =
-                            updater::linux::installer(&package, |path| path.is_file())
-                        {
-                            std::process::Command::new(installer.program)
-                                .args(installer.arguments)
-                                .spawn()?;
-                            "已打开系统安装器。安装完成后请退出并重新启动 Alacrterm。".into()
-                        } else {
-                            format!(
-                                "未检测到支持的系统安装器。请在终端执行：\n{}",
-                                updater::linux::manual_command(&package)
-                            )
-                        };
-                        cx.notify();
-                        anyhow::Ok(())
-                    })?;
-                }
+                Self::Linux => cx.restart(),
             }
             Ok(())
         }
@@ -308,7 +289,13 @@ impl Updates {
             Phase::Available(_) => "请从更新页面继续安装新版本".into(),
             Phase::Downloading { percent, .. } => format!("正在下载更新：{percent}%"),
             Phase::Ready { .. } => "更新已校验，等待安装".into(),
-            Phase::Preparing { .. } => "正在校验安装包并准备更新助手…".into(),
+            Phase::Preparing { .. } => {
+                if cfg!(target_os = "linux") {
+                    "正在安装更新，请完成系统授权；安装成功后将自动重启…".into()
+                } else {
+                    "正在校验安装包并准备更新助手…".into()
+                }
+            }
             Phase::Failed(error) => error.clone(),
             #[cfg(any(target_os = "macos", test))]
             Phase::Native(_) => updater::macos::status(),
@@ -335,6 +322,7 @@ impl Updates {
         #[cfg(target_os = "macos")]
         {
             if !matches!(self.phase, Phase::Disabled) {
+                self.phase = Phase::Native(updater::macos::State::Checking);
                 updater::macos::check();
                 cx.notify();
             }
@@ -513,19 +501,42 @@ impl Updates {
         self.phase.available_version()
     }
 
+    pub(crate) fn release_notes(&self) -> String {
+        #[cfg(any(target_os = "macos", test))]
+        if matches!(self.phase, Phase::Native(_)) {
+            return updater::macos::notes();
+        }
+        self.release()
+            .map(|release| release.notes.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn progress(&self) -> Option<f32> {
+        #[cfg(any(target_os = "macos", test))]
+        if matches!(self.phase, Phase::Native(_)) {
+            return updater::macos::progress();
+        }
+        match self.phase {
+            Phase::Downloading { percent, .. } => Some(percent as f32),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        match self.phase {
+            Phase::Current => true,
+            #[cfg(any(target_os = "macos", test))]
+            Phase::Native(updater::macos::State::Current) => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn release(&self) -> Option<&Release> {
         match &self.phase {
             Phase::Available(UpdateOffer::Signed(update))
             | Phase::Downloading { update, .. }
             | Phase::Ready { update, .. }
             | Phase::Preparing { update, .. } => Some(&update.release),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn package(&self) -> Option<&std::path::Path> {
-        match &self.phase {
-            Phase::Ready { package, .. } | Phase::Preparing { package, .. } => Some(package),
             _ => None,
         }
     }
@@ -555,7 +566,8 @@ impl Updates {
             {
                 let _ = update.envelope;
                 updater::download::verify(&package, &update.release.asset)?;
-                Ok(PreparedInstall::Linux(package))
+                updater::linux::install(&package)?;
+                Ok(PreparedInstall::Linux)
             }
             #[cfg(not(any(windows, target_os = "linux")))]
             {
@@ -584,8 +596,6 @@ pub(crate) fn install_package(
     cx: &mut App,
     continue_installation: impl FnOnce(bool, &mut gpui::Window, &mut App) -> bool + 'static,
 ) {
-    #[cfg(target_os = "linux")]
-    let _ = root;
     let installing = model(cx);
     let Some(task) = installing.update(cx, |update, cx| update.prepare_install(cx)) else {
         return;
@@ -598,19 +608,6 @@ pub(crate) fn install_package(
                 let proceed = continue_installation(prepared.is_ok(), window, cx);
                 match prepared {
                     Ok(prepared) if proceed => {
-                        #[cfg(target_os = "linux")]
-                        {
-                            // Opening a system package installer does not exit the application.
-                            use gpui_kit::component::{WindowExt as _, notification::Notification};
-                            let result = prepared.install(cx);
-                            installing.update(cx, |update, cx| update.finish_preparing(None, cx));
-                            let notification = match result {
-                                Ok(()) => Notification::info(model(cx).read(cx).notice.clone()),
-                                Err(error) => Notification::error(format!("操作失败：{error:#}")),
-                            };
-                            window.push_notification(notification, cx);
-                        }
-                        #[cfg(not(target_os = "linux"))]
                         crate::exit_coordinator::request_with_completion(
                             root,
                             window,
@@ -648,7 +645,9 @@ impl Drop for Updates {
 
 impl gpui::Render for Updates {
     fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        use gpui::{InteractiveElement as _, ParentElement as _, prelude::FluentBuilder as _};
+        use gpui::{
+            InteractiveElement as _, ParentElement as _, Styled as _, prelude::FluentBuilder as _,
+        };
         use gpui_kit::component::{
             Sizable as _,
             button::{Button, ButtonVariants as _},
@@ -660,9 +659,15 @@ impl gpui::Render for Updates {
                     Button::new("update-status")
                         .ghost()
                         .small()
-                        .icon(crate::assets::ui_icon(crate::assets::IconName::Download))
-                        .label(self.phase.title_bar_label())
-                        .tooltip(self.status())
+                        .icon(
+                            crate::assets::ui_icon(crate::assets::IconName::CircleArrowUp)
+                                .text_color(gpui::rgb(0x35d04f)),
+                        )
+                        .tooltip(format!(
+                            "可更新至 {} · {}",
+                            self.available_version().unwrap_or_default(),
+                            self.phase.title_bar_label()
+                        ))
                         .accessibility_label("打开软件更新")
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::actions::OpenUpdateDialog), cx)
@@ -709,7 +714,7 @@ pub fn attach_sparkle_guard(
                     ) {
                         return;
                     }
-                    crate::exit_coordinator::request(
+                    crate::exit_coordinator::request_with_completion(
                         root.clone(),
                         window,
                         cx,
@@ -718,6 +723,11 @@ pub fn attach_sparkle_guard(
                             crate::exit_coordinator::allow_sparkle_restart()?;
                             platform::shutdown_wayx();
                             Ok(())
+                        }),
+                        Box::new(|accepted, _| {
+                            if !accepted {
+                                updater::macos::restart_cancelled();
+                            }
                         }),
                     )
                 });
