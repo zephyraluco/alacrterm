@@ -10,6 +10,7 @@ enum AlacrtermUpdateState {
     AlacrtermFailed = 5,
     AlacrtermDeferred = 6,
     AlacrtermCurrent = 7,
+    AlacrtermInstalling = 8,
 };
 // Shared by the Objective-C bridge and portable regression tests.
 static inline int alacrterm_choice_state(bool skip, bool downloaded) {

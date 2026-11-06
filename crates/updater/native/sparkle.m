@@ -107,7 +107,7 @@ static void updateStatus(NSString *text, int state) {
 }
 - (void)showInstallingUpdateWithApplicationTerminated:(BOOL)terminated retryTerminatingApplication:(void (^)(void))retry {
     progress = -1;
-    updateStatus(@"正在安装并重启…", AlacrtermWaitingRestart);
+    updateStatus(@"正在安装并重启…", AlacrtermInstalling);
 }
 - (void)showUpdateInstalledAndRelaunched:(BOOL)relaunched acknowledgement:(void (^)(void))acknowledgement {
     installRequested = false;
@@ -150,7 +150,7 @@ static AlacrtermUserDriver *userDriver;
 - (BOOL)updater:(SPUUpdater *)updater shouldPostponeRelaunchForUpdate:(SUAppcastItem *)item untilInvokingBlock:(void (^)(void))handler {
     pendingInstallation = [handler copy];
     restartRequested = true;
-    updateStatus(@"更新已就绪，等待确认关闭终端与传输任务", 4);
+    updateStatus(@"更新已就绪，正在清理终端与传输任务…", AlacrtermInstalling);
     return YES;
 }
 - (void)updater:(SPUUpdater *)updater userDidMakeChoice:(SPUUserUpdateChoice)choice forUpdate:(SUAppcastItem *)item state:(SPUUserUpdateState *)state {

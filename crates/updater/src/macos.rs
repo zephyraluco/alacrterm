@@ -28,6 +28,7 @@ pub enum State {
     Failed,
     Deferred,
     Current,
+    Installing,
 }
 impl State {
     pub fn from_code(code: i32) -> Self {
@@ -39,16 +40,21 @@ impl State {
             5 => Self::Failed,
             6 => Self::Deferred,
             7 => Self::Current,
+            8 => Self::Installing,
             _ => Self::Idle,
         }
     }
     pub fn busy(self) -> bool {
-        matches!(self, Self::Checking | Self::Downloading)
+        matches!(self, Self::Checking | Self::Downloading | Self::Installing)
     }
     pub fn has_update(self) -> bool {
         matches!(
             self,
-            Self::Available | Self::Downloading | Self::WaitingRestart | Self::Deferred
+            Self::Available
+                | Self::Downloading
+                | Self::WaitingRestart
+                | Self::Deferred
+                | Self::Installing
         )
     }
 }
@@ -184,6 +190,8 @@ mod tests {
             assert!(!State::from_code(code).busy());
         }
         assert_eq!(State::from_code(7), State::Current);
+        assert!(State::from_code(8).busy());
+        assert!(State::from_code(8).has_update());
         for code in [0, 5, 7, 99] {
             assert!(!State::from_code(code).has_update());
         }

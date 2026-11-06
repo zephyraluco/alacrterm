@@ -45,6 +45,19 @@ struct UpdateDialog {
     _subscription: Subscription,
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn can_defer_native(phase: &Phase, owns_install: bool) -> bool {
+    !owns_install
+        && matches!(
+            phase,
+            Phase::Native(
+                updater::macos::State::Available
+                    | updater::macos::State::Deferred
+                    | updater::macos::State::WaitingRestart
+            )
+        )
+}
+
 pub(crate) fn check(root: WeakEntity<AppRoot>, window: &mut Window, cx: &mut App) {
     if window.has_active_dialog(cx) {
         return;
@@ -107,7 +120,7 @@ pub(crate) fn open(root: WeakEntity<AppRoot>, window: &mut Window, cx: &mut App)
 impl UpdateDialog {
     fn cancel(&mut self, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "macos", test))]
-        if matches!(self.updates.read(cx).phase, Phase::Native(_)) {
+        if can_defer_native(&self.updates.read(cx).phase, self.intent.active) {
             updater::macos::defer();
         }
         let owned = self.intent.cancel();
@@ -212,7 +225,7 @@ impl Render for UpdateDialog {
                         .child(update.available_version().unwrap_or_default()),
                 )
             })
-            .when(available && !notes.is_empty(), |view| {
+            .when(available, |view| {
                 view.child(
                     v_flex().gap_2().child("本次更新").child(
                         div()
@@ -220,7 +233,11 @@ impl Render for UpdateDialog {
                             .max_h(px(240.))
                             .overflow_y_scroll()
                             .text_sm()
-                            .child(notes),
+                            .child(if notes.is_empty() {
+                                "暂无更新说明".into()
+                            } else {
+                                notes
+                            }),
                     ),
                 )
             })
@@ -281,6 +298,18 @@ impl Render for UpdateDialog {
 #[cfg(test)]
 mod tests {
     use super::InstallIntent;
+    #[test]
+    fn another_window_cannot_defer_an_install_in_progress() {
+        use super::{Phase, can_defer_native};
+        use updater::macos::State;
+        for state in [State::Downloading, State::Installing, State::Checking] {
+            assert!(!can_defer_native(&Phase::Native(state), false));
+        }
+        for state in [State::Available, State::WaitingRestart, State::Deferred] {
+            assert!(can_defer_native(&Phase::Native(state), false));
+            assert!(!can_defer_native(&Phase::Native(state), true));
+        }
+    }
     #[test]
     fn cancelled_or_failed_preparation_cannot_continue_installing() {
         let mut intent = InstallIntent::default();
