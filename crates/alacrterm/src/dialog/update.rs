@@ -3,15 +3,18 @@ use crate::{
     AppRoot,
     updates::{self, Phase, UpdateOffer},
 };
+use gpui::StatefulInteractiveElement as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    Subscription, WeakEntity, Window, div, px,
+    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, WindowExt as _,
+    ActiveTheme as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
+    h_flex,
+    progress::Progress,
+    v_flex,
 };
 
 #[derive(Default)]
@@ -42,8 +45,19 @@ struct UpdateDialog {
     _subscription: Subscription,
 }
 
+pub(crate) fn check(root: WeakEntity<AppRoot>, window: &mut Window, cx: &mut App) {
+    if window.has_active_dialog(cx) {
+        return;
+    }
+    let model = updates::model(cx);
+    if !model.read(cx).phase.has_update() {
+        model.update(cx, |update, cx| update.check(cx));
+    }
+    open(root, window, cx);
+}
+
 pub(crate) fn open(root: WeakEntity<AppRoot>, window: &mut Window, cx: &mut App) {
-    if window.has_active_dialog(cx) || !updates::model(cx).read(cx).phase.has_update() {
+    if window.has_active_dialog(cx) {
         return;
     }
     let view = cx.new(|cx| {
@@ -70,12 +84,22 @@ pub(crate) fn open(root: WeakEntity<AppRoot>, window: &mut Window, cx: &mut App)
             .overlay_closable(false)
             .child(view.clone())
             .on_ok(move |_, window, cx| {
-                updating.update(cx, |this, cx| this.begin(window, cx));
-                false
+                updating.update(cx, |this, cx| {
+                    if !this.updates.read(cx).phase.has_update() && !this.updates.read(cx).busy() {
+                        return true;
+                    }
+                    this.begin(window, cx);
+                    false
+                })
             })
             .on_cancel(move |_, _, cx| {
-                cancelling.update(cx, |this, cx| this.cancel(cx));
-                true
+                cancelling.update(cx, |this, cx| {
+                    if this.intent.active {
+                        return false;
+                    }
+                    this.cancel(cx);
+                    true
+                })
             })
     });
 }
@@ -153,59 +177,95 @@ impl UpdateDialog {
 impl Render for UpdateDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let update = self.updates.read(cx);
-        let target = update
-            .available_version()
-            .unwrap_or_else(|| "暂不可用".into());
+        let available = update.phase.has_update();
         let busy = update.busy() || self.intent.active;
-        let manual = matches!(update.phase, Phase::Available(UpdateOffer::Manual(_)));
-        let notice = update.notice.clone();
+        let current = matches!(update.phase, Phase::Current);
+        let notes = update.release_notes();
         v_flex()
             .gap_3()
+            .child(div().text_lg().child(if current {
+                "已是最新版本，暂无更新"
+            } else if available && !busy {
+                "有新版本发布"
+            } else {
+                "软件更新"
+            }))
             .child(
                 h_flex()
                     .justify_between()
                     .child("当前版本")
                     .child(env!("CARGO_PKG_VERSION")),
             )
-            .child(h_flex().justify_between().child("可升级版本").child(target))
-            .when(busy, |view| {
-                view.child(div().text_sm().child(update.status()))
-            })
-            .when(manual, |view| {
+            .when(available, |view| {
                 view.child(
-                    div()
-                        .text_sm()
-                        .child("此版本需要手动安装，立刻更新将打开官方下载页。"),
+                    h_flex()
+                        .justify_between()
+                        .child("可升级版本")
+                        .child(update.available_version().unwrap_or_default()),
                 )
             })
-            .when(!notice.is_empty(), |view| {
+            .when(available && !notes.is_empty(), |view| {
+                view.child(
+                    v_flex().gap_2().child("本次更新").child(
+                        div()
+                            .id("update-release-notes")
+                            .max_h(px(240.))
+                            .overflow_y_scroll()
+                            .text_sm()
+                            .child(notes),
+                    ),
+                )
+            })
+            .when(busy, |view| {
+                view.child(
+                    Progress::new("update-progress")
+                        .loading(update.progress().is_none())
+                        .value(update.progress().unwrap_or_default()),
+                )
+                .child(div().text_sm().child(update.status()))
+            })
+            .when(!busy && !current && !available, |view| {
+                view.child(update.status())
+            })
+            .when(!update.notice.is_empty() && !current, |view| {
                 view.child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(notice),
+                        .child(update.notice.clone()),
                 )
             })
             .child(
                 h_flex()
                     .w_full()
-                    .justify_end()
+                    .justify_between()
                     .gap_2()
-                    .child(
-                        Button::new("cancel-software-update")
-                            .label("取消")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.cancel(cx);
-                                window.close_dialog(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("install-software-update")
-                            .label("立刻更新")
-                            .primary()
-                            .disabled(busy || !update.phase.has_update())
-                            .on_click(cx.listener(|this, _, window, cx| this.begin(window, cx))),
-                    ),
+                    .when(available && !busy, |row| {
+                        row.child(
+                            Button::new("postpone-software-update")
+                                .label("稍后更新")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel(cx);
+                                    window.close_dialog(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("install-software-update")
+                                .label("更新并重启")
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.begin(window, cx)),
+                                ),
+                        )
+                    })
+                    .when(!available && !busy, |row| {
+                        row.child(
+                            Button::new("confirm-software-update")
+                                .label("确定")
+                                .primary()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                    }),
             )
     }
 }

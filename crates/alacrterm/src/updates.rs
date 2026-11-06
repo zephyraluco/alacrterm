@@ -513,19 +513,25 @@ impl Updates {
         self.phase.available_version()
     }
 
+    pub(crate) fn release_notes(&self) -> String {
+        self.release()
+            .map(|release| release.notes.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn progress(&self) -> Option<f32> {
+        match self.phase {
+            Phase::Downloading { percent, .. } => Some(percent as f32),
+            _ => None,
+        }
+    }
+
     pub(crate) fn release(&self) -> Option<&Release> {
         match &self.phase {
             Phase::Available(UpdateOffer::Signed(update))
             | Phase::Downloading { update, .. }
             | Phase::Ready { update, .. }
             | Phase::Preparing { update, .. } => Some(&update.release),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn package(&self) -> Option<&std::path::Path> {
-        match &self.phase {
-            Phase::Ready { package, .. } | Phase::Preparing { package, .. } => Some(package),
             _ => None,
         }
     }
@@ -648,7 +654,9 @@ impl Drop for Updates {
 
 impl gpui::Render for Updates {
     fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        use gpui::{InteractiveElement as _, ParentElement as _, prelude::FluentBuilder as _};
+        use gpui::{
+            InteractiveElement as _, ParentElement as _, Styled as _, prelude::FluentBuilder as _,
+        };
         use gpui_kit::component::{
             Sizable as _,
             button::{Button, ButtonVariants as _},
@@ -660,9 +668,15 @@ impl gpui::Render for Updates {
                     Button::new("update-status")
                         .ghost()
                         .small()
-                        .icon(crate::assets::ui_icon(crate::assets::IconName::Download))
-                        .label(self.phase.title_bar_label())
-                        .tooltip(self.status())
+                        .icon(
+                            crate::assets::ui_icon(crate::assets::IconName::CircleArrowUp)
+                                .text_color(gpui::rgb(0x35d04f)),
+                        )
+                        .tooltip(format!(
+                            "可更新至 {} · {}",
+                            self.available_version().unwrap_or_default(),
+                            self.phase.title_bar_label()
+                        ))
                         .accessibility_label("打开软件更新")
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::actions::OpenUpdateDialog), cx)

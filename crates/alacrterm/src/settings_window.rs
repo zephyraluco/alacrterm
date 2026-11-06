@@ -1,6 +1,5 @@
 //! 独立窗口形式的「设置」界面：主题 / 终端 / 更新，入口 [`AppRoot::open_settings_window`]。
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FontWeight, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
@@ -523,28 +522,12 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
     use crate::updates::{self, Phase};
     let entity = updates::model(cx);
     let update = entity.read(cx);
-    let checking = entity.clone();
-    let downloading = entity.clone();
-    let cancelling = entity.clone();
     let automatic = entity.clone();
-    let install_command = if cfg!(target_os = "linux") {
-        update.package().map(updater::linux::manual_command)
-    } else {
-        None
-    };
-    let is_download = matches!(
-        update.phase,
-        Phase::Available(updates::UpdateOffer::Signed(_))
-    );
     v_flex()
         .gap_2()
         .w_full()
         .child(format!("当前版本：{}", env!("CARGO_PKG_VERSION")))
         .child(update.status())
-        .when(
-            !matches!(update.phase, Phase::Disabled) && !update.notice.is_empty(),
-            |view| view.child(update.notice.clone()),
-        )
         .child(
             Switch::new("update-automatic")
                 .checked(update.automatic)
@@ -554,66 +537,11 @@ fn update_controls(root: WeakEntity<AppRoot>, cx: &App) -> impl IntoElement {
                 }),
         )
         .child(
-            h_flex()
-                .gap_2()
-                .child(
-                    Button::new("check-update")
-                        .label("检查更新")
-                        .disabled(
-                            update.busy()
-                                || matches!(update.phase, Phase::Disabled | Phase::Ready { .. }),
-                        )
-                        .on_click(move |_, _, cx| {
-                            checking.update(cx, |update, cx| update.check(cx))
-                        }),
-                )
-                .child(
-                    Button::new("update-release-page")
-                        .label("发布页")
-                        .on_click(|_, _, cx| cx.open_url(updater::DOWNLOAD_PAGE)),
-                ),
+            Button::new("check-update")
+                .label("检查更新")
+                .disabled(update.busy() || matches!(update.phase, Phase::Disabled))
+                .on_click(move |_, window, cx| {
+                    crate::dialog::update::check(root.clone(), window, cx);
+                }),
         )
-        .when(is_download, |view| {
-            view.child(
-                Button::new("download-update")
-                    .label("下载更新")
-                    .on_click(move |_, _, cx| {
-                        downloading.update(cx, |update, cx| update.download(cx))
-                    }),
-            )
-        })
-        .when(matches!(update.phase, Phase::Downloading { .. }), |view| {
-            view.child(
-                Button::new("cancel-update-download")
-                    .label("取消下载")
-                    .on_click(move |_, _, cx| {
-                        cancelling.update(cx, |update, cx| update.cancel_download(cx))
-                    }),
-            )
-        })
-        .when(matches!(update.phase, Phase::Ready { .. }), |view| {
-            view.child(
-                Button::new("install-update")
-                    .label(if cfg!(windows) {
-                        "重启并更新"
-                    } else {
-                        "打开系统安装器"
-                    })
-                    .on_click(move |_, window, cx| {
-                        updates::install_package(root.clone(), window, cx, |_, _, _| true);
-                    }),
-            )
-        })
-        .when_some(install_command, |view, command| {
-            view.child(
-                Button::new("copy-update-install-command")
-                    .label("复制安装命令")
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()))
-                    }),
-            )
-        })
-        .when_some(update.release(), |view, release| {
-            view.child(div().text_sm().child(release.notes.clone()))
-        })
 }
