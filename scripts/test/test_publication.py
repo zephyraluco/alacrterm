@@ -1,4 +1,3 @@
-import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -37,14 +36,9 @@ class PublicationTests(unittest.TestCase):
                 'alacrterm-0.1.1-windows-x64-setup.exe',
                 'alacrterm-0.1.1-macos-arm64.dmg',
                 'alacrterm-0.1.1-macos-arm64.app.zip',
-                'update.json', 'appcast.xml', 'SHA256SUMS',
+                'update.json', 'appcast.xml',
             })
-            checksums = (folder / 'SHA256SUMS').read_text().splitlines()
-            expected = []
-            for name in sorted(attachments):
-                if name.endswith(('.deb', '.exe', '.dmg', '.app.zip')):
-                    expected.append(f'{hashlib.sha256((folder / name).read_bytes()).hexdigest()}  {name}')
-            self.assertEqual(checksums, expected)
+            self.assertFalse((folder / 'SHA256SUMS').exists())
             self.assertIn('--draft', create.args)
             self.assertEqual(publish.args, ('edit', 'v0.1.1', '--draft=false', '--latest=true'))
             github.api.assert_called_once_with('releases/latest', optional=True)

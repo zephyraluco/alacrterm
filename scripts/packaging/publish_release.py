@@ -1,6 +1,5 @@
 """Upload one complete release, then publish without regressing latest."""
 import json
-import hashlib
 import os
 from pathlib import Path
 import re
@@ -61,14 +60,7 @@ def publish(github, dist, tag, sha, notes):
         raise ValueError('Required release installers are missing')
     # Build manifests, signing intermediates and individual checksum files remain
     # CI artifacts. Only the explicit public assets are attached to the release.
-    checksums = []
-    for path in installers:
-        with path.open('rb') as source:
-            digest = hashlib.file_digest(source, 'sha256').hexdigest()
-        checksums.append(f'{digest}  {path.name}\n')
-    checksum_file = dist / 'SHA256SUMS'
-    checksum_file.write_text(''.join(checksums), encoding='utf-8')
-    paths = [*installers, dist / 'update.json', dist / 'appcast.xml', checksum_file]
+    paths = [*installers, dist / 'update.json', dist / 'appcast.xml']
     latest = github.api('releases/latest', optional=True)
     make_latest = latest is None or stable_version(tag) >= stable_version(latest['tag_name'])
     # gh uploads every attachment as part of create. Existing releases fail rather
