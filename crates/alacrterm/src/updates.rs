@@ -714,7 +714,7 @@ pub fn attach_sparkle_guard(
                     ) {
                         return;
                     }
-                    crate::exit_coordinator::request(
+                    crate::exit_coordinator::request_with_completion(
                         root.clone(),
                         window,
                         cx,
@@ -723,6 +723,11 @@ pub fn attach_sparkle_guard(
                             crate::exit_coordinator::allow_sparkle_restart()?;
                             platform::shutdown_wayx();
                             Ok(())
+                        }),
+                        Box::new(|accepted, _| {
+                            if !accepted {
+                                updater::macos::restart_cancelled();
+                            }
                         }),
                     )
                 });

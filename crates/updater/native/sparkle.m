@@ -243,7 +243,11 @@ const char *alacrterm_sparkle_notes(void) { return releaseNotes.UTF8String; }
 double alacrterm_sparkle_progress(void) { return progress; }
 void alacrterm_sparkle_install(void) {
     installRequested = true;
-    if (pendingInstallation != nil) { restartRequested = true; return; }
+    if (pendingInstallation != nil) {
+        updateStatus(@"正在准备重启…", AlacrtermInstalling);
+        restartRequested = true;
+        return;
+    }
     if (pendingChoice != nil) {
         void (^choice)(SPUUserUpdateChoice) = pendingChoice;
         pendingChoice = nil;
@@ -252,6 +256,14 @@ void alacrterm_sparkle_install(void) {
         choice(SPUUserUpdateChoiceInstall);
     } else {
         [controller checkForUpdates];
+    }
+}
+void alacrterm_sparkle_restart_cancelled(void) {
+    int next = alacrterm_restart_failure_state(updateState, pendingInstallation != nil);
+    if (next != updateState) {
+        installRequested = false;
+        restartRequested = false;
+        updateStatus(@"清理任务未完成，更新已保留，请稍后重试更新并重启。", next);
     }
 }
 void alacrterm_sparkle_defer(void) {

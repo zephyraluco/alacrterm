@@ -16,6 +16,7 @@ unsafe extern "C" {
     fn alacrterm_sparkle_progress() -> f64;
     fn alacrterm_sparkle_install();
     fn alacrterm_sparkle_defer();
+    fn alacrterm_sparkle_restart_cancelled();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +175,13 @@ pub fn defer() {
     #[cfg(sparkle)]
     unsafe {
         alacrterm_sparkle_defer();
+    }
+}
+
+pub fn restart_cancelled() {
+    #[cfg(sparkle)]
+    unsafe {
+        alacrterm_sparkle_restart_cancelled();
     }
 }
 

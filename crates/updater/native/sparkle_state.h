@@ -20,4 +20,7 @@ static inline int alacrterm_cycle_end_state(int state, bool pending) {
     if (pending || state == AlacrtermDeferred || state == AlacrtermFailed || state == AlacrtermCurrent) { return state; }
     return AlacrtermIdle;
 }
+static inline int alacrterm_restart_failure_state(int state, bool pending) {
+    return pending ? AlacrtermDeferred : state;
+}
 #endif
