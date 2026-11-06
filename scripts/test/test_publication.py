@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,7 +9,15 @@ from test_package import module
 
 class PublicationTests(unittest.TestCase):
     def fixture(self, folder, latest='v0.0.9'):
-        for name in ['installer.exe', 'update.json', 'appcast.xml', 'sparkle-signature.json']:
+        for name in [
+            'alacrterm-0.1.1-linux-x64.deb',
+            'alacrterm-0.1.1-windows-x64-setup.exe',
+            'alacrterm-0.1.1-macos-arm64.dmg',
+            'alacrterm-0.1.1-macos-arm64.app.zip',
+            'update.json', 'appcast.xml', 'sparkle-signature.json',
+            'build-linux-x64.json', 'build-macos-arm64.json', 'build-windows-x64.json',
+            'alacrterm-0.1.1-linux-x64.deb.sha256',
+        ]:
             (folder / name).write_text('fixture', encoding='utf-8')
         github = Mock()
         github.tag_sha.return_value = 'a' * 40
@@ -22,14 +31,39 @@ class PublicationTests(unittest.TestCase):
             publisher.publish(github, folder, 'v0.1.1', 'a' * 40, folder / 'notes')
             create, publish = github.command.call_args_list
             self.assertEqual(create.args[:2], ('create', 'v0.1.1'))
-            for path in folder.iterdir():
-                self.assertIn(str(path), create.args)
+            attachments = [Path(arg).name for arg in create.args[2:create.args.index('--verify-tag')]]
+            self.assertEqual(set(attachments), {
+                'alacrterm-0.1.1-linux-x64.deb',
+                'alacrterm-0.1.1-windows-x64-setup.exe',
+                'alacrterm-0.1.1-macos-arm64.dmg',
+                'alacrterm-0.1.1-macos-arm64.app.zip',
+                'update.json', 'appcast.xml', 'SHA256SUMS',
+            })
+            checksums = (folder / 'SHA256SUMS').read_text().splitlines()
+            expected = []
+            for name in sorted(attachments):
+                if name.endswith(('.deb', '.exe', '.dmg', '.app.zip')):
+                    expected.append(f'{hashlib.sha256((folder / name).read_bytes()).hexdigest()}  {name}')
+            self.assertEqual(checksums, expected)
             self.assertIn('--draft', create.args)
             self.assertEqual(publish.args, ('edit', 'v0.1.1', '--draft=false', '--latest=true'))
             github.api.assert_called_once_with('releases/latest', optional=True)
             github.release.assert_not_called()
             github.download.assert_not_called()
             self.assertFalse((folder / 'release-manifest.json').exists())
+
+    def test_missing_installer_or_symlink_never_creates_a_release(self):
+        for symlink in [False, True]:
+            with self.subTest(symlink=symlink), tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary)
+                publisher, github = self.fixture(folder)
+                package = folder / 'alacrterm-0.1.1-macos-arm64.app.zip'
+                package.unlink()
+                if symlink:
+                    package.symlink_to(folder / 'update.json')
+                with self.assertRaises(ValueError):
+                    publisher.publish(github, folder, 'v0.1.1', 'a' * 40, folder / 'notes')
+                github.command.assert_not_called()
 
     def test_latest_is_compared_numerically(self):
         publisher = module('publish_release')

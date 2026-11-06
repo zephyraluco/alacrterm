@@ -1,5 +1,6 @@
 """Upload one complete release, then publish without regressing latest."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -49,6 +50,25 @@ def publish(github, dist, tag, sha, notes):
         raise ValueError('Signed update feeds are missing')
     if any(path.is_symlink() or not path.is_file() for path in paths):
         raise ValueError('Publication contains non-regular files')
+    version = tag.removeprefix('v')
+    installers = sorted([
+        dist / f'alacrterm-{version}-linux-x64.deb',
+        dist / f'alacrterm-{version}-windows-x64-setup.exe',
+        dist / f'alacrterm-{version}-macos-arm64.dmg',
+        dist / f'alacrterm-{version}-macos-arm64.app.zip',
+    ])
+    if any(not path.is_file() for path in installers):
+        raise ValueError('Required release installers are missing')
+    # Build manifests, signing intermediates and individual checksum files remain
+    # CI artifacts. Only the explicit public assets are attached to the release.
+    checksums = []
+    for path in installers:
+        with path.open('rb') as source:
+            digest = hashlib.file_digest(source, 'sha256').hexdigest()
+        checksums.append(f'{digest}  {path.name}\n')
+    checksum_file = dist / 'SHA256SUMS'
+    checksum_file.write_text(''.join(checksums), encoding='utf-8')
+    paths = [*installers, dist / 'update.json', dist / 'appcast.xml', checksum_file]
     latest = github.api('releases/latest', optional=True)
     make_latest = latest is None or stable_version(tag) >= stable_version(latest['tag_name'])
     # gh uploads every attachment as part of create. Existing releases fail rather
