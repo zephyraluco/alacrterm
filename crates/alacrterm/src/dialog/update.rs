@@ -264,6 +264,7 @@ impl Render for UpdateDialog {
                 h_flex()
                     .w_full()
                     .justify_between()
+                    .when(!available, |row| row.justify_center())
                     .gap_2()
                     .when(available && !busy, |row| {
                         row.child(
