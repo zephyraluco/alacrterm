@@ -267,14 +267,15 @@ void alacrterm_sparkle_restart_cancelled(void) {
     }
 }
 void alacrterm_sparkle_defer(void) {
-    bool hadOffer = updateState == AlacrtermAvailable || updateState == AlacrtermWaitingRestart || updateState == AlacrtermDeferred;
-    installRequested = false;
+    // GPUI polls state, so a second window may still display an old offer.
+    // Reject that window's dismissal before mutating the live install intent.
+    if (!alacrterm_defer_install(updateState, &installRequested)) { return; }
     if (pendingChoice != nil) {
         void (^choice)(SPUUserUpdateChoice) = pendingChoice;
         pendingChoice = nil;
         choice(SPUUserUpdateChoiceDismiss);
     }
-    if (hadOffer && updateState != AlacrtermFailed) {
+    if (updateState != AlacrtermFailed) {
         updateStatus(@"更新已保留，可稍后安装", AlacrtermDeferred);
     }
 }
