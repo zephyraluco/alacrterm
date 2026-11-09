@@ -19,7 +19,7 @@ use alacrterm::exit_coordinator;
 use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_kit::{
     QuitMode,
-    component::{Root, ThemeMode, TitleBar},
+    component::{Root, TitleBar},
 };
 
 /// 启动应用事件循环。
@@ -53,7 +53,7 @@ fn main() {
             updates::install(cx);
             config::load_themes(cx);
             config::apply_saved_themes(cx);
-            config::change_theme(ThemeMode::Dark, cx);
+            config::change_theme(config::saved_theme_mode(cx), cx);
             // 上次跑剩下的预览缓存(交给系统程序打开的那些副本)现在没人用了,清掉。
             // ⚠️ 必须在任何窗口打开之前。
             preview_cache::PreviewCache::install(cx);

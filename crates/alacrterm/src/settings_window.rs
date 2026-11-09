@@ -32,6 +32,7 @@ struct SettingsWindow {
     app_root: WeakEntity<AppRoot>,
     _main_window_closed: Subscription,
     _updates: Subscription,
+    _settings: Subscription,
     font_picker: Entity<SelectState<SearchableVec<SharedString>>>,
     font_status: Option<SharedString>,
     fonts_ready: bool,
@@ -58,12 +59,19 @@ impl SettingsWindow {
             .searchable(true)
         });
         let root = app_root.clone();
-        let font_selection = cx.subscribe(
+        let font_selection = cx.subscribe_in(
             &font_picker,
-            move |_, _, event: &SelectEvent<SearchableVec<SharedString>>, cx| {
+            window,
+            move |_, picker, event: &SelectEvent<SearchableVec<SharedString>>, window, cx| {
                 if let SelectEvent::Confirm(Some(family)) = event {
                     let family = family.clone();
                     update_render(&root, cx, |render| render.font_family = family);
+                    let saved = config::settings(cx).render.font_family.clone();
+                    if picker.read(cx).selected_value() != Some(&saved) {
+                        picker.update(cx, |picker, cx| {
+                            picker.set_selected_value(&saved, window, cx)
+                        });
+                    }
                 }
             },
         );
@@ -108,6 +116,15 @@ impl SettingsWindow {
             _font_scan: font_scan,
             app_root,
             _updates: cx.observe(&crate::updates::model(cx), |_, _, cx| cx.notify()),
+            _settings: cx.observe_global_in::<config::Settings>(window, |this, window, cx| {
+                let current = config::settings(cx).render.font_family.clone();
+                if this.font_picker.read(cx).selected_value() != Some(&current) {
+                    this.font_picker.update(cx, |picker, cx| {
+                        picker.set_selected_value(&current, window, cx)
+                    });
+                }
+                cx.notify();
+            }),
             _main_window_closed: cx.on_window_closed(move |cx, closed| {
                 if closed == main_window_id {
                     cx.quit();
@@ -176,7 +193,7 @@ impl SettingsWindow {
                 SettingGroup::new()
                     .item(render_item(
                         "终端配色",
-                        "立即应用到所有终端并保存。默认／自定义使用 terminal.json 中的颜色。",
+                        "立即应用到所有终端并保存。默认／自定义使用 settings.json 的 terminal 子项中的颜色。",
                         terminal_color_dropdown(self.app_root.clone(), cx),
                     ))
                     .item(render_item(
@@ -191,8 +208,8 @@ impl SettingsWindow {
                             let root = self.app_root.clone();
                             SettingField::number_input(
                                 NumberFieldOptions {
-                                    min: 6.0,
-                                    max: 48.0,
+                                    min: settings::document::FONT_SIZE.0,
+                                    max: settings::document::FONT_SIZE.1,
                                     step: 1.0,
                                 },
                                 |cx: &App| {
@@ -215,8 +232,8 @@ impl SettingsWindow {
                             let root = self.app_root.clone();
                             SettingField::number_input(
                                 NumberFieldOptions {
-                                    min: 100.0,
-                                    max: 900.0,
+                                    min: settings::document::FONT_WEIGHT.0,
+                                    max: settings::document::FONT_WEIGHT.1,
                                     step: 100.0,
                                 },
                                 |cx: &App| {
@@ -237,8 +254,8 @@ impl SettingsWindow {
                             let root = self.app_root.clone();
                             SettingField::number_input(
                                 NumberFieldOptions {
-                                    min: 0.8,
-                                    max: 2.5,
+                                    min: settings::document::LINE_HEIGHT.0,
+                                    max: settings::document::LINE_HEIGHT.1,
                                     step: 0.05,
                                 },
                                 |cx: &App| {
@@ -261,8 +278,8 @@ impl SettingsWindow {
                             let root = self.app_root.clone();
                             SettingField::number_input(
                                 NumberFieldOptions {
-                                    min: 0.0,
-                                    max: 106.0,
+                                    min: settings::document::CONTRAST.0,
+                                    max: settings::document::CONTRAST.1,
                                     step: 5.0,
                                 },
                                 |cx: &App| {
@@ -412,7 +429,7 @@ fn theme_mode_switch() -> SettingField<SharedString> {
                 } else {
                     ThemeMode::Light
                 };
-                config::change_theme(mode, cx);
+                config::set_theme_mode(mode, cx);
                 cx.refresh_windows();
             })
             .into_any_element()
@@ -439,7 +456,7 @@ fn theme_dropdown(cx: &App, mode: ThemeMode) -> SettingField<SharedString> {
     )
 }
 
-fn terminal_color_dropdown(root: WeakEntity<AppRoot>, cx: &App) -> SettingField<SharedString> {
+fn terminal_color_dropdown(_root: WeakEntity<AppRoot>, cx: &App) -> SettingField<SharedString> {
     let mut options = vec![(SharedString::default(), "默认／自定义".into())];
     let mut entries: Vec<_> = config::ColorSchemeRegistry::global(cx)
         .entries()
@@ -467,14 +484,13 @@ fn terminal_color_dropdown(root: WeakEntity<AppRoot>, cx: &App) -> SettingField<
         },
         move |value: SharedString, cx: &mut App| {
             let id = (!value.is_empty()).then_some(value);
-            let palette = config::palette_settings(id.as_deref(), cx);
-            config::select_color_scheme(id, cx);
-            update_render(&root, cx, |render| {
-                render.colors = palette.colors;
-                render.selection_color = palette.selection_color;
-                render.search_match_color = palette.search_match_color;
-                render.link_color = palette.link_color;
-            });
+            config::update(
+                settings::SettingsPatch::Terminal(serde_json::Map::from_iter([(
+                    "color_scheme".into(),
+                    serde_json::json!(id),
+                )])),
+                cx,
+            );
             cx.refresh_windows();
         },
     )
@@ -512,16 +528,10 @@ pub(crate) fn update_render(
 ) {
     let mut settings = config::settings(cx).render.clone();
     change(&mut settings);
-    if let Err(error) =
-        config::save_render_settings(&settings, config::settings(cx).color_scheme.as_deref())
-    {
-        eprintln!("[config] 保存终端设置失败，保持原设置：{error:#}");
-        return;
-    }
-    config::settings_mut(cx).render = settings.clone();
-    if let Some(root) = root.upgrade() {
-        root.update(cx, |root, cx| root.apply_render_settings(settings, cx));
-    }
+    let patch =
+        config::render_settings_patch(&settings, config::settings(cx).color_scheme.as_deref());
+    config::update(patch, cx);
+    let _ = root; // Active roots subscribe to the shared runtime snapshot.
 }
 
 impl Render for SettingsWindow {

@@ -120,7 +120,7 @@ SSH 认证支持 agent、密钥与配置的密码。默认主机密钥策略对�
 | macOS | `~/Library/Application Support/Alacrterm` |
 | Linux | `$XDG_CONFIG_HOME/alacrterm`，默认 `~/.config/alacrterm` |
 
-主要文件为 `app.json`、`terminal.json`、`sessions.json`、可选 `keymap.json` 和独立的 `update.json`。Debug 构建使用仓库根目录下被 Git 忽略的 `config/`，不与发布配置互相回退。首次保存创建目录，不自动迁移旧配置。
+主要文件为 `settings.json`、`sessions.json`、可选 `keymap.json` 和独立的 `update.json`。`settings.json` 顶层保存应用偏好，`terminal` 子项保存终端参数。Debug 构建使用仓库根目录下被 Git 忽略的 `config/`，不与发布配置互相回退。按需创建配置目录。缺少 `settings.json` 时会将同目录的 `app.json` 与 `terminal.json` 合并迁移并保留未知字段，成功写入、校验后删除旧文件；已有有效的 `settings.json` 时仅以新文件为准，并清理残留旧文件。迁移解析失败时不创建新文件，也不覆盖原配置。应用使用统一配置快照与补丁入口：先校验并原子保存，再更新运行时主题和终端；保存失败保持原设置并提示。字号、字重、行高和对比度范围由解析与控件共用。监听配置父目录以支持原子替换，防抖后在后台解析；无效外部修改保留最后有效配置，相同内容（包括自身保存、仅格式变化）不重复应用。
 
 `SettingsStore` 按字段合并，保留未知字段；损坏 JSON 不直接覆盖。配置与会话使用同目录临时文件和原子替换，保存错误返回调用方；终端数值配置集中校验。安装包不携带用户配置。
 

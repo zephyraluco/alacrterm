@@ -1,4 +1,4 @@
-//! 应用配置：终端渲染参数（`config/terminal.json`）与界面主题（`themes/global/*.json` + `config/app.json`）。
+//! 应用配置：终端渲染参数（`config/settings.json 的 terminal 子项`）与界面主题（`themes/global/*.json` + `config/settings.json`）。
 //! 运行期状态在 [`Settings`] 全局，开发配置从源码 config 读取，发布配置从系统用户目录读取，缺失项回退默认值。
 
 use settings::color_schemes::ColorScheme;
@@ -11,7 +11,7 @@ pub(crate) type ColorSchemeRegistry = crate::resource_registry::ResourceRegistry
 use gpui::{App, FontWeight, Hsla, SharedString, px};
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use serde_json::json;
-use settings::{TerminalFile, candidates, load_app_config, save_theme_choice};
+use settings::{SettingsPatch, SettingsSnapshot, TerminalFile, candidates};
 pub(crate) use settings::{read_config_file, shown_path};
 use terminal::{CursorShape, TerminalColors, rgba_color};
 use terminal_view::RenderSettings;
@@ -19,6 +19,10 @@ const THEMES_DIR: &str = "themes/global";
 const TERMINAL_PALETTES_DIR: &str = "themes/terminal";
 
 pub(crate) struct Settings {
+    theme_mode: settings::AppThemeMode,
+    snapshot: SettingsSnapshot,
+    _watcher: Option<settings::SettingsWatch>,
+    _watch_task: Option<gpui::Task<()>>,
     pub(crate) color_scheme: Option<SharedString>,
     applied_color_scheme: Option<Arc<ColorScheme>>,
     /// 终端渲染参数。
@@ -37,7 +41,11 @@ pub fn install(cx: &mut App) {
         Ok(defaults) => ColorSchemeRegistry::global_mut(cx).register_defaults(defaults),
         Err(error) => log::error!("Embedded palettes: {error:#}"),
     }
-    let file = settings::load_terminal_config();
+    let snapshot = settings::load_snapshot().unwrap_or_else(|error| {
+        log::error!("Load settings: {error:#}");
+        SettingsSnapshot::parse(json!({})).expect("default settings are valid")
+    });
+    let file = snapshot.values.terminal.clone();
     // Keep unknown IDs: a custom palette may arrive with the initial async scan.
     let color_scheme = file.color_scheme.clone().map(SharedString::from);
     let applied_color_scheme = color_scheme
@@ -48,14 +56,36 @@ pub fn install(cx: &mut App) {
     if let Some(scheme) = &applied_color_scheme {
         apply_palette(&mut render, scheme);
     }
-    let app = load_app_config();
+    let app = snapshot.values.app.clone();
     cx.set_global(Settings {
+        _watcher: None,
+        _watch_task: None,
+        snapshot,
+        theme_mode: app.theme_mode,
         render,
         color_scheme,
         applied_color_scheme,
         dark_theme: app.dark_theme.map(Into::into),
         light_theme: app.light_theme.map(Into::into),
     });
+    match settings::SettingsWatch::new(settings::write_target("config/settings.json")) {
+        Ok(watcher) => {
+            let changes = watcher.updates();
+            settings_mut(cx)._watcher = Some(watcher);
+            let task = cx.spawn(async move |cx| {
+                while let Ok(result) = changes.recv().await {
+                    cx.update(|cx| match result {
+                        Ok(snapshot) => apply_snapshot(snapshot, cx),
+                        Err(error) => {
+                            report_error(format!("设置文件无效，保持上次有效设置：{error}"), cx)
+                        }
+                    });
+                }
+            });
+            settings_mut(cx)._watch_task = Some(task);
+        }
+        Err(error) => report_error(format!("无法监听设置文件：{error:#}"), cx),
+    }
     let directories = candidates(TERMINAL_PALETTES_DIR);
     if let Some(directory) = directories
         .iter()
@@ -81,7 +111,7 @@ pub(crate) fn settings_mut(cx: &mut App) -> &mut Settings {
 
 /// Resolve only the selected palette; callers retain font and input preferences.
 pub(crate) fn palette_settings(id: Option<&str>, cx: &App) -> RenderSettings {
-    let mut file = settings::load_terminal_config();
+    let mut file = settings(cx).snapshot.values.terminal.clone();
     file.color_scheme = None;
     let mut render = RenderSettings::default();
     apply_render_settings(&mut render, file);
@@ -91,11 +121,11 @@ pub(crate) fn palette_settings(id: Option<&str>, cx: &App) -> RenderSettings {
     render
 }
 
-/// 把终端渲染参数写回 `config/terminal.json`（只覆盖设置窗口管的键）。
-pub(crate) fn save_render_settings(
+/// 把终端渲染参数写回 `config/settings.json 的 terminal 子项`（只覆盖设置窗口管的键）。
+pub(crate) fn render_settings_patch(
     settings: &RenderSettings,
     color_scheme: Option<&str>,
-) -> anyhow::Result<()> {
+) -> SettingsPatch {
     let mut map = serde_json::Map::new();
     map.insert("color_scheme".into(), json!(color_scheme));
     map.insert("font_family".into(), json!(settings.font_family));
@@ -122,7 +152,7 @@ pub(crate) fn save_render_settings(
     map.insert("cursor_blinks".into(), json!(settings.cursor_blinks));
     map.insert("suggestions".into(), json!(settings.suggestions));
 
-    settings::save_terminal_preferences(map)
+    SettingsPatch::Terminal(map)
 }
 
 /// f32 按 3 位小数收成数字。
@@ -229,15 +259,6 @@ pub(crate) fn refresh_color_scheme(cx: &mut App) -> Option<RenderSettings> {
     Some(state.render.clone())
 }
 
-pub(crate) fn select_color_scheme(id: Option<SharedString>, cx: &mut App) {
-    let applied = id
-        .as_deref()
-        .and_then(|id| ColorSchemeRegistry::global(cx).get(id));
-    let state = settings_mut(cx);
-    state.color_scheme = id;
-    state.applied_color_scheme = applied;
-}
-
 /// 把调色板里的一个键写回 [`TerminalColors`]。
 fn apply_color(colors: &mut TerminalColors, key: &str, color: Hsla) {
     match key {
@@ -304,6 +325,7 @@ pub fn load_themes(cx: &mut App) {
     eprintln!("[config] 已加载 {loaded} 个主题文件，注册表共 {total} 个主题（{shown}）");
 
     cx.observe_global::<ThemeRegistry>(|cx| {
+        apply_saved_themes(cx);
         let mode = Theme::global(cx).mode;
         change_theme(mode, cx);
     })
@@ -369,31 +391,101 @@ pub fn change_theme(mode: ThemeMode, cx: &mut App) {
     Theme::global_mut(cx).list.active_highlight = false;
 }
 
-/// 设定某个模式用哪套主题，`None` = 跟随内置主题。
-pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut App) {
-    if !apply_theme_slot(name.as_ref(), mode, cx) {
+pub fn saved_theme_mode(cx: &App) -> ThemeMode {
+    match settings(cx).theme_mode {
+        settings::AppThemeMode::Dark => ThemeMode::Dark,
+        settings::AppThemeMode::Light => ThemeMode::Light,
+    }
+}
+
+/// All user changes pass through save-before-apply. Failures leave runtime state intact.
+pub(crate) fn update(patch: SettingsPatch, cx: &mut App) -> bool {
+    match settings::commit(patch) {
+        Ok(snapshot) => {
+            apply_snapshot(snapshot, cx);
+            true
+        }
+        Err(error) => {
+            report_error(format!("保存设置失败，保持原设置：{error:#}"), cx);
+            false
+        }
+    }
+}
+
+pub(crate) fn report_error(message: String, cx: &mut App) {
+    log::error!("{message}");
+    cx.defer(move |cx| {
+        use gpui_kit::component::{WindowExt as _, notification::Notification};
+        if let Some(handle) = cx.active_window() {
+            let _ = handle.update(cx, |_, window, cx| {
+                window.push_notification(Notification::error(message), cx);
+            });
+        }
+    });
+}
+
+pub(crate) fn apply_snapshot(snapshot: SettingsSnapshot, cx: &mut App) {
+    if settings(cx).snapshot.document == snapshot.document {
         return;
     }
-
-    if mode.is_dark() {
-        settings_mut(cx).dark_theme = name;
-    } else {
-        settings_mut(cx).light_theme = name;
+    let mut render = RenderSettings::default();
+    apply_render_settings(&mut render, snapshot.values.terminal.clone());
+    let color_scheme = snapshot
+        .values
+        .terminal
+        .color_scheme
+        .clone()
+        .map(SharedString::from);
+    let palette = color_scheme
+        .as_deref()
+        .and_then(|id| ColorSchemeRegistry::global(cx).get(id));
+    if let Some(palette) = &palette {
+        apply_palette(&mut render, palette);
     }
-    let settings = settings(cx);
-    if let Err(error) = save_theme_choice(
-        settings.dark_theme.as_deref(),
-        settings.light_theme.as_deref(),
-    ) {
-        log::error!("Save theme preferences: {error:#}");
-    }
-
-    let mode = Theme::global(cx).mode;
-    change_theme(mode, cx);
+    let app = &snapshot.values.app;
+    let state = settings_mut(cx);
+    state.theme_mode = app.theme_mode;
+    state.dark_theme = app.dark_theme.clone().map(Into::into);
+    state.light_theme = app.light_theme.clone().map(Into::into);
+    state.render = render;
+    state.color_scheme = color_scheme;
+    state.applied_color_scheme = palette;
+    state.snapshot = snapshot;
+    apply_saved_themes(cx);
+    change_theme(saved_theme_mode(cx), cx);
     cx.refresh_windows();
 }
 
-/// 启动时把 `config/app.json` 里的主题选择挂到两个槽位上。
+pub(crate) fn set_theme_mode(mode: ThemeMode, cx: &mut App) {
+    let mode = if mode.is_dark() { "dark" } else { "light" };
+    update(
+        SettingsPatch::Application(serde_json::Map::from_iter([(
+            "theme_mode".into(),
+            json!(mode),
+        )])),
+        cx,
+    );
+}
+
+pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut App) {
+    if let Some(name) = &name
+        && !ThemeRegistry::global(cx).themes().contains_key(name)
+    {
+        report_error(format!("找不到主题：{name}"), cx);
+        return;
+    }
+    let field = if mode.is_dark() {
+        "dark_theme"
+    } else {
+        "light_theme"
+    };
+    update(
+        SettingsPatch::Application(serde_json::Map::from_iter([(field.into(), json!(name))])),
+        cx,
+    );
+}
+
+/// 启动时把 `config/settings.json` 里的主题选择挂到两个槽位上。
 pub fn apply_saved_themes(cx: &mut App) {
     let (dark, light) = {
         let settings = settings(cx);
