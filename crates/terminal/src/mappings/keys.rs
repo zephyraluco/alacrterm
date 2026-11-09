@@ -334,7 +334,11 @@ mod test {
 
         for (lower, upper) in letters_lower.zip(letters_upper) {
             assert_eq!(
-                to_esc_str(&parse_keystroke(&format!("ctrl-shift-{}", lower)), mode, false),
+                to_esc_str(
+                    &parse_keystroke(&format!("ctrl-shift-{}", lower)),
+                    mode,
+                    false
+                ),
                 to_esc_str(&parse_keystroke(&format!("ctrl-{}", upper)), mode, false),
                 "On letter: {}/{}",
                 lower,
@@ -348,8 +352,12 @@ mod test {
         let ascii_printable = ' '..='~';
         for character in ascii_printable {
             assert_eq!(
-                to_esc_str(&parse_keystroke(&format!("alt-{}", character)), Modes::NONE, true)
-                    .unwrap(),
+                to_esc_str(
+                    &parse_keystroke(&format!("alt-{}", character)),
+                    Modes::NONE,
+                    true
+                )
+                .unwrap(),
                 format!("\x1b{}", character)
             );
         }
