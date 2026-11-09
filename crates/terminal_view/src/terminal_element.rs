@@ -1139,7 +1139,7 @@ impl TerminalElement {
             ),
         );
 
-        self.interactivity.on_scroll_wheel({
+        self.interactivity.on_scroll({
             let terminal_view = self.terminal_view.clone();
             move |e, _window, cx| {
                 terminal_view.update(cx, |terminal_view, cx| {

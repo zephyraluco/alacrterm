@@ -336,7 +336,7 @@ impl FilesState {
                         window.prevent_default();
                         cx.stop_propagation();
                     })
-                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
                     .child(
                         v_flex()
                             .id("path-candidates")
