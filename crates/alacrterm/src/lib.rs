@@ -162,12 +162,16 @@ impl AppRoot {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dock = Self::build_dock(window, cx);
         let dock_sub = cx.observe(&dock, |_, _, cx| cx.notify());
-        let palette_watch = cx.observe_global::<config::ColorSchemeRegistry>(|root, cx| {
-            if let Some(render) = config::refresh_color_scheme(cx) {
-                root.apply_render_settings(render, cx);
-            }
+        let palette_watch = cx.observe_global::<config::ColorSchemeRegistry>(|_, cx| {
+            config::refresh_color_scheme(cx);
             cx.refresh_windows();
         });
+        cx.observe_global::<config::Settings>(|root, cx| {
+            let render = config::settings(cx).render.clone();
+            root.apply_render_settings(render, cx);
+            cx.refresh_windows();
+        })
+        .detach();
         let sessions = cx.new(|_| SessionsState::new());
         let app_root = cx.weak_entity();
         let transfers = cx.new(|_| TransferManager::default());

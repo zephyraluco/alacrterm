@@ -215,81 +215,16 @@ fn unified_store() -> anyhow::Result<SettingsStore> {
     unified_store_at(&write_target(SETTINGS_CONFIG_RELATIVE_PATH))
 }
 
-pub fn load_app_config() -> AppFile {
-    match unified_store().and_then(|store| Ok(serde_json::from_value(store.read()?)?)) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("[config] Load settings.json application preferences: {error:#}");
-            AppFile::default()
-        }
-    }
-}
-
-/// 把主题选择写回 `config/settings.json`。
-pub fn save_theme_choice(dark: Option<&str>, light: Option<&str>) -> anyhow::Result<()> {
-    unified_store()?.update(serde_json::Map::from_iter([
-        ("dark_theme".into(), json!(dark)),
-        ("light_theme".into(), json!(light)),
-    ]))
-}
-
-pub fn save_theme_mode(mode: AppThemeMode) -> anyhow::Result<()> {
-    unified_store()?.update(serde_json::Map::from_iter([(
-        "theme_mode".into(),
-        json!(mode),
-    )]))
-}
-
-/// Load terminal preferences, preserving renderer defaults for omitted fields.
-pub fn load_terminal_config() -> TerminalFile {
-    let result = (|| -> anyhow::Result<TerminalFile> {
-        let document = unified_store()?.read()?;
-        let mut file: TerminalFile = serde_json::from_value(
-            document
-                .get("terminal")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-        )?;
-        file.validate();
-        Ok(file)
-    })();
-    match result {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("[config] Load settings.json terminal preferences: {error:#}");
-            TerminalFile::default()
-        }
-    }
-}
-
-/// Save only UI-owned preferences, preserving colors and unknown keys.
-pub fn save_terminal_preferences(
-    preferences: serde_json::Map<String, serde_json::Value>,
-) -> anyhow::Result<()> {
-    let store = unified_store()?;
-    save_terminal_preferences_at(&store.path, preferences)
-}
-
+#[cfg(test)]
 fn save_terminal_preferences_at(
     path: &Path,
     preferences: serde_json::Map<String, serde_json::Value>,
 ) -> anyhow::Result<()> {
-    let mut file: TerminalFile =
-        serde_json::from_value(serde_json::Value::Object(preferences.clone()))?;
-    if file.validate() {
-        anyhow::bail!("terminal preferences contain out-of-range values");
-    }
-    let store = SettingsStore::new(path.to_owned());
-    let mut document = store.read()?;
-    let root = document
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("settings must be a JSON object"))?;
-    let terminal = root.entry("terminal").or_insert_with(|| json!({}));
-    terminal
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("terminal settings must be a JSON object"))?
-        .extend(preferences);
-    store.update(root.clone())
+    document::commit_at(
+        &SettingsStore::new(path.to_owned()),
+        SettingsPatch::Terminal(preferences),
+    )?;
+    Ok(())
 }
 
 impl TerminalFile {
