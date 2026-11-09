@@ -19,6 +19,7 @@ pub mod config;
 mod dialog;
 mod file_icons;
 mod file_open;
+mod system_fonts;
 use util::format;
 mod editor_window;
 pub mod exit_coordinator;

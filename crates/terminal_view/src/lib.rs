@@ -27,8 +27,8 @@ use std::{cell::Cell, ops::Range as StdRange, path::PathBuf, rc::Rc, sync::Arc, 
 
 use gpui::{
     App, AppContext as _, AsyncApp, Entity, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, rgb,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollEvent, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, rgb,
 };
 use terminal::{
     Event as TerminalEvent, HostKeyPrompt, LaunchOptions, Modes, SshFs, Terminal, TerminalBounds,
@@ -451,7 +451,7 @@ impl TerminalView {
     }
 
     /// 滚轮滚动（由 `TerminalElement` 的滚动监听回调调用）。
-    pub(crate) fn scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn scroll_wheel(&mut self, event: &ScrollEvent, cx: &mut gpui::Context<Self>) {
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |term, _cx| term.scroll_wheel(event, 1.0));
         }

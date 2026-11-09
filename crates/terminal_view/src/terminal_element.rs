@@ -1139,7 +1139,7 @@ impl TerminalElement {
             ),
         );
 
-        self.interactivity.on_scroll_wheel({
+        self.interactivity.on_scroll({
             let terminal_view = self.terminal_view.clone();
             move |e, _window, cx| {
                 terminal_view.update(cx, |terminal_view, cx| {
@@ -1537,7 +1537,7 @@ impl Element for TerminalElement {
             self.register_mouse_listeners(layout.mode, &layout.hitbox, window, cx);
 
             // 悬停在超链接上时显示手型光标
-            let hovered_link = window.modifiers().secondary()
+            let hovered_link = window.modifiers().secondary(cx)
                 && bounds.contains(&window.mouse_position())
                 && self
                     .terminal

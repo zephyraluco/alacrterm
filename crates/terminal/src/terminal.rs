@@ -66,7 +66,7 @@ pub use ssh::{
 use gpui::{
     App, AppContext as _, BackgroundExecutor, Bounds, ClipboardItem, Context, EventEmitter, Hsla,
     Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point as GpuiPoint, Rgba, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, black, px,
+    Point as GpuiPoint, Rgba, ScrollEvent, Size, Task, TouchPhase, Window, actions, black, px,
 };
 
 use crate::alacritty::{
@@ -1691,7 +1691,7 @@ impl Terminal {
             InternalEvent::Scroll(scroll) => {
                 trace!("Scrolling: scroll={scroll:?}");
                 scroll_display(term, *scroll);
-                self.refresh_hovered_word(window);
+                self.refresh_hovered_word(window, cx);
 
                 if self.vi_mode_enabled {
                     update_vi_cursor_for_scroll(term, *scroll);
@@ -1751,12 +1751,12 @@ impl Terminal {
             InternalEvent::ScrollToPoint(point) => {
                 trace!("Scrolling to point: point={point:?}");
                 scroll_to_point(term, *point);
-                self.refresh_hovered_word(window);
+                self.refresh_hovered_word(window, cx);
             }
             InternalEvent::MoveViCursorToPoint(point) => {
                 trace!("Move vi cursor to point: point={point:?}");
                 vi_goto_point(term, *point);
-                self.refresh_hovered_word(window);
+                self.refresh_hovered_word(window, cx);
             }
             InternalEvent::ToggleViMode => {
                 trace!("Toggling vi mode");
@@ -2204,9 +2204,9 @@ impl Terminal {
             .terminal_bounds
             .bounds
             .contains(&window.mouse_position())
-            && modifiers.secondary()
+            && modifiers.secondary(cx)
         {
-            self.refresh_hovered_word(window);
+            self.refresh_hovered_word(window, cx);
         }
         cx.notify();
     }
@@ -2306,14 +2306,19 @@ impl Terminal {
                 }
             }
         } else {
-            self.schedule_find_hyperlink(e.modifiers, e.position);
+            self.schedule_find_hyperlink(e.modifiers, e.position, cx);
         }
         cx.notify();
     }
 
-    fn schedule_find_hyperlink(&mut self, modifiers: Modifiers, position: GpuiPoint<Pixels>) {
+    fn schedule_find_hyperlink(
+        &mut self,
+        modifiers: Modifiers,
+        position: GpuiPoint<Pixels>,
+        cx: &App,
+    ) {
         if self.selection_phase == SelectionPhase::Selecting
-            || !modifiers.secondary()
+            || !modifiers.secondary(cx)
             || !self.last_content.terminal_bounds.bounds.contains(&position)
         {
             self.last_content.last_hovered_word = None;
@@ -2439,7 +2444,7 @@ impl Terminal {
         Some(scroll_lines.clamp(-3, 3))
     }
 
-    pub fn mouse_down(&mut self, e: &MouseDownEvent, _cx: &mut Context<Self>) {
+    pub fn mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         let point = grid_point(
             position,
@@ -2448,7 +2453,7 @@ impl Terminal {
         );
 
         if e.button == MouseButton::Left
-            && e.modifiers.secondary()
+            && e.modifiers.secondary(cx)
             && !self.mouse_mode(e.modifiers.shift)
         {
             self.mouse_down_hyperlink = self.find_hyperlink_at_point(point);
@@ -2509,7 +2514,7 @@ impl Terminal {
                 }
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 MouseButton::Middle => {
-                    if let Some(item) = _cx.read_from_primary() {
+                    if let Some(item) = cx.read_from_primary() {
                         let text = item.text().unwrap_or_default();
                         self.paste(&text);
                     }
@@ -2569,7 +2574,7 @@ impl Terminal {
                     .and_then(|cell| cell.hyperlink())
                 {
                     cx.open_url(link.uri());
-                } else if e.modifiers.secondary() {
+                } else if e.modifiers.secondary(cx) {
                     self.events
                         .push_back(InternalEvent::FindHyperlink(position, true));
                 }
@@ -2582,8 +2587,8 @@ impl Terminal {
     }
 
     ///Scroll the terminal
-    pub fn scroll_wheel(&mut self, e: &ScrollWheelEvent, scroll_multiplier: f32) {
-        let mouse_mode = self.mouse_mode(e.shift);
+    pub fn scroll_wheel(&mut self, e: &ScrollEvent, scroll_multiplier: f32) {
+        let mouse_mode = self.mouse_mode(e.modifiers.shift);
         let scroll_multiplier = if mouse_mode { 1. } else { scroll_multiplier };
 
         if let Some(scroll_lines) = self.determine_scroll_lines(e, scroll_multiplier)
@@ -2606,7 +2611,7 @@ impl Terminal {
                 .last_content
                 .mode
                 .contains(Modes::ALT_SCREEN | Modes::ALTERNATE_SCROLL)
-                && !e.shift
+                && !e.modifiers.shift
             {
                 self.write_to_pty(alt_scroll(scroll_lines));
             } else {
@@ -2616,15 +2621,11 @@ impl Terminal {
         }
     }
 
-    fn refresh_hovered_word(&mut self, window: &Window) {
-        self.schedule_find_hyperlink(window.modifiers(), window.mouse_position());
+    fn refresh_hovered_word(&mut self, window: &Window, cx: &App) {
+        self.schedule_find_hyperlink(window.modifiers(), window.mouse_position(), cx);
     }
 
-    fn determine_scroll_lines(
-        &mut self,
-        e: &ScrollWheelEvent,
-        scroll_multiplier: f32,
-    ) -> Option<i32> {
+    fn determine_scroll_lines(&mut self, e: &ScrollEvent, scroll_multiplier: f32) -> Option<i32> {
         let line_height = self.last_content.terminal_bounds.line_height;
         match e.touch_phase {
             /* Reset scroll state on started */

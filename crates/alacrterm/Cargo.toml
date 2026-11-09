@@ -29,8 +29,9 @@ dirs.workspace = true
 futures.workspace = true
 log.workspace = true
 open = "5.4.5"
-sha2 = "0.10"
-similar = "2.7"
+sha2 = "0.11"
+similar = "3"
+font-kit = "0.14.3"
 rust-embed = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
