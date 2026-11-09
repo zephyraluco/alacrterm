@@ -117,10 +117,21 @@ pub struct TerminalFile {
     pub link_color: Option<String>,
 }
 
+/// Persisted UI mode. Older configurations and unknown mode names default to dark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppThemeMode {
+    Light,
+    #[default]
+    #[serde(other)]
+    Dark,
+}
+
 /// `config/app.json`：应用级偏好。
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppFile {
+    pub theme_mode: AppThemeMode,
     /// 深色 / 浅色槽位用的主题名；`null` = 跟随内置主题。
     pub dark_theme: Option<String>,
     pub light_theme: Option<String>,
@@ -189,6 +200,12 @@ pub fn save_theme_choice(dark: Option<&str>, light: Option<&str>) -> anyhow::Res
     ]))
 }
 
+pub fn save_theme_mode(mode: AppThemeMode) -> anyhow::Result<()> {
+    SettingsStore::new(write_target(APP_CONFIG_RELATIVE_PATH)).update(serde_json::Map::from_iter([
+        ("theme_mode".into(), json!(mode)),
+    ]))
+}
+
 /// Load terminal preferences, preserving renderer defaults for omitted fields.
 pub fn load_terminal_config() -> TerminalFile {
     let Some((path, text)) = read_config_file(TERMINAL_CONFIG_RELATIVE_PATH) else {
@@ -248,6 +265,28 @@ impl TerminalFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_mode_defaults_preserve_legacy_theme_choices() {
+        for document in [
+            r#"{"dark_theme":"Nord","light_theme":"One Light"}"#,
+            r#"{"theme_mode":"unknown","dark_theme":"Nord","light_theme":"One Light"}"#,
+        ] {
+            let config: AppFile = serde_json::from_str(document).unwrap();
+            assert_eq!(config.theme_mode, AppThemeMode::Dark);
+            assert_eq!(config.dark_theme.as_deref(), Some("Nord"));
+            assert_eq!(config.light_theme.as_deref(), Some("One Light"));
+        }
+    }
+
+    #[test]
+    fn theme_mode_round_trips_both_choices() {
+        for (text, expected) in [("dark", AppThemeMode::Dark), ("light", AppThemeMode::Light)] {
+            let config: AppFile = serde_json::from_value(json!({"theme_mode": text})).unwrap();
+            assert_eq!(config.theme_mode, expected);
+            assert_eq!(serde_json::to_value(&config).unwrap()["theme_mode"], text);
+        }
+    }
     #[cfg(not(debug_assertions))]
     #[test]
     fn configuration_has_only_the_user_directory_candidate() {

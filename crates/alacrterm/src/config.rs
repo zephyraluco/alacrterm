@@ -19,6 +19,7 @@ const THEMES_DIR: &str = "themes/global";
 const TERMINAL_PALETTES_DIR: &str = "themes/terminal";
 
 pub(crate) struct Settings {
+    theme_mode: settings::AppThemeMode,
     pub(crate) color_scheme: Option<SharedString>,
     applied_color_scheme: Option<Arc<ColorScheme>>,
     /// 终端渲染参数。
@@ -50,6 +51,7 @@ pub fn install(cx: &mut App) {
     }
     let app = load_app_config();
     cx.set_global(Settings {
+        theme_mode: app.theme_mode,
         render,
         color_scheme,
         applied_color_scheme,
@@ -367,6 +369,28 @@ pub(crate) fn theme_options(cx: &App, mode: ThemeMode) -> Vec<(SharedString, Sha
 pub fn change_theme(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
     Theme::global_mut(cx).list.active_highlight = false;
+}
+
+pub fn saved_theme_mode(cx: &App) -> ThemeMode {
+    match settings(cx).theme_mode {
+        settings::AppThemeMode::Dark => ThemeMode::Dark,
+        settings::AppThemeMode::Light => ThemeMode::Light,
+    }
+}
+
+/// Only explicit user changes write preferences; initialization and hot reload
+/// apply the theme without creating or rewriting the configuration document.
+pub(crate) fn set_theme_mode(mode: ThemeMode, cx: &mut App) {
+    let saved = if mode.is_dark() {
+        settings::AppThemeMode::Dark
+    } else {
+        settings::AppThemeMode::Light
+    };
+    if let Err(error) = settings::save_theme_mode(saved) {
+        log::error!("Save theme mode: {error:#}");
+    }
+    settings_mut(cx).theme_mode = saved;
+    change_theme(mode, cx);
 }
 
 /// 设定某个模式用哪套主题，`None` = 跟随内置主题。

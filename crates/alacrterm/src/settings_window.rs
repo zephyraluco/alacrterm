@@ -412,7 +412,7 @@ fn theme_mode_switch() -> SettingField<SharedString> {
                 } else {
                     ThemeMode::Light
                 };
-                config::change_theme(mode, cx);
+                config::set_theme_mode(mode, cx);
                 cx.refresh_windows();
             })
             .into_any_element()
