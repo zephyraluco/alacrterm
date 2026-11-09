@@ -1537,7 +1537,7 @@ impl Element for TerminalElement {
             self.register_mouse_listeners(layout.mode, &layout.hitbox, window, cx);
 
             // 悬停在超链接上时显示手型光标
-            let hovered_link = window.modifiers().secondary()
+            let hovered_link = window.modifiers().secondary(cx)
                 && bounds.contains(&window.mouse_position())
                 && self
                     .terminal

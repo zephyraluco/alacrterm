@@ -17,15 +17,15 @@
 //! gpui 的键位解析先比 context 深度（深者优先）、再比注册顺序（大者优先），
 //! 所以这里在 `gpui_kit::init` 之后追加即可获得更高优先级。
 //!
-//! ⚠️ `use_key_equivalents`（macOS 菜单用的键位等价）不支持：本模块与 `KeyBinding::new`
-//! 一样用 [`DummyKeyboardMapper`]，该开关在它上面无效果。
+//! ⚠️ `use_key_equivalents`（macOS 菜单用的键位等价）固定传 `false`，暂时不支持；
+//! 键位解析走 [`gpui::KeyBinding::load`]，即按宿主 OS 解析 `secondary-` 等别名。
 
 use settings::keymap::{BindingAction, parse_sections};
 use std::rc::Rc;
 #[cfg(test)]
 use util::strip_json_comments as strip_jsonc;
 
-use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, NoAction};
+use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, NoAction};
 
 use crate::assets::KeymapAssets;
 use crate::config;
@@ -115,21 +115,14 @@ fn build_binding(
             .map_err(|error| error.to_string())?,
     };
 
-    KeyBinding::load(
-        keystrokes,
-        action,
-        predicate,
-        false,
-        None,
-        &DummyKeyboardMapper,
-    )
-    .map_err(|error| error.to_string())
+    KeyBinding::load(keystrokes, action, predicate, false, None, cx)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::Keystroke;
+    use gpui::{Keystroke, OperatingSystem};
 
     /// 三个平台的内嵌默认 keymap 都要能解析出来（macOS 的资产本机跑不到，
     /// 只能靠这条测试兜底：键位 / context 必须合法，动作名必须带命名空间）。
@@ -148,6 +141,15 @@ mod tests {
             let sections = parse_sections(&text, asset);
             assert!(!sections.is_empty(), "{asset} 一节都没解析出来");
 
+            // 资产是分平台的，`secondary-` 这类别名要按对应平台解析。
+            let os = if asset.contains("macos") {
+                OperatingSystem::Mac
+            } else if asset.contains("windows") {
+                OperatingSystem::Windows
+            } else {
+                OperatingSystem::Linux
+            };
+
             let mut names = Vec::new();
             for section in &sections {
                 if let Some(context) = section.context.as_deref()
@@ -157,7 +159,7 @@ mod tests {
                 }
                 for (keystrokes, action) in &section.bindings {
                     for part in keystrokes.split_whitespace() {
-                        if let Err(error) = Keystroke::parse(part) {
+                        if let Err(error) = Keystroke::parse_with_os(part, os) {
                             panic!("{asset} 的键位 `{keystrokes}` 非法：{error}");
                         }
                     }

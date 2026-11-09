@@ -255,9 +255,14 @@ fn modifier_code(keystroke: &Keystroke) -> u32 {
 
 #[cfg(test)]
 mod test {
-    use gpui::Modifiers;
+    use gpui::{Modifiers, OperatingSystem};
 
     use super::*;
+
+    /// `Keystroke::parse` 只接受 `&'static str`，动态构造的键位必须走 `parse_with_os`。
+    fn parse_keystroke(source: &str) -> Keystroke {
+        Keystroke::parse_with_os(source, OperatingSystem::Linux).unwrap()
+    }
 
     #[test]
     fn test_plain_inputs() {
@@ -329,16 +334,8 @@ mod test {
 
         for (lower, upper) in letters_lower.zip(letters_upper) {
             assert_eq!(
-                to_esc_str(
-                    &Keystroke::parse(&format!("ctrl-shift-{}", lower)).unwrap(),
-                    mode,
-                    false
-                ),
-                to_esc_str(
-                    &Keystroke::parse(&format!("ctrl-{}", upper)).unwrap(),
-                    mode,
-                    false
-                ),
+                to_esc_str(&parse_keystroke(&format!("ctrl-shift-{}", lower)), mode, false),
+                to_esc_str(&parse_keystroke(&format!("ctrl-{}", upper)), mode, false),
                 "On letter: {}/{}",
                 lower,
                 upper
@@ -351,12 +348,8 @@ mod test {
         let ascii_printable = ' '..='~';
         for character in ascii_printable {
             assert_eq!(
-                to_esc_str(
-                    &Keystroke::parse(&format!("alt-{}", character)).unwrap(),
-                    Modes::NONE,
-                    true
-                )
-                .unwrap(),
+                to_esc_str(&parse_keystroke(&format!("alt-{}", character)), Modes::NONE, true)
+                    .unwrap(),
                 format!("\x1b{}", character)
             );
         }
@@ -369,12 +362,7 @@ mod test {
 
         for key in gpui_keys {
             assert_ne!(
-                to_esc_str(
-                    &Keystroke::parse(&format!("alt-{}", key)).unwrap(),
-                    Modes::NONE,
-                    true
-                )
-                .unwrap(),
+                to_esc_str(&parse_keystroke(&format!("alt-{}", key)), Modes::NONE, true).unwrap(),
                 format!("\x1b{}", key)
             );
         }
