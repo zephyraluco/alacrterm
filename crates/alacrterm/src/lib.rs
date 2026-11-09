@@ -472,13 +472,6 @@ impl Render for AppRoot {
                             .overflow_hidden()
                             .child(self.dock.clone()),
                     )
-                    .child(self.sidebar.update(cx, |sidebar, cx| {
-                        sidebar.render_status_bar(
-                            &self.right_sidebar,
-                            self.system_monitor.clone(),
-                            cx,
-                        )
-                    }))
                     .into_any_element();
             }
         }
