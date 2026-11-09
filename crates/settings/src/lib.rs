@@ -10,9 +10,7 @@ use std::{
 };
 pub use suggestions::SuggestionSettings;
 
-const TERMINAL_CONFIG_RELATIVE_PATH: &str = "config/terminal.json";
-
-const APP_CONFIG_RELATIVE_PATH: &str = "config/app.json";
+const SETTINGS_CONFIG_RELATIVE_PATH: &str = "config/settings.json";
 
 const SESSIONS_CONFIG_RELATIVE_PATH: &str = "config/sessions.json";
 
@@ -97,7 +95,7 @@ pub fn shown_path(path: &Path) -> String {
         .to_string()
 }
 
-/// `config/terminal.json` 的结构；字段全可选。
+/// `config/settings.json` 的 `terminal` 子项；字段全可选。
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TerminalFile {
@@ -127,7 +125,7 @@ pub enum AppThemeMode {
     Dark,
 }
 
-/// `config/app.json`：应用级偏好。
+/// `config/settings.json` 顶层的应用级偏好。
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppFile {
@@ -172,52 +170,90 @@ impl SettingsStore {
     }
 }
 
-pub fn load_app_config() -> AppFile {
-    let Some((path, text)) = read_config_file(APP_CONFIG_RELATIVE_PATH) else {
-        return AppFile::default();
-    };
-
-    match serde_json::from_str(&text) {
-        Ok(file) => {
-            eprintln!("[config] 应用偏好已加载：{}", shown_path(&path));
-            file
+/// Migrate once without deleting the originals. An existing settings.json is
+/// authoritative, including omitted keys; legacy values must not reappear later.
+fn unified_store_at(path: &Path) -> anyhow::Result<SettingsStore> {
+    let store = SettingsStore::new(path.to_owned());
+    if path.try_exists()? {
+        return Ok(store);
+    }
+    let directory = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing settings directory"))?;
+    let read_legacy = |name: &str| -> anyhow::Result<Option<serde_json::Value>> {
+        let file = directory.join(name);
+        match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text)?;
+                anyhow::ensure!(
+                    value.is_object(),
+                    "{} must contain a JSON object",
+                    file.display()
+                );
+                Ok(Some(value))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
         }
+    };
+    let app = read_legacy("app.json")?;
+    let terminal = read_legacy("terminal.json")?;
+    if app.is_some() || terminal.is_some() {
+        let mut document = app.unwrap_or_else(|| json!({}));
+        if let Some(terminal) = terminal {
+            document["terminal"] = terminal;
+        }
+        store.update(document.as_object().unwrap().clone())?;
+    }
+    Ok(store)
+}
+
+fn unified_store() -> anyhow::Result<SettingsStore> {
+    unified_store_at(&write_target(SETTINGS_CONFIG_RELATIVE_PATH))
+}
+
+pub fn load_app_config() -> AppFile {
+    match unified_store().and_then(|store| Ok(serde_json::from_value(store.read()?)?)) {
+        Ok(file) => file,
         Err(error) => {
-            eprintln!(
-                "[config] 应用偏好 {} 解析失败（改用默认）：{error}",
-                path.display()
-            );
+            eprintln!("[config] Load settings.json application preferences: {error:#}");
             AppFile::default()
         }
     }
 }
 
-/// 把主题选择写回 `config/app.json`。
+/// 把主题选择写回 `config/settings.json`。
 pub fn save_theme_choice(dark: Option<&str>, light: Option<&str>) -> anyhow::Result<()> {
-    SettingsStore::new(write_target(APP_CONFIG_RELATIVE_PATH)).update(serde_json::Map::from_iter([
+    unified_store()?.update(serde_json::Map::from_iter([
         ("dark_theme".into(), json!(dark)),
         ("light_theme".into(), json!(light)),
     ]))
 }
 
 pub fn save_theme_mode(mode: AppThemeMode) -> anyhow::Result<()> {
-    SettingsStore::new(write_target(APP_CONFIG_RELATIVE_PATH)).update(serde_json::Map::from_iter([
-        ("theme_mode".into(), json!(mode)),
-    ]))
+    unified_store()?.update(serde_json::Map::from_iter([(
+        "theme_mode".into(),
+        json!(mode),
+    )]))
 }
 
 /// Load terminal preferences, preserving renderer defaults for omitted fields.
 pub fn load_terminal_config() -> TerminalFile {
-    let Some((path, text)) = read_config_file(TERMINAL_CONFIG_RELATIVE_PATH) else {
-        return TerminalFile::default();
-    };
-    match serde_json::from_str(&text) {
-        Ok(mut file) => {
-            TerminalFile::validate(&mut file);
-            file
-        }
+    let result = (|| -> anyhow::Result<TerminalFile> {
+        let document = unified_store()?.read()?;
+        let mut file: TerminalFile = serde_json::from_value(
+            document
+                .get("terminal")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )?;
+        file.validate();
+        Ok(file)
+    })();
+    match result {
+        Ok(file) => file,
         Err(error) => {
-            eprintln!("[config] {}: {error}", path.display());
+            eprintln!("[config] Load settings.json terminal preferences: {error:#}");
             TerminalFile::default()
         }
     }
@@ -227,7 +263,8 @@ pub fn load_terminal_config() -> TerminalFile {
 pub fn save_terminal_preferences(
     preferences: serde_json::Map<String, serde_json::Value>,
 ) -> anyhow::Result<()> {
-    save_terminal_preferences_at(&write_target(TERMINAL_CONFIG_RELATIVE_PATH), preferences)
+    let store = unified_store()?;
+    save_terminal_preferences_at(&store.path, preferences)
 }
 
 fn save_terminal_preferences_at(
@@ -239,7 +276,17 @@ fn save_terminal_preferences_at(
     if file.validate() {
         anyhow::bail!("terminal preferences contain out-of-range values");
     }
-    SettingsStore::new(path.to_owned()).update(preferences)
+    let store = SettingsStore::new(path.to_owned());
+    let mut document = store.read()?;
+    let root = document
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("settings must be a JSON object"))?;
+    let terminal = root.entry("terminal").or_insert_with(|| json!({}));
+    terminal
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("terminal settings must be a JSON object"))?
+        .extend(preferences);
+    store.update(root.clone())
 }
 
 impl TerminalFile {
@@ -266,6 +313,90 @@ impl TerminalFile {
 mod tests {
     use super::*;
 
+    fn migration_fixture() -> (util::file_cache::FileCache, util::file_cache::CacheLease) {
+        let cache = util::file_cache::FileCache::new(
+            &std::env::temp_dir().join(format!("alacrterm-migrate-{}", std::process::id())),
+        );
+        let lease = cache.allocate("settings.json");
+        (cache, lease)
+    }
+
+    #[test]
+    fn migration_keeps_legacy_values_and_unknown_fields_and_does_not_repeat() {
+        let (_cache, lease) = migration_fixture();
+        let directory = lease.path().parent().unwrap();
+        let app = r#"{"theme_mode":"light","dark_theme":"Nord","future_app":true}"#;
+        let terminal = r##"{"font_size":17,"colors":{"terminal_background":"#123456"},"future_terminal":true}"##;
+        std::fs::write(directory.join("app.json"), app).unwrap();
+        std::fs::write(directory.join("terminal.json"), terminal).unwrap();
+        let store = unified_store_at(lease.path()).unwrap();
+        let saved = store.read().unwrap();
+        assert_eq!(saved["theme_mode"], "light");
+        assert_eq!(saved["dark_theme"], "Nord");
+        assert_eq!(saved["future_app"], true);
+        assert_eq!(saved["terminal"]["font_size"], 17);
+        assert_eq!(saved["terminal"]["future_terminal"], true);
+        assert_eq!(
+            saved["terminal"]["colors"]["terminal_background"],
+            "#123456"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("app.json")).unwrap(),
+            app
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("terminal.json")).unwrap(),
+            terminal
+        );
+        // Existing new settings are authoritative even when legacy values change.
+        std::fs::write(directory.join("app.json"), r#"{"theme_mode":"dark"}"#).unwrap();
+        assert_eq!(
+            unified_store_at(lease.path()).unwrap().read().unwrap(),
+            saved
+        );
+        store
+            .update(serde_json::Map::from_iter([(
+                "theme_mode".into(),
+                json!("dark"),
+            )]))
+            .unwrap();
+        assert_eq!(store.read().unwrap()["terminal"], saved["terminal"]);
+    }
+
+    #[test]
+    fn migration_accepts_either_legacy_file_and_no_legacy_files() {
+        for legacy in [Some("app.json"), Some("terminal.json"), None] {
+            let (_cache, lease) = migration_fixture();
+            if let Some(name) = legacy {
+                std::fs::write(
+                    lease.path().parent().unwrap().join(name),
+                    r#"{"future":true}"#,
+                )
+                .unwrap();
+            }
+            let document = unified_store_at(lease.path()).unwrap().read().unwrap();
+            match legacy {
+                Some("app.json") => assert_eq!(document["future"], true),
+                Some(_) => assert_eq!(document["terminal"]["future"], true),
+                None => assert!(!lease.path().exists()),
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_legacy_or_terminal_section_is_never_overwritten() {
+        let (_cache, lease) = migration_fixture();
+        let legacy = lease.path().parent().unwrap().join("app.json");
+        std::fs::write(&legacy, "{").unwrap();
+        assert!(unified_store_at(lease.path()).is_err());
+        assert!(!lease.path().exists());
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "{");
+        let invalid = r#"{"theme_mode":"light","terminal":[]}"#;
+        std::fs::write(lease.path(), invalid).unwrap();
+        assert!(save_terminal_preferences_at(lease.path(), serde_json::Map::new()).is_err());
+        assert_eq!(std::fs::read_to_string(lease.path()).unwrap(), invalid);
+    }
+
     #[test]
     fn theme_mode_defaults_preserve_legacy_theme_choices() {
         for document in [
@@ -290,7 +421,7 @@ mod tests {
     #[cfg(not(debug_assertions))]
     #[test]
     fn configuration_has_only_the_user_directory_candidate() {
-        for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
+        for name in ["settings.json", "sessions.json", "keymap.json"] {
             let relative = format!("config/{name}");
             assert_eq!(
                 candidates(&relative),
@@ -302,7 +433,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn development_configuration_stays_in_the_source_directory() {
-        for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
+        for name in ["settings.json", "sessions.json", "keymap.json"] {
             let relative = format!("config/{name}");
             assert_eq!(
                 candidates(&relative),
@@ -318,7 +449,7 @@ mod tests {
     #[test]
     fn user_paths_separate_configuration_from_bundled_resources() {
         let base = Path::new("AppData/Roaming");
-        for name in ["app.json", "terminal.json", "sessions.json", "keymap.json"] {
+        for name in ["settings.json", "sessions.json", "keymap.json"] {
             assert_eq!(
                 configuration_path(base, &format!("config/{name}")),
                 Some(
@@ -387,16 +518,20 @@ mod tests {
         let root = std::env::temp_dir().join(format!("alacrterm-settings-{}", std::process::id()));
         let cache = util::file_cache::FileCache::new(&root);
         let lease = cache.allocate("terminal.json");
-        std::fs::write(lease.path(), r##"{"font_size":15,"colors":{"terminal_background":"#010203"},"future":{"keep":true}}"##).unwrap();
+        std::fs::write(lease.path(), r##"{"theme_mode":"light","terminal":{"font_size":15,"colors":{"terminal_background":"#010203"},"future":{"keep":true}}}"##).unwrap();
         save_terminal_preferences_at(
             lease.path(),
             serde_json::Map::from_iter([("font_size".into(), json!(18))]),
         )
         .unwrap();
         let saved = SettingsStore::new(lease.path().to_owned()).read().unwrap();
-        assert_eq!(saved["font_size"], 18);
-        assert_eq!(saved["colors"]["terminal_background"], "#010203");
-        assert_eq!(saved["future"]["keep"], true);
+        assert_eq!(saved["terminal"]["font_size"], 18);
+        assert_eq!(saved["theme_mode"], "light");
+        assert_eq!(
+            saved["terminal"]["colors"]["terminal_background"],
+            "#010203"
+        );
+        assert_eq!(saved["terminal"]["future"]["keep"], true);
     }
     #[test]
     fn saving_non_object_configuration_does_not_overwrite_it() {

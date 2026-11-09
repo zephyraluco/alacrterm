@@ -1,4 +1,4 @@
-//! 应用配置：终端渲染参数（`config/terminal.json`）与界面主题（`themes/global/*.json` + `config/app.json`）。
+//! 应用配置：终端渲染参数（`config/settings.json 的 terminal 子项`）与界面主题（`themes/global/*.json` + `config/settings.json`）。
 //! 运行期状态在 [`Settings`] 全局，开发配置从源码 config 读取，发布配置从系统用户目录读取，缺失项回退默认值。
 
 use settings::color_schemes::ColorScheme;
@@ -93,7 +93,7 @@ pub(crate) fn palette_settings(id: Option<&str>, cx: &App) -> RenderSettings {
     render
 }
 
-/// 把终端渲染参数写回 `config/terminal.json`（只覆盖设置窗口管的键）。
+/// 把终端渲染参数写回 `config/settings.json 的 terminal 子项`（只覆盖设置窗口管的键）。
 pub(crate) fn save_render_settings(
     settings: &RenderSettings,
     color_scheme: Option<&str>,
@@ -417,7 +417,7 @@ pub(crate) fn set_theme(name: Option<SharedString>, mode: ThemeMode, cx: &mut Ap
     cx.refresh_windows();
 }
 
-/// 启动时把 `config/app.json` 里的主题选择挂到两个槽位上。
+/// 启动时把 `config/settings.json` 里的主题选择挂到两个槽位上。
 pub fn apply_saved_themes(cx: &mut App) {
     let (dark, light) = {
         let settings = settings(cx);

@@ -176,7 +176,7 @@ impl SettingsWindow {
                 SettingGroup::new()
                     .item(render_item(
                         "终端配色",
-                        "立即应用到所有终端并保存。默认／自定义使用 terminal.json 中的颜色。",
+                        "立即应用到所有终端并保存。默认／自定义使用 settings.json 的 terminal 子项中的颜色。",
                         terminal_color_dropdown(self.app_root.clone(), cx),
                     ))
                     .item(render_item(
