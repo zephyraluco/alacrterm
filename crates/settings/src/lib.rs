@@ -174,16 +174,34 @@ impl SettingsStore {
     }
 }
 
-/// Migrate once without deleting the originals. An existing settings.json is
+/// Remove obsolete files only after the unified document is valid and on disk.
+fn remove_legacy_files(directory: &Path) {
+    for name in ["app.json", "terminal.json"] {
+        let path = directory.join(name);
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            // A cleanup failure must not disable a successfully saved config.
+            eprintln!(
+                "[config] 删除旧配置 {} 失败，将在下次加载时重试：{error}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Migrate once, then remove obsolete files. An existing settings.json is
 /// authoritative, including omitted keys; legacy values must not reappear later.
 fn unified_store_at(path: &Path) -> anyhow::Result<SettingsStore> {
     let store = SettingsStore::new(path.to_owned());
-    if path.try_exists()? {
-        return Ok(store);
-    }
     let directory = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("missing settings directory"))?;
+    if path.try_exists()? {
+        SettingsSnapshot::parse(store.read()?)?;
+        remove_legacy_files(directory);
+        return Ok(store);
+    }
     let read_legacy = |name: &str| -> anyhow::Result<Option<serde_json::Value>> {
         let file = directory.join(name);
         match std::fs::read_to_string(&file) {
@@ -209,6 +227,9 @@ fn unified_store_at(path: &Path) -> anyhow::Result<SettingsStore> {
         }
         SettingsSnapshot::parse(document.clone())?;
         store.update(document.as_object().unwrap().clone())?;
+        // Verify the persisted file before deleting either input.
+        SettingsSnapshot::parse(store.read()?)?;
+        remove_legacy_files(directory);
     }
     Ok(store)
 }
@@ -297,20 +318,15 @@ mod tests {
             saved["terminal"]["colors"]["terminal_background"],
             "#123456"
         );
-        assert_eq!(
-            std::fs::read_to_string(directory.join("app.json")).unwrap(),
-            app
-        );
-        assert_eq!(
-            std::fs::read_to_string(directory.join("terminal.json")).unwrap(),
-            terminal
-        );
+        assert!(!directory.join("app.json").exists());
+        assert!(!directory.join("terminal.json").exists());
         // Existing new settings are authoritative even when legacy values change.
         std::fs::write(directory.join("app.json"), r#"{"theme_mode":"dark"}"#).unwrap();
         assert_eq!(
             unified_store_at(lease.path()).unwrap().read().unwrap(),
             saved
         );
+        assert!(!directory.join("app.json").exists());
         store
             .update(serde_json::Map::from_iter([(
                 "theme_mode".into(),
@@ -352,6 +368,8 @@ mod tests {
         std::fs::write(lease.path(), invalid).unwrap();
         assert!(save_terminal_preferences_at(lease.path(), serde_json::Map::new()).is_err());
         assert_eq!(std::fs::read_to_string(lease.path()).unwrap(), invalid);
+        assert!(unified_store_at(lease.path()).is_err());
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "{");
     }
 
     #[test]
