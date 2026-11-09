@@ -3,6 +3,7 @@ pub mod color_schemes;
 pub mod document;
 pub mod keymap;
 mod suggestions;
+mod watch;
 pub use document::{SettingsFile, SettingsPatch, SettingsSnapshot, commit, load_snapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -11,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub use suggestions::SuggestionSettings;
+pub use watch::SettingsWatch;
 
 const SETTINGS_CONFIG_RELATIVE_PATH: &str = "config/settings.json";
 

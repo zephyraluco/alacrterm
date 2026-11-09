@@ -21,6 +21,8 @@ const TERMINAL_PALETTES_DIR: &str = "themes/terminal";
 pub(crate) struct Settings {
     theme_mode: settings::AppThemeMode,
     snapshot: SettingsSnapshot,
+    _watcher: Option<settings::SettingsWatch>,
+    _watch_task: Option<gpui::Task<()>>,
     pub(crate) color_scheme: Option<SharedString>,
     applied_color_scheme: Option<Arc<ColorScheme>>,
     /// 终端渲染参数。
@@ -56,6 +58,8 @@ pub fn install(cx: &mut App) {
     }
     let app = snapshot.values.app.clone();
     cx.set_global(Settings {
+        _watcher: None,
+        _watch_task: None,
         snapshot,
         theme_mode: app.theme_mode,
         render,
@@ -64,6 +68,24 @@ pub fn install(cx: &mut App) {
         dark_theme: app.dark_theme.map(Into::into),
         light_theme: app.light_theme.map(Into::into),
     });
+    match settings::SettingsWatch::new(settings::write_target("config/settings.json")) {
+        Ok(watcher) => {
+            let changes = watcher.updates();
+            settings_mut(cx)._watcher = Some(watcher);
+            let task = cx.spawn(async move |cx| {
+                while let Ok(result) = changes.recv().await {
+                    cx.update(|cx| match result {
+                        Ok(snapshot) => apply_snapshot(snapshot, cx),
+                        Err(error) => {
+                            report_error(format!("设置文件无效，保持上次有效设置：{error}"), cx)
+                        }
+                    });
+                }
+            });
+            settings_mut(cx)._watch_task = Some(task);
+        }
+        Err(error) => report_error(format!("无法监听设置文件：{error:#}"), cx),
+    }
     let directories = candidates(TERMINAL_PALETTES_DIR);
     if let Some(directory) = directories
         .iter()

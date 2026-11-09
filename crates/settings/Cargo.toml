@@ -10,3 +10,5 @@ serde_json.workspace = true
 util.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
+notify = "8.2"
+async-channel = "2.5"
