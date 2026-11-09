@@ -1,7 +1,9 @@
 //! UI-independent application configuration and persistence.
 pub mod color_schemes;
+pub mod document;
 pub mod keymap;
 mod suggestions;
+pub use document::{SettingsFile, SettingsPatch, SettingsSnapshot, commit, load_snapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -96,7 +98,7 @@ pub fn shown_path(path: &Path) -> String {
 }
 
 /// `config/settings.json` 的 `terminal` 子项；字段全可选。
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TerminalFile {
     pub color_scheme: Option<String>,
@@ -126,7 +128,7 @@ pub enum AppThemeMode {
 }
 
 /// `config/settings.json` 顶层的应用级偏好。
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppFile {
     pub theme_mode: AppThemeMode,
@@ -203,6 +205,7 @@ fn unified_store_at(path: &Path) -> anyhow::Result<SettingsStore> {
         if let Some(terminal) = terminal {
             document["terminal"] = terminal;
         }
+        SettingsSnapshot::parse(document.clone())?;
         store.update(document.as_object().unwrap().clone())?;
     }
     Ok(store)
@@ -295,10 +298,26 @@ impl TerminalFile {
     pub fn validate(&mut self) -> bool {
         let mut invalid = false;
         for (value, minimum, maximum) in [
-            (&mut self.font_size, 6., 48.),
-            (&mut self.font_weight, 100., 900.),
-            (&mut self.line_height_multiplier, 0.8, 2.5),
-            (&mut self.minimum_contrast, 0., 106.),
+            (
+                &mut self.font_size,
+                document::FONT_SIZE.0 as f32,
+                document::FONT_SIZE.1 as f32,
+            ),
+            (
+                &mut self.font_weight,
+                document::FONT_WEIGHT.0 as f32,
+                document::FONT_WEIGHT.1 as f32,
+            ),
+            (
+                &mut self.line_height_multiplier,
+                document::LINE_HEIGHT.0 as f32,
+                document::LINE_HEIGHT.1 as f32,
+            ),
+            (
+                &mut self.minimum_contrast,
+                document::CONTRAST.0 as f32,
+                document::CONTRAST.1 as f32,
+            ),
         ] {
             if value.is_some_and(|value| !value.is_finite() || value < minimum || value > maximum) {
                 *value = None;
@@ -313,7 +332,8 @@ impl TerminalFile {
 mod tests {
     use super::*;
 
-    fn migration_fixture() -> (util::file_cache::FileCache, util::file_cache::CacheLease) {
+    pub(super) fn migration_fixture() -> (util::file_cache::FileCache, util::file_cache::CacheLease)
+    {
         let cache = util::file_cache::FileCache::new(
             &std::env::temp_dir().join(format!("alacrterm-migrate-{}", std::process::id())),
         );
