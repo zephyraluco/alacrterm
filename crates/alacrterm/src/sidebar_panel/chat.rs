@@ -2,14 +2,14 @@
 use crate::assets::{IconName, ui_icon};
 use gpui::{
     AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div,
+    SharedString, Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
     bubble::{Bubble, BubbleVariant},
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, Textarea, TextareaState},
     message::{Message, MessageAlignment, MessageContent, MessageFooter},
     message_scroller::{MessageScroller, MessageScrollerState},
     v_flex,
@@ -56,21 +56,20 @@ impl Conversation {
 pub(crate) struct ChatPanel {
     conversation: Conversation,
     scroller: Entity<MessageScrollerState>,
-    composer: Entity<InputState>,
+    composer: Entity<TextareaState>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ChatPanel {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let conversation = Conversation {
-            messages: vec![ChatMessage {
-                body: "在这里输入消息开始对话。".into(),
-                outgoing: false,
-                attempts: 0,
-            }],
-        };
-        let scroller = cx.new(|cx| MessageScrollerState::new(conversation.messages.len(), cx));
-        let composer = cx.new(|cx| InputState::new(window, cx).placeholder("输入消息…"));
+        let conversation = Conversation::default();
+        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        let composer = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 6)
+                .submit_on_enter(true)
+                .placeholder("输入消息…")
+        });
         let scroll_sub = cx.observe(&scroller, |_, _, cx| cx.notify());
         let input_sub = cx.subscribe_in(
             &composer,
@@ -111,6 +110,16 @@ impl ChatPanel {
         cx.notify();
     }
 
+    fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.conversation.messages.clear();
+        self.scroller.update(cx, |state, cx| state.reset(0, cx));
+        self.composer.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     fn render_message(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(message) = self.conversation.messages.get(index) else {
             return div().into_any_element();
@@ -138,8 +147,9 @@ impl ChatPanel {
                     Button::new(("chat-retry", index))
                         .ghost()
                         .xsmall()
-                        .label("重试")
-                        .tooltip("尚未连接对话服务")
+                        .icon(ui_icon(IconName::Refresh))
+                        .accessibility_label("重试发送")
+                        .tooltip("重试发送（尚未连接对话服务）")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.conversation.retry(index);
                             this.scroller.update(cx, |state, cx| {
@@ -163,9 +173,9 @@ impl ChatPanel {
                 MessageContent::new().bubble(
                     Bubble::new()
                         .with_variant(if message.outgoing {
-                            BubbleVariant::Destructive
-                        } else {
                             BubbleVariant::Muted
+                        } else {
+                            BubbleVariant::Ghost
                         })
                         .child(message.body.clone()),
                 ),
@@ -185,6 +195,39 @@ impl Render for ChatPanel {
             .min_w_0()
             .overflow_hidden()
             .child(
+                h_flex()
+                    .w_full()
+                    .flex_none()
+                    .items_start()
+                    .justify_between()
+                    .p_4()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().text_base().child("新对话"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("今天有什么可以帮你？"),
+                            ),
+                    )
+                    .child(
+                        Button::new("chat-new")
+                            .outline()
+                            .small()
+                            .size(px(32.))
+                            .rounded(px(16.))
+                            .icon(ui_icon(IconName::Refresh))
+                            .tooltip("新建对话")
+                            .accessibility_label("新建对话")
+                            .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
+                    ),
+            )
+            .child(
                 MessageScroller::new(
                     "chat-messages",
                     self.scroller.clone(),
@@ -202,35 +245,37 @@ impl Render for ChatPanel {
                 .with_jump_button_label("回到最新消息"),
             )
             .child(
-                v_flex()
-                    .flex_none()
-                    .w_full()
-                    .p_2()
-                    .gap_2()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("尚未连接对话服务，消息不会发送。"),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .child(Input::new(&self.composer).flex_1().min_w_0())
-                            .child(
+                div().flex_none().w_full().p_4().child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .p_3()
+                        .rounded_xl()
+                        .bg(cx.theme().muted)
+                        .child(
+                            Textarea::new(&self.composer)
+                                .appearance(false)
+                                .bordered(false)
+                                .w_full(),
+                        )
+                        .child(
+                            h_flex().w_full().justify_end().child(
                                 Button::new("chat-send")
                                     .small()
-                                    .label("发送")
+                                    .size(px(32.))
+                                    .bg(cx.theme().foreground)
+                                    .text_color(cx.theme().background)
+                                    .rounded(px(16.))
+                                    .icon(ui_icon(IconName::ArrowUp))
+                                    .tooltip("发送（Enter），换行（Shift+Enter）")
+                                    .accessibility_label("发送消息")
                                     .disabled(empty)
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.send(window, cx)),
                                     ),
                             ),
-                    ),
+                        ),
+                ),
             )
     }
 }

@@ -84,7 +84,6 @@ pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElem
             .size_full()
             .min_w_0()
             .min_h_0()
-            .child(sidebar.render_header(cx))
             .child(sidebar.chat.clone())
             .into_any_element();
     }
