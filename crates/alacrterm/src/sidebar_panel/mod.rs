@@ -1,4 +1,4 @@
-//! 左右独立的可折叠面板，分别显示会话和文件视图。
+//! 左右独立的可折叠面板：左侧会话，右侧文件管理器或对话。
 //! 视图切换入口位于全局底部状态栏。
 
 use gpui::{
@@ -15,6 +15,7 @@ use crate::assets::IconName;
 use crate::components::SidebarRow;
 
 mod activity_bar;
+pub(crate) mod chat;
 pub(crate) mod files;
 mod header;
 pub(crate) mod sessions;
@@ -61,16 +62,17 @@ pub(super) fn empty_state(
 pub(crate) enum SidebarView {
     Sessions,
     Files,
+    Chat,
 }
 
 impl SidebarView {
     /// 全部视图（按摆放顺序）。
-    pub(super) const ALL: [SidebarView; 2] = [Self::Sessions, Self::Files];
+    pub(super) const ALL: [SidebarView; 3] = [Self::Sessions, Self::Files, Self::Chat];
 
     /// 这个视图当前是否摆出来。
     fn visible_with(self, files_enabled: bool) -> bool {
         match self {
-            Self::Sessions => true,
+            Self::Sessions | Self::Chat => true,
             Self::Files => files_enabled,
         }
     }
@@ -80,6 +82,7 @@ impl SidebarView {
         match self {
             Self::Sessions => IconName::SquareTerminal,
             Self::Files => IconName::Folder,
+            Self::Chat => IconName::Bot,
         }
     }
 
@@ -88,6 +91,7 @@ impl SidebarView {
         match self {
             Self::Sessions => "会话",
             Self::Files => "文件管理器",
+            Self::Chat => "对话",
         }
     }
 
@@ -96,6 +100,7 @@ impl SidebarView {
         match self {
             Self::Sessions => "终端会话",
             Self::Files => "当前终端目录下的内容",
+            Self::Chat => "打开对话",
         }
     }
 
@@ -104,11 +109,12 @@ impl SidebarView {
         match self {
             Self::Sessions => "sessions",
             Self::Files => "files",
+            Self::Chat => "chat",
         }
     }
 }
 
-/// 独立的侧栏面板；会话位于左侧，文件管理器位于右侧。
+/// 独立的侧栏面板；会话位于左侧，文件管理器和对话位于右侧。
 pub(crate) struct Sidebar {
     /// 当前显示的视图。
     active: SidebarView,
@@ -129,6 +135,8 @@ pub(crate) struct Sidebar {
     /// 把两个视图的变化转发成本实体的重绘。
     _sessions_sub: Subscription,
     _files_sub: Subscription,
+    chat: Entity<chat::ChatPanel>,
+    _chat_sub: Subscription,
 }
 
 impl Sidebar {
@@ -136,10 +144,13 @@ impl Sidebar {
         sessions: Entity<SessionsState>,
         files: Entity<FilesState>,
         active: SidebarView,
+        chat: Entity<chat::ChatPanel>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             active,
+            chat: chat.clone(),
+            _chat_sub: cx.observe(&chat, |_, _, cx| cx.notify()),
             files_enabled: false,
             visible: false,
             width: SIDEBAR_DEFAULT_WIDTH,
@@ -225,7 +236,7 @@ impl Sidebar {
         let container = self.resize.read(cx).container_size();
         if self.split_width != Some(container) {
             self.split_width = Some(container);
-            let index = if self.active == SidebarView::Files {
+            let index = if self.active != SidebarView::Sessions {
                 1
             } else {
                 0
@@ -263,6 +274,9 @@ impl Sidebar {
         let was_visible = self.visible;
         let changed = self.active != view;
         self.active = view;
+        if changed && view == SidebarView::Chat && self.width == SIDEBAR_DEFAULT_WIDTH {
+            self.width = px(360.);
+        }
         self.show();
         if changed || !was_visible {
             cx.notify();
@@ -288,7 +302,7 @@ impl AppRoot {
     pub(crate) fn open_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         let sidebar = match view {
             SidebarView::Sessions => &self.sidebar,
-            SidebarView::Files => &self.right_sidebar,
+            SidebarView::Files | SidebarView::Chat => &self.right_sidebar,
         };
         sidebar.update(cx, |sidebar, cx| sidebar.open_view(view, cx));
     }

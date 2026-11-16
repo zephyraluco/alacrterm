@@ -36,7 +36,11 @@ pub(super) fn status_bar(
         .fold(new_status_bar().child(monitor), |bar, view| {
             let (state, selected) = match view {
                 SidebarView::Sessions => (cx.weak_entity(), sidebar.panel_visible(cx)),
-                SidebarView::Files => (right.downgrade(), right.read(cx).panel_visible(cx)),
+                SidebarView::Files | SidebarView::Chat => (
+                    right.downgrade(),
+                    right.read(cx).panel_visible(cx)
+                        && right.read(cx).active_view(cx) == Some(view),
+                ),
             };
             let button = Button::new(view.id())
                 .ghost()
@@ -58,7 +62,7 @@ pub(super) fn status_bar(
                         .child(button)
                         .child(separator(&cx.theme().border)),
                 ),
-                SidebarView::Files => bar.right(
+                SidebarView::Files | SidebarView::Chat => bar.right(
                     h_flex()
                         .items_center()
                         .child(separator(&cx.theme().border))
@@ -75,7 +79,18 @@ pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElem
         return div().into_any_element();
     };
 
+    if active == SidebarView::Chat {
+        return v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(sidebar.render_header(cx))
+            .child(sidebar.chat.clone())
+            .into_any_element();
+    }
+
     let rows: Vec<SidebarContent> = match active {
+        SidebarView::Chat => unreachable!(),
         SidebarView::Sessions => sidebar
             .sessions
             .update(cx, |sessions, cx| sessions.sidebar_items(cx))
@@ -94,7 +109,7 @@ pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElem
         .header(sidebar.render_header(cx))
         // 工具栏只有「文件管理器」有（「会话」那条没有:它那一栏的动作在右键菜单里）。
         .toolbar(match active {
-            SidebarView::Sessions => None,
+            SidebarView::Sessions | SidebarView::Chat => None,
             SidebarView::Files => {
                 let files = sidebar.files.read(cx);
                 let ready = files.status().ready;
@@ -130,6 +145,7 @@ pub(super) fn panel(sidebar: &mut Sidebar, cx: &mut Context<Sidebar>) -> AnyElem
             .child(panel)
             .into_any_element(),
         SidebarView::Files => files_panel(panel, sidebar.files.clone()),
+        SidebarView::Chat => unreachable!(),
     };
 
     div()

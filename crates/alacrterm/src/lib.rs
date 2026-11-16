@@ -203,10 +203,25 @@ impl AppRoot {
             });
         });
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
-        let sidebar =
-            cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Sessions, cx));
-        let right_sidebar =
-            cx.new(|cx| Sidebar::new(sessions.clone(), files.clone(), SidebarView::Files, cx));
+        let chat = cx.new(|cx| sidebar_panel::chat::ChatPanel::new(window, cx));
+        let sidebar = cx.new(|cx| {
+            Sidebar::new(
+                sessions.clone(),
+                files.clone(),
+                SidebarView::Sessions,
+                chat.clone(),
+                cx,
+            )
+        });
+        let right_sidebar = cx.new(|cx| {
+            Sidebar::new(
+                sessions.clone(),
+                files.clone(),
+                SidebarView::Files,
+                chat.clone(),
+                cx,
+            )
+        });
         let right_sidebar_sub = cx.observe(&right_sidebar, |_, _, cx| cx.notify());
         let sidebar_sub = cx.observe(&sidebar, |_, _, cx| cx.notify());
 
