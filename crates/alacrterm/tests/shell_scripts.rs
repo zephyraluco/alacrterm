@@ -1,5 +1,8 @@
 //! Real-shell regression tests. Optionally include a separately built old Bash.
 #![cfg(unix)]
+#[path = "support/shell_script_harness.rs"]
+mod shell_script_harness;
+
 use std::{
     collections::HashMap,
     io::Write as _,
@@ -27,10 +30,9 @@ fn run_bash(program: &Path, rc: &str, input: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join(".bashrc"), rc).unwrap();
     let mut env = HashMap::from([("HOME".into(), home.path().to_string_lossy().into_owned())]);
-    let (args, _files) =
-        alacrterm::shell_integration::local::prepare(program.to_str().unwrap(), &[], &mut env)
-            .unwrap()
-            .unwrap();
+    let (args, _files) = shell_script_harness::prepare(program.to_str().unwrap(), &[], &mut env)
+        .unwrap()
+        .unwrap();
     let mut child = Command::new(program)
         .args(args)
         .envs(env)
@@ -280,7 +282,7 @@ fn zsh_imports_loaded_history_and_literal_utf8_without_multiline_fragments() {
     std::fs::write(home.path().join(".zshrc"),
         "HISTSIZE=2000\nprint -s 'echo imported-zsh-中文'\nprint -s $'echo multiline-first\\necho multiline-second'\n").unwrap();
     let mut env = HashMap::from([("HOME".into(), home.path().to_string_lossy().into_owned())]);
-    let (args, _files) = alacrterm::shell_integration::local::prepare("zsh", &[], &mut env)
+    let (args, _files) = shell_script_harness::prepare("zsh", &[], &mut env)
         .unwrap()
         .unwrap();
     let mut child = Command::new("zsh")
