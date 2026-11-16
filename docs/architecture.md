@@ -92,7 +92,7 @@ GPUI 先派发匹配上下文的 Action，再进入终端按键处理。`Termina
 
 应用层 `shell_integration/` 使用 `include_str!` 将 `scripts/shell_integration/` 脚本编译进程序，安装包不需要额外的脚本目录。
 
-本地 Bash、Zsh、PowerShell 会话将脚本写入会话专属临时目录，通过 `--rcfile`、`ZDOTDIR` 或 `-File` 加载，保留原有启动配置。临时资源由 PTY 生命周期持有，结束后释放；自定义 Shell 参数会跳过本地注入。
+本地仅 PowerShell 支持提示功能：将脚本写入会话专属临时目录，通过 `-NoExit -File` 加载，保留原有启动配置。临时资源由 PTY 生命周期持有，结束后释放；自定义 Shell 参数会跳过本地注入。本地 Bash、Zsh 不注入集成脚本、不改写 `ZDOTDIR`，也不显示命令提示；SSH 集成不受影响。
 
 远端集成先尝试设置会话激活环境变量，再通过辅助 SSH 连接执行安装脚本。Bash/Zsh 脚本持久化到远端 `~/.local/share/alacrterm/shell/`，对应启动配置增加加载入口；版本与 Shell 类型清单用于判断是否更新。入口只在带激活标记的交互式会话加载，不把安装命令输入交互终端。环境变量被服务器拒绝或安装失败时继续普通登录。`ALACRTERM_SHELL_INTEGRATION=0` 禁用注入，远端还受设置开关控制。
 

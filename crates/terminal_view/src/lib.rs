@@ -84,6 +84,7 @@ pub struct TerminalView {
     _subscriptions: Vec<Subscription>,
     error: Option<String>,
     remote: bool,
+    suggestions_supported: bool,
     settings: Arc<TerminalRenderSettings>,
     title: SharedString,
     /// IME 组合文本状态（由 `TerminalElement` 在渲染时读取）。
@@ -122,6 +123,10 @@ impl TerminalView {
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let remote = target.is_ssh();
+        let suggestions_supported = match &target {
+            TerminalTarget::Local(shell) => local_suggestions_supported(&shell.program()),
+            _ => true,
+        };
         let env = std::env::vars().collect();
         let builder = TerminalBuilder::new_with_options(
             working_directory,
@@ -227,13 +232,17 @@ impl TerminalView {
             _subscriptions: vec![focus_in, focus_out],
             error: None,
             remote,
+            suggestions_supported,
             settings: settings.clone(),
             title: "终端".into(),
             ime_state: None,
             cursor_phase: true,
             focused: false,
             terminal_blinking: None,
-            completion: completion_controller::CompletionController::new(settings.suggestions),
+            completion: completion_controller::CompletionController::new(suggestion_policy(
+                settings.suggestions,
+                suggestions_supported,
+            )),
             suggestion_scroll: gpui_kit::component::VirtualListScrollHandle::new(),
             suggestion_item_sizes: Default::default(),
             _blink_task: blink_task,
@@ -291,7 +300,10 @@ impl TerminalView {
         cx: &mut gpui::Context<Self>,
     ) {
         self.settings = settings;
-        self.completion.configure(self.settings.suggestions);
+        self.completion.configure(suggestion_policy(
+            self.settings.suggestions,
+            self.suggestions_supported,
+        ));
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.set_cursor_shape(self.settings.cursor_shape);
@@ -1061,5 +1073,53 @@ impl Render for TerminalView {
             );
         }
         root
+    }
+}
+
+// Local Bash/zsh have no integration; keep their completion UI disabled even if
+// an inherited startup file emits OSC markers. Remote sessions retain policy.
+fn local_suggestions_supported(program: &str) -> bool {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe"
+    )
+}
+
+fn suggestion_policy(
+    mut settings: settings::SuggestionSettings,
+    supported: bool,
+) -> settings::SuggestionSettings {
+    settings.enabled &= supported;
+    settings
+}
+
+#[cfg(test)]
+mod local_suggestion_policy_tests {
+    use super::*;
+    #[test]
+    fn only_local_powershell_supports_suggestions() {
+        for program in ["bash", "/bin/zsh", "bash.exe", "cmd.exe"] {
+            assert!(!local_suggestions_supported(program));
+            assert!(!suggestion_policy(settings::SuggestionSettings::default(), false).enabled);
+        }
+        for program in [
+            "pwsh",
+            "powershell.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+        ] {
+            assert!(local_suggestions_supported(program));
+        }
+        let settings = settings::SuggestionSettings::default();
+        assert_eq!(suggestion_policy(settings, true), settings);
+        let disabled = settings::SuggestionSettings {
+            enabled: false,
+            ..settings
+        };
+        assert!(!suggestion_policy(disabled, true).enabled);
     }
 }

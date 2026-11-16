@@ -30,16 +30,16 @@ impl LocalSessionSetup for LocalIntegration {
         args: &[String],
         env: &mut std::collections::HashMap<String, String>,
     ) -> anyhow::Result<Option<PreparedShell>> {
-        env.insert(
-            "ALACRTERM_HISTORY_ENABLED".into(),
-            if self.history_enabled { "1" } else { "0" }.into(),
-        );
-        Ok(
-            local::prepare(program, args, env)?.map(|(args, files)| PreparedShell {
+        Ok(local::prepare(program, args, env)?.map(|(args, files)| {
+            env.insert(
+                "ALACRTERM_HISTORY_ENABLED".into(),
+                if self.history_enabled { "1" } else { "0" }.into(),
+            );
+            PreparedShell {
                 args,
                 resources: Box::new(files),
-            }),
-        )
+            }
+        }))
     }
 }
 
@@ -71,7 +71,7 @@ mod resource_tests {
         let prepared = LocalIntegration {
             history_enabled: true,
         }
-        .prepare("bash", &[], &mut env)
+        .prepare("pwsh", &[], &mut env)
         .unwrap()
         .unwrap();
         let script = std::path::PathBuf::from(&env["ALACRTERM_INTEGRATION_SCRIPT"]);
