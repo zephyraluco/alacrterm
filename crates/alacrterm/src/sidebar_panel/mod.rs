@@ -274,6 +274,9 @@ impl Sidebar {
         let was_visible = self.visible;
         let changed = self.active != view;
         self.active = view;
+        if view == SidebarView::Chat {
+            self.chat.update(cx, |chat, cx| chat.open(cx));
+        }
         if changed && view == SidebarView::Chat && self.width == SIDEBAR_DEFAULT_WIDTH {
             self.width = px(360.);
         }
