@@ -205,8 +205,8 @@ impl AppRoot {
                 )
             });
         });
-        let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
-        let chat = cx.new(|cx| sidebar_panel::chat::ChatPanel::new(window, cx));
+        let files = cx.new(|cx| FilesState::new(window, app_root.clone(), transfers.clone(), cx));
+        let chat = cx.new(|cx| sidebar_panel::chat::ChatPanel::new(app_root, window, cx));
         let sessions_panel = cx.new(|cx| SessionsPanel::new(sessions.clone(), cx));
         let files_panel = cx.new(|cx| FilesPanel::new(files.clone(), cx));
         let sidebar = cx.new(|cx| {

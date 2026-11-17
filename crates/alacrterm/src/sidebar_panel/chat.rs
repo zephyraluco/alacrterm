@@ -1,9 +1,11 @@
 //! UI-only conversation panel. No network requests or terminal command execution.
 use crate::assets::{IconName, ui_icon};
+mod composer;
+use composer::{ComposerOptions, ContextAttachment, ModelProfile};
 use gpui::{
     AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px,
+    Subscription, WeakEntity, Window, div, px,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
@@ -23,6 +25,7 @@ struct ChatMessage {
     body: SharedString,
     outgoing: bool,
     attempts: usize,
+    attachments: Vec<ContextAttachment>,
 }
 
 #[derive(Default)]
@@ -40,6 +43,7 @@ impl Conversation {
             body: body.to_owned().into(),
             outgoing: true,
             attempts: 1,
+            attachments: Vec::new(),
         });
         true
     }
@@ -88,6 +92,7 @@ impl Navigation {
 
 struct ChatSession {
     conversation: Conversation,
+    options: ComposerOptions,
     updated: SystemTime,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<TextareaState>,
@@ -123,13 +128,21 @@ fn relative_time(elapsed: Duration) -> String {
 }
 
 pub(crate) struct ChatPanel {
+    root: WeakEntity<crate::AppRoot>,
+    models: Vec<ModelProfile>,
     sessions: Vec<ChatSession>,
     navigation: Navigation,
 }
 
 impl ChatPanel {
-    pub(crate) fn new(_: &mut Window, _: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        root: WeakEntity<crate::AppRoot>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Self {
         Self {
+            root,
+            models: Vec::new(),
             sessions: Vec::new(),
             navigation: Navigation::default(),
         }
@@ -169,8 +182,10 @@ impl ChatPanel {
                 cx.notify();
             },
         );
+        let terminal = self.current_terminal(cx);
         self.sessions.push(ChatSession {
             conversation: Conversation::default(),
+            options: ComposerOptions::with_terminal(terminal),
             updated: SystemTime::now(),
             scroller,
             composer,
@@ -200,6 +215,9 @@ impl ChatPanel {
         let body = session.composer.read(cx).value();
         if !session.conversation.submit(&body) {
             return;
+        }
+        if let Some(message) = session.conversation.messages.last_mut() {
+            message.attachments = std::mem::take(&mut session.options.attachments);
         }
         session.updated = SystemTime::now();
         session.composer.update(cx, |input, cx| {
@@ -338,7 +356,13 @@ impl ChatPanel {
                         } else {
                             BubbleVariant::Ghost
                         })
-                        .child(message.body.clone()),
+                        .child(message.body.clone())
+                        .children(
+                            message
+                                .attachments
+                                .iter()
+                                .map(|attachment| div().text_xs().child(attachment.label())),
+                        ),
                 ),
             )
             .footer(footer)
@@ -354,10 +378,8 @@ impl Render for ChatPanel {
         let Some(session) = self.sessions.get(session_index) else {
             return self.render_sessions(cx);
         };
-        let composer = session.composer.clone();
         let scroller = session.scroller.clone();
         let panel = cx.weak_entity();
-        let empty = composer.read(cx).value().trim().is_empty();
         v_flex()
             .size_full()
             .min_h_0()
@@ -381,39 +403,7 @@ impl Render for ChatPanel {
                 .w_full()
                 .with_jump_button_label("回到最新消息"),
             )
-            .child(
-                div().flex_none().w_full().p_4().child(
-                    v_flex()
-                        .w_full()
-                        .gap_1()
-                        .p_3()
-                        .rounded_xl()
-                        .bg(cx.theme().muted)
-                        .child(
-                            Textarea::new(&composer)
-                                .appearance(false)
-                                .bordered(false)
-                                .w_full(),
-                        )
-                        .child(
-                            h_flex().w_full().justify_end().child(
-                                Button::new("chat-send")
-                                    .small()
-                                    .size(px(32.))
-                                    .bg(cx.theme().foreground)
-                                    .text_color(cx.theme().background)
-                                    .rounded(px(16.))
-                                    .icon(ui_icon(IconName::ArrowUp))
-                                    .tooltip("发送（Enter），换行（Shift+Enter）")
-                                    .accessibility_label("发送消息")
-                                    .disabled(empty)
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.send(window, cx)),
-                                    ),
-                            ),
-                        ),
-                ),
-            )
+            .child(self.render_composer(session_index, cx))
             .into_any_element()
     }
 }
@@ -524,6 +514,7 @@ mod tests {
             body: "reply".into(),
             outgoing: false,
             attempts: 0,
+            attachments: Vec::new(),
         });
         conversation.retry(1);
         assert_eq!(conversation.messages[1].attempts, 0);
