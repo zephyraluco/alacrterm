@@ -15,8 +15,8 @@ use terminal_view::RenderSettings;
 
 use crate::AppRoot;
 use crate::pane_layout::Dir;
-use crate::sidebar_panel::SidebarView;
 use crate::sidebar_panel::sessions::SessionPath;
+use crate::sidebar_panel::{files_panel::FILES_PANEL, sessions_panel::SESSIONS_PANEL};
 
 actions!(
     alacrterm,
@@ -281,16 +281,13 @@ impl AppRoot {
 
         let sidebar_sessions = root.clone();
         cx.on_action(move |_: &ShowSessionsView, cx: &mut App| {
-            let _ = sidebar_sessions.update(cx, |this, cx| {
-                this.open_sidebar_view(SidebarView::Sessions, cx)
-            });
+            let _ =
+                sidebar_sessions.update(cx, |this, cx| this.open_sidebar_view(SESSIONS_PANEL, cx));
         });
 
         let sidebar_files = root.clone();
         cx.on_action(move |_: &ShowFilesView, cx: &mut App| {
-            let _ = sidebar_files.update(cx, |this, cx| {
-                this.open_sidebar_view(SidebarView::Files, cx)
-            });
+            let _ = sidebar_files.update(cx, |this, cx| this.open_sidebar_view(FILES_PANEL, cx));
         });
 
         // 终端操作：作用于「当前会话」，不需要窗口。

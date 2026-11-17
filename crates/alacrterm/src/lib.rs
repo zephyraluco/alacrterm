@@ -41,6 +41,7 @@ mod wayx_control;
 mod welcome;
 pub mod x11;
 
+use components::{SidebarHost, SidebarSide};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Styled as _,
@@ -56,8 +57,9 @@ use gpui_kit::component::{
     v_flex,
 };
 use sidebar_panel::files::FilesState;
+use sidebar_panel::files_panel::FilesPanel;
 use sidebar_panel::sessions::SessionsState;
-use sidebar_panel::{Sidebar, SidebarView};
+use sidebar_panel::sessions_panel::SessionsPanel;
 use tab_bar::{TerminalDockSkin, TerminalTabBar};
 use terminal_panel::TabPane;
 use transfer_manager::{TransferDone, TransferManager};
@@ -85,14 +87,15 @@ pub struct AppRoot {
     /// 当前标签页下标。
     active: usize,
     /// 侧边栏。
-    sidebar: Entity<Sidebar>,
+    sidebar: Entity<SidebarHost>,
     _sidebar_sub: Subscription,
-    right_sidebar: Entity<Sidebar>,
+    right_sidebar: Entity<SidebarHost>,
     _right_sidebar_sub: Subscription,
     /// 「会话」视图状态。
     sessions: Entity<SessionsState>,
     /// 「文件管理器」视图状态。
     files: Entity<FilesState>,
+    files_panel: Entity<FilesPanel>,
     _transfers: Entity<TransferManager>,
     _transfer_completion_sub: Subscription,
     closing: bool,
@@ -204,23 +207,18 @@ impl AppRoot {
         });
         let files = cx.new(|cx| FilesState::new(window, app_root, transfers.clone(), cx));
         let chat = cx.new(|cx| sidebar_panel::chat::ChatPanel::new(window, cx));
+        let sessions_panel = cx.new(|cx| SessionsPanel::new(sessions.clone(), cx));
+        let files_panel = cx.new(|cx| FilesPanel::new(files.clone(), cx));
         let sidebar = cx.new(|cx| {
-            Sidebar::new(
-                sessions.clone(),
-                files.clone(),
-                SidebarView::Sessions,
-                chat.clone(),
-                cx,
-            )
+            let mut host = SidebarHost::new(SidebarSide::Left, cx);
+            host.register(sessions_panel, cx);
+            host
         });
         let right_sidebar = cx.new(|cx| {
-            Sidebar::new(
-                sessions.clone(),
-                files.clone(),
-                SidebarView::Files,
-                chat.clone(),
-                cx,
-            )
+            let mut host = SidebarHost::new(SidebarSide::Right, cx);
+            host.register(files_panel.clone(), cx);
+            host.register(chat, cx);
+            host
         });
         let right_sidebar_sub = cx.observe(&right_sidebar, |_, _, cx| cx.notify());
         let sidebar_sub = cx.observe(&sidebar, |_, _, cx| cx.notify());
@@ -268,6 +266,7 @@ impl AppRoot {
             _right_sidebar_sub: right_sidebar_sub,
             sessions,
             files,
+            files_panel,
             _transfers: transfers,
             _transfer_completion_sub: transfer_completion_sub,
             closing: false,
@@ -451,9 +450,8 @@ impl AppRoot {
             // 远端终端在哪儿，文件管理器就在哪儿（用户手动跳走、shell 没动时不动）。
             files.follow_terminal(snapshot.directory.as_deref(), cx);
         });
-        self.right_sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_files_enabled(snapshot.remote, cx)
-        });
+        self.files_panel
+            .update(cx, |panel, cx| panel.set_enabled(snapshot.remote, cx));
     }
 }
 
@@ -581,9 +579,12 @@ impl Render for AppRoot {
             body
         };
 
-        let status_bar = self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.render_status_bar(&self.right_sidebar, self.system_monitor.clone(), cx)
-        });
+        let status_bar = sidebar_panel::status_bar(
+            &self.sidebar,
+            &self.right_sidebar,
+            self.system_monitor.clone(),
+            cx,
+        );
 
         v_flex()
             .id("app-root")

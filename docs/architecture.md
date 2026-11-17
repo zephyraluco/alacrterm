@@ -102,6 +102,8 @@ SSH 认证支持 agent、密钥与配置的密码。默认主机密钥策略对�
 
 ## 文件管理、预览与传输
 
+`components/sidebar_host.rs` 提供注册式 `SidebarHost`，仅管理左右位置、显示与折叠、面板切换、各面板宽度和拖拽布局。业务视图实现 `SidebarPanel`，提供标识、标题、图标、默认宽度、可用条件和打开回调；底部入口从注册信息生成。`SessionsPanel`、`FilesPanel`、`ChatPanel` 分别拥有内容与交互，容器不引用业务枚举或业务状态。`components/sidebar_list.rs` 的 `SidebarList` 只负责标题、工具栏与虚拟行列表，可由业务面板复用。
+
 `sidebar_panel/sessions.rs` 负责会话树的 UI 选择和展开状态，`session` 负责数据编辑与保存。稳定 ID 用于跨对话框、移动和重命名定位记录，树路径用于当次结构操作。
 
 `sidebar_panel/files.rs` 负责当前文件系统、目录、选择及加载状态，本地使用文件系统接口，远端使用 `SshFs`。工具栏与路径输入框固定，文件列表单独滚动；文件夹单击选择、双击跳转。路径输入支持候选，跳转失败时保留输入、清空列表并提示错误。

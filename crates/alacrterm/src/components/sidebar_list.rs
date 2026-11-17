@@ -24,7 +24,7 @@ pub(crate) trait SidebarRow: Clone + 'static {
 
 /// 侧边栏面板(左栏)。
 #[derive(IntoElement)]
-pub(crate) struct Sidebar<E: SidebarRow> {
+pub(crate) struct SidebarList<E: SidebarRow> {
     id: ElementId,
     header: Option<AnyElement>,
     /// 标题栏下面那一行工具条（「文件管理器」的图标按钮就摆这儿）。
@@ -32,7 +32,7 @@ pub(crate) struct Sidebar<E: SidebarRow> {
     rows: Vec<E>,
 }
 
-impl<E: SidebarRow> Sidebar<E> {
+impl<E: SidebarRow> SidebarList<E> {
     pub(crate) fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
@@ -61,7 +61,7 @@ impl<E: SidebarRow> Sidebar<E> {
     }
 }
 
-impl<E: SidebarRow> RenderOnce for Sidebar<E> {
+impl<E: SidebarRow> RenderOnce for SidebarList<E> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = self.id;
         let count = self.rows.len();

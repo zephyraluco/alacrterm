@@ -472,6 +472,19 @@ impl Render for ChatPanel {
     }
 }
 
+impl crate::components::SidebarPanel for ChatPanel {
+    const INFO: crate::components::PanelInfo = crate::components::PanelInfo {
+        id: crate::components::PanelId("chat"),
+        title: "对话",
+        icon: IconName::Bot,
+        tooltip: "打开对话",
+        default_width: px(360.),
+    };
+    fn on_open(&mut self, cx: &mut Context<Self>) {
+        self.open(cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

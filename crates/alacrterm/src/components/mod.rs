@@ -1,5 +1,5 @@
-//! 应用自有的可复用 UI 组件(gpui-kit 之外的补充)。
-
-mod sidebar;
-
-pub(crate) use sidebar::{Sidebar, SidebarRow};
+//! Application UI primitives, independent of concrete sidebar business views.
+mod sidebar_host;
+mod sidebar_list;
+pub(crate) use sidebar_host::{PanelId, PanelInfo, SidebarHost, SidebarPanel, SidebarSide};
+pub(crate) use sidebar_list::{SidebarList, SidebarRow};
