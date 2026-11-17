@@ -1,5 +1,8 @@
 //! File browser business panel, toolbar, menus and drop handling.
+use gpui::{ListAlignment, ListState, list, prelude::FluentBuilder as _};
+use gpui_kit::base::Scrollbar;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, AsyncApp, Context, Entity, ExternalPaths, Hsla, InteractiveElement as _,
@@ -16,7 +19,6 @@ use gpui_kit::component::{
 use super::files::FilesState;
 use super::header::panel_header;
 use crate::assets::IconName;
-use crate::components::SidebarList;
 use crate::components::{PanelId, PanelInfo, SidebarPanel};
 use crate::dialog::name::open_name_dialog;
 use gpui::{Render, Subscription};
@@ -27,12 +29,14 @@ pub(crate) struct FilesPanel {
     files: Entity<FilesState>,
     enabled: bool,
     _subscription: Subscription,
+    list_state: ListState,
 }
 impl FilesPanel {
     pub(crate) fn new(files: Entity<FilesState>, cx: &mut Context<Self>) -> Self {
         Self {
             files: files.clone(),
             enabled: false,
+            list_state: ListState::new(0, ListAlignment::Top, px(400.)),
             _subscription: cx.observe(&files, |_, _, cx| cx.notify()),
         }
     }
@@ -58,6 +62,40 @@ impl SidebarPanel for FilesPanel {
 impl Render for FilesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.files.update(cx, |files, cx| files.sidebar_items(cx));
+        let count = rows.len();
+        if self.list_state.item_count() != count {
+            self.list_state.reset(count);
+        }
+        let rows = Rc::new(rows);
+        let state = self.list_state.clone();
+        let content = div()
+            .id("files-scroll")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(
+                v_flex().size_full().px_3().child(
+                    list(state.clone(), move |index, _, cx| {
+                        div()
+                            .id(index)
+                            .when(index == 0, |row| row.pt_3())
+                            .when(index + 1 == count, |row| row.pb_3())
+                            .when_some(rows.get(index).cloned(), |row, item| {
+                                row.child(item.render(cx))
+                            })
+                            .into_any_element()
+                    })
+                    .size_full(),
+                ),
+            )
+            .child(
+                div().absolute().inset_0().child(
+                    Scrollbar::vertical(&state)
+                        .id("files-scrollbar")
+                        .viewport_from_layout(),
+                ),
+            );
+
         let files = self.files.read(cx);
         let ready = files.status().ready;
         let path_input = files.render_path_input(self.files.clone(), cx);
@@ -68,10 +106,21 @@ impl Render for FilesPanel {
             .children(ready.then(|| files_toolbar(self.files.clone(), cx)))
             .children(path_input)
             .into_any_element();
-        let panel = SidebarList::new("sidebar-files")
-            .header(panel_header(Self::INFO.title, cx))
-            .toolbar(Some(toolbar))
-            .children(rows);
+        let panel = v_flex()
+            .id("sidebar-files")
+            .size_full()
+            .overflow_hidden()
+            .bg(cx.theme().tokens.sidebar)
+            .text_color(cx.theme().sidebar_foreground)
+            .child(
+                v_flex()
+                    .pt_3()
+                    .px_3()
+                    .child(panel_header(Self::INFO.title, cx)),
+            )
+            .child(v_flex().px_3().pb_2().child(toolbar))
+            .child(content)
+            .into_any_element();
         div()
             .size_full()
             .key_context(crate::keymap::SIDEBAR_CONTEXT)
@@ -274,10 +323,7 @@ fn separator(color: &Hsla) -> AnyElement {
 /// 内部的 `ExternalPaths` 拖拽(见 `gpui_pre::window` 的 `FileDropEvent`),所以只要
 /// `.on_drop::<ExternalPaths>`;落到哪个目录由 `FilesState::upload_target_dir` 决定
 /// (选中项 ⇒ 它所在的目录,没选中 ⇒ 当前根目录)。
-fn files_panel(
-    panel: SidebarList<super::files::FilesItem>,
-    files: Entity<FilesState>,
-) -> AnyElement {
+fn files_panel(panel: AnyElement, files: Entity<FilesState>) -> AnyElement {
     let drop_target = files.clone();
     let upload_target = files.clone();
     let folder_target = files.clone();
@@ -349,10 +395,4 @@ fn upload_via_dialog(files: &Entity<FilesState>, directories: bool, cx: &mut App
         files.update(cx, |files, cx| files.start_upload(paths, cx));
     })
     .detach();
-}
-
-impl crate::components::SidebarRow for super::files::FilesItem {
-    fn render(self, cx: &mut gpui::App) -> gpui::AnyElement {
-        super::files::FilesItem::render(self, cx)
-    }
 }
