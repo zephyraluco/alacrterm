@@ -292,11 +292,45 @@ mod tests {
 
     pub(super) fn migration_fixture() -> (util::file_cache::FileCache, util::file_cache::CacheLease)
     {
-        let cache = util::file_cache::FileCache::new(
-            &std::env::temp_dir().join(format!("alacrterm-migrate-{}", std::process::id())),
-        );
+        // FileCache performs stale cleanup beneath its root. Parallel tests
+        // need separate roots so creation cannot race another fixture's cleanup.
+        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fixture = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cache = util::file_cache::FileCache::new(&std::env::temp_dir().join(format!(
+            "alacrterm-migrate-{}-{fixture}",
+            std::process::id()
+        )));
         let lease = cache.allocate("settings.json");
         (cache, lease)
+    }
+
+    #[test]
+    fn concurrent_migration_fixtures_have_independent_cleanup_roots() {
+        let fixtures = std::thread::scope(|scope| {
+            (0..8)
+                .map(|_| scope.spawn(migration_fixture))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let roots = fixtures
+            .iter()
+            .map(|(_, lease)| {
+                lease
+                    .path()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .to_path_buf()
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            roots.len(),
+            fixtures.len(),
+            "parallel fixtures must not clean each other's directories"
+        );
     }
 
     #[test]
