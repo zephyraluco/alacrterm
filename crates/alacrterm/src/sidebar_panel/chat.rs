@@ -436,11 +436,11 @@ impl crate::components::SidebarPanel for ChatPanel {
                 .min_w_0()
                 .items_center()
                 .justify_between()
-                .child(div().text_base().child(Self::INFO.title))
+                .child(div().text_xs().child(Self::INFO.title))
                 .child(
                     Button::new("chat-create")
                         .ghost()
-                        .small()
+                        .xsmall()
                         .icon(ui_icon(IconName::Plus))
                         .tooltip("新建对话")
                         .accessibility_label("新建对话")
@@ -460,7 +460,7 @@ impl crate::components::SidebarPanel for ChatPanel {
                     .child(
                         Button::new("chat-back")
                             .ghost()
-                            .small()
+                            .xsmall()
                             .icon(ui_icon(IconName::ArrowLeft))
                             .tooltip("返回会话列表")
                             .accessibility_label("返回会话列表")
@@ -469,7 +469,7 @@ impl crate::components::SidebarPanel for ChatPanel {
                                 cx.notify();
                             })),
                     )
-                    .child(div().flex_1().min_w_0().text_base().truncate().child(title))
+                    .child(div().flex_1().min_w_0().text_xs().truncate().child(title))
                     .into_any_element()
             }
         }
