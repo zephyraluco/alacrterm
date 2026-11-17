@@ -467,6 +467,11 @@ impl TabPane {
         self.group.clone()
     }
 
+    /// 已打开的终端分屏，供选择器读取，不创建新终端。
+    pub(crate) fn views(&self) -> &[Entity<TerminalView>] {
+        &self.panes
+    }
+
     /// 当前聚焦格子的下标。
     pub(crate) fn focused_index(&self) -> usize {
         self.focused

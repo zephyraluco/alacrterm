@@ -1,144 +1,291 @@
-//! 侧边栏面板:顶部标题栏 + 工具栏 + 下方可滚动的内容列表。
-
-use std::rc::Rc;
-
+//! Registered panel container. Business state and rendering belong to each panel.
+use crate::assets::IconName;
 use gpui::{
-    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ListAlignment, ListState,
-    ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, list,
-    prelude::FluentBuilder as _, px,
+    AnyElement, AnyView, App, AppContext as _, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, Styled as _, Subscription, Window, div, px,
 };
-use gpui_kit::base::{Scrollbar, v_flex};
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::{ActiveTheme as _, h_flex, resizable::ResizableState, v_flex};
 
-const CONTENT_PADDING: gpui::Pixels = px(12.);
-const HEADER_PADDING: gpui::Pixels = px(12.);
-/// 工具栏与下方列表之间的空隙。
-const TOOLBAR_GAP: gpui::Pixels = px(8.);
-const LIST_OVERDRAW_RATIO: f32 = 0.3;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PanelId(pub &'static str);
 
-/// 侧边栏里的一行。
-pub(crate) trait SidebarRow: Clone + 'static {
-    /// 画这一行。
-    fn render(self, cx: &mut App) -> AnyElement;
+#[derive(Clone)]
+pub(crate) struct PanelInfo {
+    pub id: PanelId,
+    pub title: &'static str,
+    pub icon: IconName,
+    pub tooltip: &'static str,
+    pub default_width: Pixels,
 }
 
-/// 侧边栏面板(左栏)。
-#[derive(IntoElement)]
-pub(crate) struct Sidebar<E: SidebarRow> {
-    id: ElementId,
-    header: Option<AnyElement>,
-    /// 标题栏下面那一行工具条（「文件管理器」的图标按钮就摆这儿）。
-    toolbar: Option<AnyElement>,
-    rows: Vec<E>,
+/// Implemented by business views; the host erases their concrete entity types.
+pub(crate) trait SidebarPanel: Render + Sized + 'static {
+    const INFO: PanelInfo;
+    fn available(&self, _: &App) -> bool {
+        true
+    }
+    fn on_open(&mut self, _: &mut Context<Self>) {}
+    fn render_header(&mut self, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
+        div()
+            .min_w_0()
+            .text_xs()
+            .truncate()
+            .child(Self::INFO.title)
+            .into_any_element()
+    }
 }
 
-impl<E: SidebarRow> Sidebar<E> {
-    pub(crate) fn new(id: impl Into<ElementId>) -> Self {
+#[derive(Clone, Copy)]
+pub(crate) enum SidebarSide {
+    Left,
+    Right,
+}
+impl SidebarSide {
+    fn panel_index(self) -> usize {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+        }
+    }
+}
+
+type HeaderRenderer = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
+struct PanelEntry {
+    info: PanelInfo,
+    view: AnyView,
+    header: HeaderRenderer,
+    width: Pixels,
+    available: Box<dyn Fn(&App) -> bool>,
+    open: Box<dyn Fn(&mut App)>,
+    _subscription: Subscription,
+}
+
+#[derive(Default)]
+struct Selection {
+    active: Option<PanelId>,
+    visible: bool,
+}
+impl Selection {
+    fn open(&mut self, id: PanelId) {
+        self.active = Some(id);
+        self.visible = true;
+    }
+    fn toggle(&mut self, id: PanelId) -> bool {
+        if self.visible && self.active == Some(id) {
+            self.visible = false;
+            false
+        } else {
+            self.open(id);
+            true
+        }
+    }
+}
+
+const COLLAPSE_WIDTH: Pixels = px(24.);
+fn width_after_drag(width: Pixels) -> Option<Pixels> {
+    (width > COLLAPSE_WIDTH).then_some(width)
+}
+
+pub(crate) struct SidebarHost {
+    side: SidebarSide,
+    panels: Vec<PanelEntry>,
+    selection: Selection,
+    resize: Entity<ResizableState>,
+    split_width: Option<Pixels>,
+}
+impl SidebarHost {
+    pub(crate) fn new(side: SidebarSide, cx: &mut Context<Self>) -> Self {
         Self {
-            id: id.into(),
-            header: None,
-            toolbar: None,
-            rows: Vec::new(),
+            side,
+            panels: Vec::new(),
+            selection: Selection::default(),
+            resize: cx.new(|_| ResizableState::default()),
+            split_width: None,
         }
     }
 
-    /// 顶部标题栏。
-    pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
-        self.header = Some(header.into_any_element());
-        self
+    pub(crate) fn register<T: SidebarPanel>(&mut self, panel: Entity<T>, cx: &mut Context<Self>) {
+        assert!(!self.contains(T::INFO.id), "duplicate sidebar panel id");
+        let availability = panel.clone();
+        let activation = panel.clone();
+        let header = panel.clone();
+        self.panels.push(PanelEntry {
+            info: T::INFO,
+            width: T::INFO.default_width,
+            view: panel.clone().into(),
+            header: Box::new(move |window, cx| {
+                header.update(cx, |panel, cx| panel.render_header(window, cx))
+            }),
+            available: Box::new(move |cx| availability.read(cx).available(cx)),
+            open: Box::new(move |cx| activation.update(cx, |panel, cx| panel.on_open(cx))),
+            _subscription: cx.observe(&panel, |_, _, cx| cx.notify()),
+        });
+        if self.selection.active.is_none() {
+            self.selection.active = Some(T::INFO.id);
+        }
+        cx.notify();
     }
 
-    /// 标题栏下面那一行工具条（固定、不随内容滚动）。
-    pub(crate) fn toolbar(mut self, toolbar: Option<AnyElement>) -> Self {
-        self.toolbar = toolbar;
-        self
+    pub(crate) fn contains(&self, id: PanelId) -> bool {
+        self.panels.iter().any(|panel| panel.info.id == id)
     }
-
-    /// 内容:一行一项。
-    pub(crate) fn children(mut self, rows: impl IntoIterator<Item = E>) -> Self {
-        self.rows.extend(rows);
-        self
+    pub(crate) fn panels(&self, cx: &App) -> Vec<PanelInfo> {
+        self.panels
+            .iter()
+            .filter(|panel| (panel.available)(cx))
+            .map(|panel| panel.info.clone())
+            .collect()
+    }
+    fn active(&self) -> Option<&PanelEntry> {
+        self.panels
+            .iter()
+            .find(|panel| Some(panel.info.id) == self.selection.active)
+    }
+    pub(crate) fn panel_visible(&self, cx: &App) -> bool {
+        self.selection.visible && self.active().is_some_and(|panel| (panel.available)(cx))
+    }
+    pub(crate) fn is_selected(&self, id: PanelId, cx: &App) -> bool {
+        self.panel_visible(cx) && self.selection.active == Some(id)
+    }
+    pub(crate) fn visible(&self) -> bool {
+        self.selection.visible
+    }
+    pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.selection.visible != visible {
+            self.selection.visible = visible;
+            self.split_width = None;
+            cx.notify();
+        }
+    }
+    pub(crate) fn open_view(&mut self, id: PanelId, cx: &mut Context<Self>) {
+        let Some(panel) = self
+            .panels
+            .iter()
+            .find(|panel| panel.info.id == id && (panel.available)(cx))
+        else {
+            return;
+        };
+        (panel.open)(cx);
+        self.selection.open(id);
+        self.split_width = None;
+        cx.notify();
+    }
+    pub(crate) fn toggle_view(&mut self, id: PanelId, cx: &mut Context<Self>) {
+        if !self
+            .panels
+            .iter()
+            .any(|panel| panel.info.id == id && (panel.available)(cx))
+        {
+            return;
+        }
+        if self.selection.toggle(id) {
+            self.open_view(id, cx);
+        } else {
+            self.split_width = None;
+            cx.notify();
+        }
+    }
+    pub(crate) fn width(&self) -> Pixels {
+        self.active().map_or(px(220.), |panel| panel.width)
+    }
+    pub(crate) fn set_panel_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        let Some(width) = width_after_drag(width) else {
+            self.set_visible(false, cx);
+            return;
+        };
+        if let Some(panel) = self
+            .panels
+            .iter_mut()
+            .find(|panel| Some(panel.info.id) == self.selection.active)
+        {
+            panel.width = width;
+        }
+    }
+    pub(crate) fn resize_state(&self) -> &Entity<ResizableState> {
+        &self.resize
+    }
+    pub(crate) fn pin_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.panel_visible(cx) {
+            return;
+        }
+        let container = self.resize.read(cx).container_size();
+        if self.split_width != Some(container) {
+            self.split_width = Some(container);
+            let width = self.width();
+            let index = self.side.panel_index();
+            self.resize
+                .update(cx, |state, cx| state.resize_panel(index, width, window, cx));
+        }
     }
 }
-
-impl<E: SidebarRow> RenderOnce for Sidebar<E> {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let id = self.id;
-        let count = self.rows.len();
-        let overdraw = px(window.viewport_size().height.as_f32() * LIST_OVERDRAW_RATIO);
-        let list_state = window
-            .use_keyed_state(
-                SharedString::from(format!("{id}-list-state")),
-                cx,
-                |_, _| ListState::new(count, ListAlignment::Top, overdraw),
-            )
-            .read(cx)
-            .clone();
-        if list_state.item_count() != count {
-            list_state.reset(count);
-        }
-
-        let rows = Rc::new(self.rows);
-        v_flex()
-            .id(id.clone())
-            .size_full()
-            .overflow_hidden()
-            .bg(cx.theme().tokens.sidebar)
-            .text_color(cx.theme().sidebar_foreground)
-            .when_some(self.header, |this, header| {
-                this.child(
-                    v_flex()
-                        .id(format!("{id}-header"))
-                        .pt(HEADER_PADDING)
-                        .px(HEADER_PADDING)
-                        .gap_2()
-                        .child(header),
-                )
-            })
-            // 工具栏:标题栏与列表之间那条(只有「文件管理器」才挂)。
-            .when_some(self.toolbar, |this, toolbar| {
-                this.child(
-                    v_flex()
-                        .id(format!("{id}-toolbar"))
-                        .px(CONTENT_PADDING)
-                        .pb(TOOLBAR_GAP)
-                        .child(toolbar),
-                )
-            })
-            .child(
-                div()
-                    .id(format!("{id}-scroll"))
-                    .relative()
-                    .flex_1()
+impl Render for SidebarHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = if self.panel_visible(cx) {
+            self.active().map(|panel| {
+                let header = (panel.header)(window, cx);
+                v_flex()
+                    .size_full()
+                    .min_w_0()
                     .min_h_0()
                     .child(
-                        v_flex()
-                            .id(format!("{id}-content"))
-                            .size_full()
-                            .px(CONTENT_PADDING)
-                            .gap_y(CONTENT_PADDING)
-                            .child(
-                                list(list_state.clone(), move |ix, _window, cx| {
-                                    let row = rows.get(ix).cloned();
-                                    let is_first = ix == 0;
-                                    let is_last = ix + 1 == count;
-                                    div()
-                                        .id(ix)
-                                        .when(is_first, |this| this.pt(CONTENT_PADDING))
-                                        .when(is_last, |this| this.pb(CONTENT_PADDING))
-                                        .when_some(row, |this, row| this.child(row.render(cx)))
-                                        .into_any_element()
-                                })
-                                .size_full(),
-                            ),
+                        h_flex()
+                            .id("sidebar-titlebar")
+                            .w_full()
+                            .h(px(40.))
+                            .flex_none()
+                            .px_3()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(header),
                     )
                     .child(
-                        div().absolute().inset_0().child(
-                            Scrollbar::vertical(&list_state)
-                                .id(format!("{id}-scrollbar"))
-                                .viewport_from_layout(),
-                        ),
-                    ),
-            )
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(panel.view.clone()),
+                    )
+            })
+        } else {
+            None
+        };
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .children(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn toggling_and_switching_panels_preserves_selection_when_collapsed() {
+        let first = PanelId("first");
+        let second = PanelId("second");
+        let mut state = Selection::default();
+        assert!(state.toggle(first));
+        assert!(!state.toggle(first));
+        assert_eq!(state.active, Some(first));
+        assert!(!state.visible);
+        assert!(state.toggle(second));
+        assert_eq!(state.active, Some(second));
+        assert!(state.visible);
+    }
+    #[test]
+    fn resizing_collapses_at_edge_and_side_determines_split_index() {
+        assert_eq!(width_after_drag(px(24.)), None);
+        assert_eq!(width_after_drag(px(-1.)), None);
+        assert_eq!(width_after_drag(px(25.)), Some(px(25.)));
+        assert_eq!(width_after_drag(px(2000.)), Some(px(2000.)));
+        assert_eq!(SidebarSide::Left.panel_index(), 0);
+        assert_eq!(SidebarSide::Right.panel_index(), 1);
     }
 }
