@@ -1,7 +1,7 @@
 //! Business panels registered with the reusable SidebarHost.
 use crate::components::PanelId;
 use crate::{AppRoot, assets::IconName};
-use gpui::{Context, ParentElement as _, Pixels, Styled as _, px};
+use gpui::{Context, ParentElement as _, Styled as _};
 use gpui_kit::component::empty::{
     Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
 };
@@ -9,12 +9,10 @@ mod activity_bar;
 pub(crate) mod chat;
 pub(crate) mod files;
 pub(crate) mod files_panel;
-mod header;
 pub(crate) mod sessions;
 pub(crate) mod sessions_panel;
 mod shared;
 pub(crate) use activity_bar::status_bar;
-pub(super) const PANEL_HEADER_HEIGHT: Pixels = px(28.);
 
 pub(super) fn empty_state(
     icon: IconName,

@@ -1,5 +1,5 @@
 //! Terminal session business panel.
-use super::{header::panel_header, sessions::SessionsState};
+use super::sessions::SessionsState;
 use crate::actions::{NewFolder, NewSession};
 use crate::assets::IconName;
 use crate::components::{PanelId, PanelInfo, SidebarPanel};
@@ -10,7 +10,7 @@ use gpui::{
 use gpui::{ListAlignment, ListState, list, prelude::FluentBuilder as _};
 use gpui_kit::base::Scrollbar;
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::{ActiveTheme as _, v_flex};
+use gpui_kit::component::v_flex;
 use std::rc::Rc;
 
 pub(crate) const SESSIONS_PANEL: PanelId = PanelId("sessions");
@@ -96,14 +96,6 @@ impl Render for SessionsPanel {
                     .id("sidebar-sessions")
                     .size_full()
                     .overflow_hidden()
-                    .bg(cx.theme().tokens.sidebar)
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(
-                        v_flex()
-                            .pt_3()
-                            .px_3()
-                            .child(panel_header(Self::INFO.title, cx)),
-                    )
                     .child(content),
             )
     }

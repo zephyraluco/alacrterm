@@ -1,10 +1,10 @@
 //! Registered panel container. Business state and rendering belong to each panel.
 use crate::assets::IconName;
 use gpui::{
-    AnyView, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels,
-    Render, Styled as _, Subscription, Window, div, px,
+    AnyElement, AnyView, App, AppContext as _, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, Styled as _, Subscription, Window, div, px,
 };
-use gpui_kit::component::resizable::ResizableState;
+use gpui_kit::component::{ActiveTheme as _, h_flex, resizable::ResizableState, v_flex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PanelId(pub &'static str);
@@ -25,6 +25,14 @@ pub(crate) trait SidebarPanel: Render + Sized + 'static {
         true
     }
     fn on_open(&mut self, _: &mut Context<Self>) {}
+    fn render_header(&mut self, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
+        div()
+            .min_w_0()
+            .text_base()
+            .truncate()
+            .child(Self::INFO.title)
+            .into_any_element()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -41,9 +49,12 @@ impl SidebarSide {
     }
 }
 
+type HeaderRenderer = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
 struct PanelEntry {
     info: PanelInfo,
     view: AnyView,
+    header: HeaderRenderer,
     width: Pixels,
     available: Box<dyn Fn(&App) -> bool>,
     open: Box<dyn Fn(&mut App)>,
@@ -98,10 +109,14 @@ impl SidebarHost {
         assert!(!self.contains(T::INFO.id), "duplicate sidebar panel id");
         let availability = panel.clone();
         let activation = panel.clone();
+        let header = panel.clone();
         self.panels.push(PanelEntry {
             info: T::INFO,
             width: T::INFO.default_width,
             view: panel.clone().into(),
+            header: Box::new(move |window, cx| {
+                header.update(cx, |panel, cx| panel.render_header(window, cx))
+            }),
             available: Box::new(move |cx| availability.read(cx).available(cx)),
             open: Box::new(move |cx| activation.update(cx, |panel, cx| panel.on_open(cx))),
             _subscription: cx.observe(&panel, |_, _, cx| cx.notify()),
@@ -205,16 +220,46 @@ impl SidebarHost {
     }
 }
 impl Render for SidebarHost {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = if self.panel_visible(cx) {
+            self.active().map(|panel| {
+                let header = (panel.header)(window, cx);
+                v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(
+                        h_flex()
+                            .id("sidebar-titlebar")
+                            .w_full()
+                            .h(px(56.))
+                            .flex_none()
+                            .px_4()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(header),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(panel.view.clone()),
+                    )
+            })
+        } else {
+            None
+        };
+        v_flex()
             .size_full()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .children(
-                self.panel_visible(cx)
-                    .then(|| self.active().unwrap().view.clone()),
-            )
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .children(content)
     }
 }
 

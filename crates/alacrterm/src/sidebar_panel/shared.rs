@@ -115,7 +115,7 @@ impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
-            .h(super::PANEL_HEADER_HEIGHT)
+            .h(TREE_ROW_HEIGHT)
             .flex()
             .items_center()
             .rounded(cx.theme().radius)

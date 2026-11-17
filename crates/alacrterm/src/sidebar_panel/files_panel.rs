@@ -17,7 +17,6 @@ use gpui_kit::component::{
 };
 
 use super::files::FilesState;
-use super::header::panel_header;
 use crate::assets::IconName;
 use crate::components::{PanelId, PanelInfo, SidebarPanel};
 use crate::dialog::name::open_name_dialog;
@@ -110,15 +109,7 @@ impl Render for FilesPanel {
             .id("sidebar-files")
             .size_full()
             .overflow_hidden()
-            .bg(cx.theme().tokens.sidebar)
-            .text_color(cx.theme().sidebar_foreground)
-            .child(
-                v_flex()
-                    .pt_3()
-                    .px_3()
-                    .child(panel_header(Self::INFO.title, cx)),
-            )
-            .child(v_flex().px_3().pb_2().child(toolbar))
+            .child(v_flex().pt_3().px_3().pb_2().child(toolbar))
             .child(content)
             .into_any_element();
         div()

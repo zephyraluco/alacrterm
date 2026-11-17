@@ -219,24 +219,6 @@ impl ChatPanel {
             .size_full()
             .min_h_0()
             .child(
-                h_flex()
-                    .w_full()
-                    .flex_none()
-                    .p_4()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_base().child("AI 会话"))
-                    .child(
-                        Button::new("chat-create")
-                            .ghost()
-                            .small()
-                            .icon(ui_icon(IconName::Plus))
-                            .tooltip("新建对话")
-                            .accessibility_label("新建对话")
-                            .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
-                    ),
-            )
-            .child(
                 v_flex()
                     .id("chat-session-list")
                     .w_full()
@@ -374,7 +356,6 @@ impl Render for ChatPanel {
         };
         let composer = session.composer.clone();
         let scroller = session.scroller.clone();
-        let title = session.conversation.title();
         let panel = cx.weak_entity();
         let empty = composer.read(cx).value().trim().is_empty();
         v_flex()
@@ -382,41 +363,6 @@ impl Render for ChatPanel {
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .child(
-                h_flex()
-                    .w_full()
-                    .flex_none()
-                    .items_start()
-                    .gap_2()
-                    .p_4()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Button::new("chat-back")
-                            .ghost()
-                            .small()
-                            .icon(ui_icon(IconName::ArrowLeft))
-                            .tooltip("返回会话列表")
-                            .accessibility_label("返回会话列表")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.navigation.back();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .gap_1()
-                            .child(div().text_base().truncate().child(title))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("今天有什么可以帮你？"),
-                            ),
-                    ),
-            )
             .child(
                 MessageScroller::new(
                     ("chat-messages", session_index),
@@ -475,13 +421,58 @@ impl Render for ChatPanel {
 impl crate::components::SidebarPanel for ChatPanel {
     const INFO: crate::components::PanelInfo = crate::components::PanelInfo {
         id: crate::components::PanelId("chat"),
-        title: "对话",
+        title: "AI 会话",
         icon: IconName::Bot,
         tooltip: "打开对话",
         default_width: px(360.),
     };
     fn on_open(&mut self, cx: &mut Context<Self>) {
         self.open(cx);
+    }
+    fn render_header(&mut self, _: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        match self.navigation.screen {
+            ChatScreen::Sessions => h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .justify_between()
+                .child(div().text_base().child(Self::INFO.title))
+                .child(
+                    Button::new("chat-create")
+                        .ghost()
+                        .small()
+                        .icon(ui_icon(IconName::Plus))
+                        .tooltip("新建对话")
+                        .accessibility_label("新建对话")
+                        .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
+                )
+                .into_any_element(),
+            ChatScreen::Conversation(index) => {
+                let title = self
+                    .sessions
+                    .get(index)
+                    .map_or_else(|| "新对话".into(), |session| session.conversation.title());
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("chat-back")
+                            .ghost()
+                            .small()
+                            .icon(ui_icon(IconName::ArrowLeft))
+                            .tooltip("返回会话列表")
+                            .accessibility_label("返回会话列表")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.navigation.back();
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().flex_1().min_w_0().text_base().truncate().child(title))
+                    .into_any_element()
+            }
+        }
     }
 }
 
