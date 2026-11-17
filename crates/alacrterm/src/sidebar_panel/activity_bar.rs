@@ -16,7 +16,14 @@ pub(crate) fn status_bar(
 ) -> AnyElement {
     let mut bar = new_status_bar().child(monitor);
     for (host, is_left) in [(left, true), (right, false)] {
-        for info in host.read(cx).panels(cx) {
+        let panels = host.read(cx).panels(cx);
+        if panels.is_empty() {
+            continue;
+        }
+        // Submit a single region item so StatusBar cannot insert its default
+        // 8px gap between the panel button groups.
+        let mut group = h_flex().items_center().gap_0();
+        for info in panels {
             let selected = host.read(cx).is_selected(info.id, cx);
             let state = host.downgrade();
             let button = Button::new(info.id.0)
@@ -38,12 +45,17 @@ pub(crate) fn status_bar(
                 .h(px(14.))
                 .mx_1()
                 .bg(cx.theme().border);
-            bar = if is_left {
-                bar.left(h_flex().items_center().child(button).child(separator))
+            group = if is_left {
+                group.child(h_flex().items_center().child(button).child(separator))
             } else {
-                bar.right(h_flex().items_center().child(separator).child(button))
+                group.child(h_flex().items_center().child(separator).child(button))
             };
         }
+        bar = if is_left {
+            bar.left(group)
+        } else {
+            bar.right(group)
+        };
     }
     bar.into_any_element()
 }
