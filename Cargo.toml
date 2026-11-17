@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/agent",
     "crates/terminal",
     "crates/alacrterm",
     "crates/terminal_view",
@@ -19,6 +20,7 @@ publish = false
 edition = "2024"
 
 [workspace.dependencies]
+agent = { path = "crates/agent" }
 terminal = { path = "crates/terminal" }
 terminal_view = { path = "crates/terminal_view" }
 util = { path = "crates/util" }
