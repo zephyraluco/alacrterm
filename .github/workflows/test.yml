@@ -85,6 +85,6 @@ jobs:
         if: runner.os == 'macOS'
         run: bash scripts/packaging/prepare_sparkle.sh
       - name: Test application and libraries
-        run: cargo test --locked -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util -p settings -p session -p transfer -p platform
+        run: cargo test --locked -p agent -p alacrterm -p terminal_view -p updater -p alacrterm-update-helper -p util -p settings -p session -p transfer -p platform
       - name: SSH unit and local-server integration tests
         run: cargo test --locked -p ssh --lib --test roundtrip

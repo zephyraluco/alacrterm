@@ -1,6 +1,6 @@
-//! Conversation-local composer controls. Providers and external tools are not executed here.
+//! Conversation-local composer controls and explicit resource selection.
 use super::*;
-use crate::dialog::name::open_name_dialog;
+mod model;
 use gpui::{App, EntityId, PathPromptOptions};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use std::{io::Read as _, path::PathBuf};
@@ -18,27 +18,12 @@ impl AgentMode {
             Self::Agent => "Agent",
         }
     }
-}
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Reasoning {
-    Low,
-    #[default]
-    Medium,
-    High,
-}
-impl Reasoning {
-    fn label(self) -> &'static str {
+    pub(super) fn core(self) -> agent::types::Mode {
         match self {
-            Self::Low => "低",
-            Self::Medium => "中",
-            Self::High => "高",
+            Self::Ask => agent::types::Mode::Ask,
+            Self::Agent => agent::types::Mode::Agent,
         }
     }
-}
-
-pub(super) struct ModelProfile {
-    name: String,
-    supports_reasoning: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContextKind {
@@ -69,10 +54,10 @@ impl ContextAttachment {
 }
 #[derive(Default)]
 pub(super) struct ComposerOptions {
-    model: Option<usize>,
-    reasoning: Reasoning,
-    mode: AgentMode,
-    terminal: Option<EntityId>,
+    pub(super) model: Option<usize>,
+    reasoning: Option<String>,
+    pub(super) mode: AgentMode,
+    pub(super) terminal: Option<EntityId>,
     pub attachments: Vec<ContextAttachment>,
 }
 impl ComposerOptions {
@@ -82,12 +67,35 @@ impl ComposerOptions {
             ..Self::default()
         }
     }
-    fn reasoning_for(&self, model: Option<&ModelProfile>) -> Option<Reasoning> {
-        model
-            .filter(|model| model.supports_reasoning)
-            .map(|_| self.reasoning)
+    pub(super) fn reasoning_for(&self, levels: &[String]) -> Option<ReasoningChoice> {
+        let value = self
+            .reasoning
+            .as_ref()
+            .filter(|v| levels.contains(v))
+            .cloned()
+            .or_else(|| levels.iter().find(|v| v.as_str() == "medium").cloned())
+            .or_else(|| levels.first().cloned())?;
+        Some(ReasoningChoice(value))
     }
 }
+pub(super) struct ReasoningChoice(String);
+impl ReasoningChoice {
+    pub(super) fn wire(&self) -> &str {
+        &self.0
+    }
+    fn label(&self) -> String {
+        reasoning_label(&self.0)
+    }
+}
+fn reasoning_label(value: &str) -> String {
+    match value {
+        "low" => "低".into(),
+        "medium" => "中".into(),
+        "high" => "高".into(),
+        other => other.into(),
+    }
+}
+
 struct TerminalChoice {
     id: EntityId,
     label: SharedString,
@@ -110,26 +118,52 @@ fn read_context(path: PathBuf, kind: ContextKind) -> Result<ContextAttachment, S
         return Err("文件过大".into());
     }
     if kind == ContextKind::Mcp {
-        let config: serde_json::Value =
-            serde_json::from_str(&content).map_err(|_| "MCP 配置必须是有效 JSON".to_owned())?;
-        let servers = config
-            .get("mcpServers")
-            .or_else(|| config.get("servers"))
-            .and_then(|value| value.as_object())
-            .filter(|servers| !servers.is_empty())
-            .ok_or("配置中未找到 MCP servers")?;
-        // Keep server names only. Commands, credentials and environment values
-        // from configuration files are never placed in conversation context.
-        content = format!(
-            "MCP 服务器（尚未连接）：{}",
-            servers.keys().cloned().collect::<Vec<_>>().join(", ")
-        );
+        agent::mcp::parse_config(&content)?;
     }
+
     Ok(ContextAttachment {
         path,
         kind,
         content,
     })
+}
+
+pub(super) fn resources(
+    attachments: &[ContextAttachment],
+) -> Result<(String, Vec<agent::mcp::McpResource>), String> {
+    if attachments.len() > 8
+        || attachments.iter().map(|a| a.content.len()).sum::<usize>() > 128 * 1024
+    {
+        return Err("最多添加 8 个资源，总大小不超过 128 KiB".into());
+    }
+    let mut instructions = String::new();
+    let mut mcp = vec![];
+    for attachment in attachments {
+        match attachment.kind {
+            ContextKind::Skill => {
+                instructions.push_str(&format!(
+                    "\n--- Skill: {} ---\n{}\n--- End skill ---\n",
+                    attachment.path.display(),
+                    attachment.content
+                ));
+            }
+            ContextKind::Mcp => mcp.push(agent::mcp::McpResource {
+                label: attachment
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                config: agent::mcp::parse_config(&attachment.content)?,
+                directory: attachment
+                    .path
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(crate::agent_host::default_resource_directory),
+            }),
+        }
+    }
+    Ok((instructions, mcp))
 }
 
 impl ChatPanel {
@@ -168,37 +202,6 @@ impl ChatPanel {
             })
             .ok()
             .flatten()
-    }
-
-    fn configure_model(&mut self, session: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let panel = cx.weak_entity();
-        open_name_dialog(
-            window,
-            cx,
-            "添加模型",
-            "输入模型 ID，例如 o3",
-            "添加",
-            None,
-            move |name, cx| {
-                let _ = panel.update(cx, |this, cx| {
-                    let id = this
-                        .models
-                        .iter()
-                        .position(|model| model.name == name)
-                        .unwrap_or_else(|| {
-                            this.models.push(ModelProfile {
-                                name,
-                                supports_reasoning: false,
-                            });
-                            this.models.len() - 1
-                        });
-                    if let Some(session) = this.sessions.get_mut(session) {
-                        session.options.model = Some(id);
-                    }
-                    cx.notify();
-                });
-            },
-        );
     }
 
     fn attach_context(&mut self, session: usize, kind: ContextKind, cx: &mut Context<Self>) {
@@ -268,6 +271,7 @@ impl ChatPanel {
         let session = &self.sessions[session_index];
         let options = &session.options;
         let empty = session.composer.read(cx).value().trim().is_empty();
+        let busy = session.busy();
         let selected_model = options.model;
         let model = selected_model.and_then(|id| self.models.get(id));
         let model_label = model.map_or("选择模型", |model| model.name.as_str());
@@ -279,6 +283,7 @@ impl ChatPanel {
             .collect::<Vec<_>>();
         let weak = cx.weak_entity();
         let add = Button::new("chat-add")
+            .disabled(busy)
             .ghost()
             .xsmall()
             .icon(ui_icon(IconName::Plus))
@@ -303,6 +308,7 @@ impl ChatPanel {
             });
         let weak = cx.weak_entity();
         let model_button = Button::new("chat-model")
+            .disabled(busy)
             .ghost()
             .xsmall()
             .label(model_label.to_owned())
@@ -329,27 +335,34 @@ impl ChatPanel {
                     .item(
                         PopupMenuItem::new("添加模型…").on_click(move |_, window, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                this.configure_model(session_index, window, cx)
+                                this.configure_model(session_index, false, window, cx)
                             });
                         }),
                     )
             });
-        let reasoning = options.reasoning_for(model).map(|value| {
+        let reasoning_levels = model
+            .and_then(|m| self.model_reasoning.get(&m.id))
+            .cloned()
+            .unwrap_or_default();
+        let reasoning = options.reasoning_for(&reasoning_levels).map(|value| {
             let weak = cx.weak_entity();
             Button::new("chat-reasoning")
                 .ghost()
                 .xsmall()
                 .label(value.label())
+                .disabled(session.busy())
                 .tooltip("思考强度")
                 .dropdown_menu(move |mut menu, _, _| {
-                    for next in [Reasoning::Low, Reasoning::Medium, Reasoning::High] {
+                    for next in &reasoning_levels {
                         let weak = weak.clone();
+                        let next = next.clone();
                         menu = menu.item(
-                            PopupMenuItem::new(next.label())
-                                .checked(value == next)
+                            PopupMenuItem::new(reasoning_label(&next))
+                                .checked(value.wire() == next)
                                 .on_click(move |_, _, cx| {
                                     let _ = weak.update(cx, |this, cx| {
-                                        this.sessions[session_index].options.reasoning = next;
+                                        this.sessions[session_index].options.reasoning =
+                                            Some(next.clone());
                                         cx.notify();
                                     });
                                 }),
@@ -359,39 +372,31 @@ impl ChatPanel {
                 })
         });
         let weak = cx.weak_entity();
-        let supports_reasoning = model.is_some_and(|model| model.supports_reasoning);
         let configure = Button::new("chat-configure")
             .ghost()
             .xsmall()
+            .disabled(session.busy())
             .icon(ui_icon(IconName::Settings2))
-            .tooltip("对话配置")
+            .tooltip("模型配置")
             .dropdown_menu(move |menu, _, _| {
+                let edit = weak.clone();
                 let add = weak.clone();
-                let toggle = weak.clone();
                 menu.item(
-                    PopupMenuItem::new("添加模型…").on_click(move |_, window, cx| {
-                        let _ = add.update(cx, |this, cx| {
-                            this.configure_model(session_index, window, cx)
-                        });
-                    }),
-                )
-                .item(
-                    PopupMenuItem::new("所选模型支持思考强度")
-                        .checked(supports_reasoning)
+                    PopupMenuItem::new("编辑所选模型…")
                         .disabled(selected_model.is_none())
-                        .on_click(move |_, _, cx| {
-                            let _ = toggle.update(cx, |this, cx| {
-                                if let Some(model) =
-                                    selected_model.and_then(|id| this.models.get_mut(id))
-                                {
-                                    model.supports_reasoning = !model.supports_reasoning;
-                                }
-                                cx.notify();
+                        .on_click(move |_, window, cx| {
+                            let _ = edit.update(cx, |this, cx| {
+                                this.configure_model(session_index, true, window, cx)
                             });
                         }),
                 )
-                .separator()
-                .item(PopupMenuItem::new("仅界面配置，AI / MCP 服务尚未接入").disabled(true))
+                .item(
+                    PopupMenuItem::new("添加模型…").on_click(move |_, window, cx| {
+                        let _ = add.update(cx, |this, cx| {
+                            this.configure_model(session_index, false, window, cx)
+                        });
+                    }),
+                )
             });
         let terminals = self.terminal_choices(cx);
         let terminal_id = options.terminal;
@@ -410,6 +415,7 @@ impl ChatPanel {
             );
         let weak = cx.weak_entity();
         let terminal_button = Button::new("chat-terminal")
+            .disabled(busy)
             .ghost()
             .xsmall()
             .icon(ui_icon(IconName::SquareTerminal))
@@ -441,11 +447,12 @@ impl ChatPanel {
         let mode = options.mode;
         let weak = cx.weak_entity();
         let mode_button = Button::new("chat-mode")
+            .disabled(busy)
             .ghost()
             .xsmall()
             .icon(ui_icon(IconName::Bot))
             .label(mode.label())
-            .tooltip("交互模式（尚未接入执行服务）")
+            .tooltip("Ask：只读；Agent：允许审批后执行工具")
             .dropdown_menu(move |mut menu, _, _| {
                 for next in [AgentMode::Ask, AgentMode::Agent] {
                     let weak = weak.clone();
@@ -533,13 +540,33 @@ impl ChatPanel {
                                 Button::new("chat-send")
                                     .ghost()
                                     .xsmall()
-                                    .icon(ui_icon(IconName::ArrowUp))
-                                    .tooltip("发送（Enter），换行（Shift+Enter）")
-                                    .accessibility_label("发送消息")
-                                    .disabled(empty)
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.send(window, cx)),
-                                    ),
+                                    .icon(ui_icon(if busy {
+                                        IconName::Stop
+                                    } else {
+                                        IconName::ArrowUp
+                                    }))
+                                    .tooltip(if busy {
+                                        "停止生成"
+                                    } else {
+                                        "发送（Enter），换行（Shift+Enter）"
+                                    })
+                                    .accessibility_label(if busy {
+                                        "停止生成"
+                                    } else {
+                                        "发送消息"
+                                    })
+                                    .disabled(if busy {
+                                        session.preparing
+                                    } else {
+                                        empty || model.is_none()
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if busy {
+                                            this.stop(session_index, cx);
+                                        } else {
+                                            this.send(window, cx);
+                                        }
+                                    })),
                             ),
                     ),
             )
@@ -560,42 +587,17 @@ impl ChatPanel {
 mod tests {
     use super::*;
     #[test]
-    fn reasoning_only_applies_to_capable_models_and_options_are_session_local() {
-        let supported = ModelProfile {
-            name: "reasoner".into(),
-            supports_reasoning: true,
-        };
-        let unsupported = ModelProfile {
-            name: "plain".into(),
-            supports_reasoning: false,
-        };
-        let mut first = ComposerOptions::default();
-        let second = ComposerOptions::default();
-        first.reasoning = Reasoning::High;
-        first.mode = AgentMode::Ask;
-        assert_eq!(first.reasoning_for(Some(&supported)), Some(Reasoning::High));
-        assert_eq!(first.reasoning_for(Some(&unsupported)), None);
-        assert_eq!(first.reasoning_for(None), None);
-        assert_eq!(second.mode, AgentMode::Agent);
-        assert_eq!(second.reasoning, Reasoning::Medium);
-    }
-    #[test]
-    fn mcp_context_only_contains_server_names_and_rejects_invalid_configs() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp.json");
-        std::fs::write(&path, r#"{"mcpServers":{"docs":{"command":"secret-command","env":{"TOKEN":"secret-value"}}}}"#).unwrap();
-        let context = read_context(path.clone(), ContextKind::Mcp).unwrap();
-        assert!(context.content.contains("docs"));
-        assert!(!context.content.contains("secret"));
-        std::fs::write(&path, "not json").unwrap();
-        assert!(read_context(path, ContextKind::Mcp).is_err());
-        let path = dir.path().join("SKILL.md");
-        std::fs::write(&path, "# Skill\nInstructions").unwrap();
-        assert!(
-            read_context(path, ContextKind::Skill)
-                .unwrap()
-                .content
-                .contains("Instructions")
-        );
+    fn selected_resources_are_bounded_text_and_mcp_is_not_injected_into_prompt() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mcp.json");
+        std::fs::write(&path, r#"{"mcpServers":{"docs":{"command":"mcp-docs"}}}"#).unwrap();
+        let mcp = read_context(path, ContextKind::Mcp).unwrap();
+        let path = directory.path().join("SKILL.md");
+        std::fs::write(&path, "# Skill\nUse a concise answer").unwrap();
+        let skill = read_context(path, ContextKind::Skill).unwrap();
+        let (instructions, servers) = resources(&[mcp, skill]).unwrap();
+        assert!(instructions.contains("concise"));
+        assert!(!instructions.contains("mcp-docs"));
+        assert_eq!(servers.len(), 1);
     }
 }

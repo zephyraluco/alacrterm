@@ -12,6 +12,7 @@
 //! 与 `AppRoot` 需要对外可见。
 
 mod actions;
+mod agent_host;
 pub mod assets;
 pub mod completion;
 mod components;
