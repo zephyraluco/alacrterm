@@ -1,9 +1,11 @@
-use crate::backend::{Backend, Endpoint, TurnPlan, Wire};
+use crate::backend::Backend;
 use rig_core::completion::Effort;
+use rig_core::{
+    catalog::{Catalog, ModelSpec},
+    providers::registry::ProviderId,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use solaris_backend::ModelParameters;
-use solaris_provider::ProviderConfig;
 use url::Url;
 
 /// Only references are persisted. API keys are resolved by the GUI credential
@@ -29,16 +31,6 @@ pub enum Protocol {
     OpenaiResponses,
     AnthropicMessages,
 }
-impl Protocol {
-    fn wire(self) -> Wire {
-        match self {
-            Self::OpenaiChat => Wire::OpenAiChat,
-            Self::OpenaiResponses => Wire::OpenAiResponses,
-            Self::AnthropicMessages => Wire::AnthropicMessages,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelProfile {
@@ -82,13 +74,47 @@ impl ModelProfile {
         Ok(())
     }
 
-    pub fn parameters(&self) -> Result<ModelParameters, String> {
+    fn parameters(&self) -> Result<ModelSpec, String> {
         self.validate()?;
-        let config = ProviderConfig::from_json(&json!({
-            "providers":{"alacrterm":{"protocol":self.protocol,"base_url":self.base_url}},
-            "models":{"selected":{"provider":"alacrterm","request_id":self.model,"metadata":self.metadata}}
-        }).to_string())?;
-        Ok(config.resolve("alacrterm", "selected").parameters)
+        let catalog = Catalog::builtin();
+        let lookup = |vendor, model| catalog.get(ProviderId::catalog(vendor)?, model);
+        let found = if let Some(reference) = &self.metadata {
+            reference
+                .split_once('/')
+                .and_then(|(vendor, model)| lookup(vendor, model))
+        } else {
+            let mut matches = [
+                "openai",
+                "anthropic",
+                "google",
+                "deepseek",
+                "xai",
+                "mistral",
+                "meta",
+                "moonshotai",
+                "zhipuai",
+                "minimax",
+            ]
+            .into_iter()
+            .filter_map(|vendor| lookup(vendor, &self.model));
+            let first = matches.next();
+            if matches.next().is_none() {
+                first
+            } else {
+                None
+            }
+        };
+        let mut spec = found
+            .map(|resolved| resolved.spec.clone())
+            .unwrap_or_else(|| {
+                ModelSpec::new(
+                    ProviderId::declare("alacrterm").expect("valid provider"),
+                    &self.model,
+                )
+                .with_tools(true)
+            });
+        spec.id = self.model.clone();
+        Ok(spec)
     }
 
     /// Hide the control when the catalog doesn't list supported effort levels.
@@ -99,13 +125,7 @@ impl ModelProfile {
         }
         self.parameters()
             .ok()
-            .and_then(|p| {
-                p.facts()
-                    .spec()?
-                    .reasoning
-                    .levels()
-                    .map(|levels| levels.to_vec())
-            })
+            .and_then(|p| p.reasoning.levels().map(|levels| levels.to_vec()))
             .unwrap_or_default()
             .into_iter()
             .filter_map(|effort| {
@@ -125,9 +145,8 @@ impl ModelProfile {
             serde_json::from_value(json!(effort)).map_err(|_| "unknown reasoning effort")?;
         let parameters = self.parameters()?;
         let supported = parameters
-            .facts()
-            .spec()
-            .and_then(|s| s.reasoning.levels())
+            .reasoning
+            .levels()
             .is_some_and(|levels| levels.contains(&requested));
         if !supported {
             return Err("this model does not list the selected reasoning effort".into());
@@ -143,21 +162,13 @@ impl ModelProfile {
         })
     }
 
-    pub fn backend(&self, secret: Option<String>) -> Result<Backend, String> {
-        Backend::new(TurnPlan {
-            endpoint: Endpoint {
-                wire: self.protocol.wire(),
-                session_header: None,
-                base_url: self.base_url.clone(),
-                secret,
-                name: "alacrterm".into(),
-                label: self.name.clone(),
-                env_keys: &[],
-            },
-            model: self.parameters()?,
-            prompt_cache_key: None,
-        })
-        .map_err(|e| e.to_string())
+    pub(crate) fn backend(&self, secret: Option<String>) -> Result<Backend, String> {
+        Backend::new(
+            self.protocol,
+            self.base_url.clone(),
+            secret,
+            self.parameters()?,
+        )
     }
 }
 
@@ -187,7 +198,7 @@ mod tests {
         let mut p = profile();
         p.metadata = Some("openai/o3".into());
         assert!(p.reasoning_levels().contains(&"high".into()));
-        assert_eq!(p.parameters().unwrap().model(), "unknown-local-model");
+        assert_eq!(p.parameters().unwrap().id, "unknown-local-model");
         assert_eq!(
             p.reasoning_params(Some("high")).unwrap(),
             json!({"reasoning_effort":"high"})

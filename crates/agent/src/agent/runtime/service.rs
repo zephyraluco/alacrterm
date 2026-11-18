@@ -2,7 +2,6 @@
 //! may disappear without cancelling a run; cancellation is always explicit.
 use crate::{
     agent::{execution::TerminalLeases, storage::ChatStore},
-    backend::ModelConnector,
     provider::ModelProfile,
     tools::{Cancel, Tool, ToolContext},
     types::{Event, EventKind, Mode, RunInput, Session, TargetBinding},
@@ -181,12 +180,10 @@ impl AgentService {
             .model
             .reasoning_params(request.reasoning.as_deref())
             .map_err(anyhow::Error::msg)?;
-        let backend = Arc::new(
-            request
-                .model
-                .backend(request.secret.clone())
-                .map_err(anyhow::Error::msg)?,
-        );
+        let backend = request
+            .model
+            .backend(request.secret.clone())
+            .map_err(anyhow::Error::msg)?;
         let mut active = self
             .state
             .active
@@ -327,26 +324,25 @@ async fn cancelled(cancel: &Cancel) {
 
 async fn execute(
     request: StartRun,
-    backend: Arc<crate::backend::Backend>,
+    backend: crate::backend::Backend,
     params: serde_json::Value,
     cancel: Cancel,
     publisher: Publisher,
 ) -> anyhow::Result<()> {
     let memory =
         rig_memory::DirStore::open(publisher.state.memory.join(request.session.to_string()))?;
-    let client = tokio::select! {
-        biased;
-        _ = cancelled(&cancel) => return Ok(()),
-        client = backend.model_client() => client?,
-    };
+    let max_tokens = backend.max_tokens;
+    let mut params = params;
+    if backend.is_responses() {
+        params["store"] = false.into();
+    }
+    let supports_tools = backend.supports_tools;
+    let client = backend.adapter();
     let handlers = rig_agent::handlers::Handlers::default();
     handlers.register("model", client)?;
     let server = rig_agent::tool::server::ToolServer::new().run();
     let context = ToolContext {
-        cwd: PathBuf::from("."),
-        temp_dir: std::env::temp_dir(),
         cancel: cancel.clone(),
-        images_enabled: false,
     };
     let mut tools = request.tools;
     for resource in request.mcp {
@@ -399,7 +395,7 @@ async fn execute(
     }
     for tool in tools
         .into_iter()
-        .filter(|t| request.mode == Mode::Agent || t.is_read_only())
+        .filter(|t| supports_tools && (request.mode == Mode::Agent || t.is_read_only()))
     {
         let bridge = ToolBridge {
             tool,
@@ -424,6 +420,7 @@ async fn execute(
         .memory(memory)
         .conversation("conversation")
         .additional_params(params)
+        .max_tokens(max_tokens)
         .default_max_turns(24)
         .tool_server_handle(server)
         .build();

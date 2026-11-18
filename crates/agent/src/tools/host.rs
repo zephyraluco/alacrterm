@@ -282,7 +282,7 @@ mod tests {
         let tools = terminal_tools(host.clone(), bound.clone(), Mode::Ask);
         assert_eq!(tools.len(), 1);
         assert!(tools[0].is_read_only());
-        let context = ToolContext::new(".", ".");
+        let context = ToolContext::default();
         assert!(
             tools[0]
                 .run(json!({"terminal":"another"}), &context)
@@ -302,7 +302,7 @@ mod tests {
             .iter()
             .find(|t| t.name() == "terminal_insert_text")
             .unwrap();
-        let context = ToolContext::new(".", ".");
+        let context = ToolContext::default();
         for text in ["echo ok\n", "echo ok\r", "\u{1b}[200~hello", "\u{0}", ""] {
             assert!(insert.run(json!({"text":text}), &context).await.is_error);
         }
@@ -323,7 +323,7 @@ mod tests {
         let exec = tools.iter().find(|t| t.name() == "ssh_exec").unwrap();
         assert!(!exec.is_read_only());
         assert_eq!(exec.execution_mode(), ExecutionMode::Sequential);
-        let context = ToolContext::new(".", ".");
+        let context = ToolContext::default();
         for args in [
             json!({"command":""}),
             json!({"command":"pwd","timeout_seconds":301}),

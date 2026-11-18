@@ -21,7 +21,6 @@ pub enum Mode {
     Ask,
     Agent,
 }
-pub use solaris_types::{ModelCapabilities, Support, ToolCall, ToolResult, ToolSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {

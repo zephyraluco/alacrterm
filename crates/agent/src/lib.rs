@@ -1,4 +1,4 @@
-//! UI-independent agent services over a pinned Solaris/Rig execution core.
+//! UI-independent agent services using the Rig runtime.
 pub mod agent;
 pub mod backend;
 pub mod mcp;

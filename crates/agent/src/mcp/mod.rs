@@ -1,5 +1,6 @@
 //! MCP connections discover adapters; the application explicitly registers them.
-pub use solaris_mcp::{McpConfig, McpManager, ServerConfig, ServerStatus};
+mod client;
+pub use client::{McpConfig, McpManager, ServerConfig, ServerStatus};
 
 pub struct McpResource {
     pub label: String,
