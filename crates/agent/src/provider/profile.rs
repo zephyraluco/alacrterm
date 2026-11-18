@@ -94,6 +94,9 @@ impl ModelProfile {
     /// Hide the control when the catalog doesn't list supported effort levels.
     /// A model's name is never treated as proof of support for a wire option.
     pub fn reasoning_levels(&self) -> Vec<String> {
+        if self.protocol == Protocol::AnthropicMessages {
+            return vec![];
+        }
         self.parameters()
             .ok()
             .and_then(|p| {

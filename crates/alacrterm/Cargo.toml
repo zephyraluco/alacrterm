@@ -24,6 +24,8 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-yaml",
 ] }
 anyhow.workspace = true
+agent.workspace = true
+async-trait = "0.1"
 dirs.workspace = true
 # 读传输进度通道(见 sidebar_panel/files.rs);`futures` 本来就在 workspace 依赖里。
 futures.workspace = true

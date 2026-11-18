@@ -8,6 +8,7 @@ publish.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"
 futures.workspace = true
+fs2 = "0.4"
 rig-agent = { version = "=0.46.0", default-features = false }
 rig-core = { version = "=0.46.0", default-features = false }
 rig-memory = "=0.46.0"

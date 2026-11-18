@@ -98,8 +98,13 @@ fn request(session: Uuid, url: String, prompt: &str) -> StartRun {
 
 async fn ending(rx: &mut broadcast::Receiver<crate::types::Event>) -> EventKind {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut previous = None;
         loop {
             let event = rx.recv().await.unwrap();
+            if let Some(previous) = previous {
+                assert_eq!(event.sequence, previous + 1);
+            }
+            previous = Some(event.sequence);
             if event.kind.is_terminal() {
                 return event.kind;
             }
@@ -262,4 +267,80 @@ async fn ask_filters_mutations_even_if_the_host_supplied_them() {
     service.start(input).unwrap();
     assert!(matches!(ending(&mut receiver).await, EventKind::Completed));
     assert!(!requests.lock().unwrap()[0].to_string().contains("mutate"));
+}
+
+#[tokio::test]
+async fn cancelling_an_approval_invalidates_the_pending_decision() {
+    let (url, _) = fixture(vec![tool_sse()]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let service = AgentService::open(directory.path()).unwrap();
+    let session = service.create_session().unwrap().id;
+    let mut receiver = service.subscribe();
+    let tool = Arc::new(Mutation(std::sync::atomic::AtomicUsize::new(0)));
+    let mut input = request(session, url, "approval cancellation");
+    input.mode = Mode::Agent;
+    input.tools.push(tool.clone());
+    service.start(input).unwrap();
+    let approval = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = receiver.recv().await.unwrap();
+            if let EventKind::ApprovalRequested { id, .. } = event.kind {
+                break id;
+            }
+            assert!(!event.kind.is_terminal());
+        }
+    })
+    .await
+    .unwrap();
+    service.cancel(session);
+    assert!(matches!(ending(&mut receiver).await, EventKind::Cancelled));
+    assert!(!service.approve(approval, true));
+    assert_eq!(tool.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn mcp_connections_require_approval_before_process_or_network_startup() {
+    let (url, requests) = fixture(vec![]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let service = AgentService::open(directory.path()).unwrap();
+    let session = service.create_session().unwrap().id;
+    let mut receiver = service.subscribe();
+    let mut input = request(session, url, "MCP approval");
+    input.mcp.push(crate::mcp::McpResource {
+        label: "test".into(),
+        directory: directory.path().to_path_buf(),
+        config: crate::mcp::parse_config(
+            r#"{"servers":{"test":{"transport":"http","url":"http://127.0.0.1:1/mcp"}}}"#,
+        )
+        .unwrap(),
+    });
+    service.start(input).unwrap();
+    let approval = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = receiver.recv().await.unwrap();
+            if let EventKind::ApprovalRequested { id, name, .. } = event.kind {
+                assert_eq!(name, "connect_mcp");
+                break id;
+            }
+            assert!(!event.kind.is_terminal());
+        }
+    })
+    .await
+    .unwrap();
+    assert!(requests.lock().unwrap().is_empty());
+    service.approve(approval, false);
+    assert!(matches!(
+        ending(&mut receiver).await,
+        EventKind::Failed { .. }
+    ));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn another_process_cannot_recover_or_take_over_a_live_runtime() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = AgentService::open(directory.path()).unwrap();
+    assert!(AgentService::open(directory.path()).is_err());
+    drop(first);
+    assert!(AgentService::open(directory.path()).is_ok());
 }

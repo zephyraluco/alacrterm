@@ -7,7 +7,8 @@ use crate::{
     tools::{Cancel, Tool, ToolContext},
     types::{Event, EventKind, Mode, RunInput, Session, TargetBinding},
 };
-use futures::StreamExt;
+use fs2::FileExt as _;
+use futures::{FutureExt, StreamExt};
 use rig_agent::{AgentBuilder, agent::MultiTurnStreamItem};
 use rig_core::{
     effect::{Answered, EffectKind, HandlerDescriptor, family},
@@ -56,11 +57,13 @@ struct State {
     active: Mutex<HashMap<Uuid, Running>>,
     approvals: Approvals,
     leases: TerminalLeases,
+    publication: Mutex<()>,
 }
 
 pub struct AgentService {
     state: Arc<State>,
     runtime: Option<tokio::runtime::Runtime>,
+    _lock: std::fs::File,
 }
 
 #[derive(Clone)]
@@ -71,6 +74,11 @@ struct Publisher {
 }
 impl Publisher {
     fn emit(&self, kind: EventKind) -> anyhow::Result<()> {
+        let _publication = self
+            .state
+            .publication
+            .lock()
+            .map_err(|_| anyhow::anyhow!("event publication unavailable"))?;
         let event = self.state.store.append(self.session, self.run, kind)?;
         let _ = self.state.events.send(event);
         Ok(())
@@ -118,6 +126,14 @@ impl Publisher {
 
 impl AgentService {
     pub fn open(directory: &Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(directory)?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join("runtime.lock"))?;
+        lock.try_lock_exclusive().map_err(|_|anyhow::anyhow!("Another Alacrterm process owns these agent sessions. Close that process before opening the chat service here."))?;
         let store = ChatStore::open(&directory.join("sessions.sqlite"))?;
         store.recover()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -133,8 +149,10 @@ impl AgentService {
                 active: Mutex::default(),
                 approvals: Arc::default(),
                 leases: TerminalLeases::default(),
+                publication: Mutex::new(()),
             }),
             runtime: Some(runtime),
+            _lock: lock,
         })
     }
 
@@ -214,8 +232,16 @@ impl AgentService {
             .ok_or_else(|| anyhow::anyhow!("agent service is stopped"))?
             .spawn(async move {
                 let _lease = lease;
-                let result =
-                    execute(request, backend, params, cancel.clone(), publisher.clone()).await;
+                let result = std::panic::AssertUnwindSafe(execute(
+                    request,
+                    backend,
+                    params,
+                    cancel.clone(),
+                    publisher.clone(),
+                ))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("agent runtime stopped unexpectedly")));
                 let terminal = if cancel.is_cancelled() {
                     EventKind::Cancelled
                 } else {
@@ -500,7 +526,17 @@ impl Serve for ToolBridge {
             };
             let input = serde_json::from_str(&args)?;
             let id = format!("{:?}", dispatch.id());
-            let output = self.run(input, id.clone()).await?;
+            let mut output = self.run(input, id.clone()).await?;
+            // A 64 KiB file can expand when encoded as JSON. Preserve its full
+            // content and revision hash while bounding external tool output.
+            if output.text.len() > 512 * 1024 {
+                let mut end = 512 * 1024;
+                while !output.text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                output.text.truncate(end);
+                output.text.push_str("\n[Tool output truncated at 512 KiB]");
+            }
             self.publisher.emit(EventKind::ToolFinished {
                 id,
                 output: output.text.clone(),
