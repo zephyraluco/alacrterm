@@ -80,6 +80,7 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     drag_button: Rc<Cell<Option<MouseButton>>>,
     terminal: Option<Entity<Terminal>>,
+    connection_generation: u64,
     subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
     error: Option<String>,
@@ -211,6 +212,7 @@ impl TerminalView {
                             terminal.set_launch_options(this.launch_options.clone());
                         });
                         this.terminal = Some(terminal.clone());
+                        this.connection_generation = this.connection_generation.wrapping_add(1);
                         this.subscription = Some(subscription);
                         // 终端实体的**通知**也要让本视图重绘：鼠标交互（拖选 / 滚轮 / 点击）
                         // 只排一条 `InternalEvent` + notify（通知的是 `Terminal`），而那条队列
@@ -228,6 +230,7 @@ impl TerminalView {
             focus_handle,
             drag_button: Rc::new(Cell::new(None)),
             terminal: None,
+            connection_generation: 0,
             subscription: None,
             _subscriptions: vec![focus_in, focus_out],
             error: None,
@@ -272,6 +275,7 @@ impl TerminalView {
         if let Some(terminal) = &self.terminal
             && terminal.update(cx, |terminal, cx| terminal.reconnect(cx))
         {
+            self.connection_generation = self.connection_generation.wrapping_add(1);
             self.recovery_task = gpui::Task::ready(());
             self.completion.reset_session();
             self.terminal_blinking = None;
@@ -887,6 +891,55 @@ impl TerminalView {
         self.terminal
             .as_ref()
             .and_then(|terminal| terminal.read_with(cx, |terminal, _| terminal.remote_exec()))
+    }
+
+    /// Changes whenever this view starts or reconnects its underlying transport.
+    pub fn connection_generation(&self) -> u64 {
+        self.connection_generation
+    }
+
+    /// A bounded copy for application features; never exposes the terminal lock.
+    pub fn context_text(&self, lines: usize, cx: &App) -> Option<(String, Option<String>)> {
+        self.terminal.as_ref().map(|terminal| {
+            let terminal = terminal.read(cx);
+            (
+                terminal
+                    .last_n_non_empty_lines(lines.clamp(1, 500))
+                    .join("\n"),
+                terminal.last_content().selection_text.clone(),
+            )
+        })
+    }
+
+    /// Inserts a single line only when a local foreground shell is identifiable.
+    /// SSH lacks a reliable idle signal, so it uses an independent exec channel.
+    pub fn insert_at_shell(
+        &mut self,
+        text: &str,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<(), String> {
+        if text.is_empty() || text.len() > 16_384 || text.chars().any(char::is_control) {
+            return Err("text must be a single line without control characters".into());
+        }
+        let terminal = self.terminal.as_ref().ok_or("terminal is unavailable")?;
+        terminal.update(cx, |terminal, _| {
+            let shell = terminal
+                .foreground_process_command_name()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if self.remote
+                || !terminal.is_connected()
+                || terminal.last_content().mode.contains(Modes::ALT_SCREEN)
+                || !matches!(
+                    shell.trim_end_matches(".exe"),
+                    "sh" | "bash" | "zsh" | "fish" | "pwsh" | "powershell" | "nu"
+                )
+            {
+                return Err("cannot verify an idle local shell; input was not inserted".into());
+            }
+            terminal.paste(text);
+            Ok(())
+        })
     }
 
     /// 会话是否正在运行（本地已退出或远端已断开时为 false）。

@@ -55,7 +55,15 @@ pub enum SshEvent {
 #[derive(Debug, Clone)]
 pub struct SshOutput {
     bytes: Arc<[u8]>,
+    stderr: bool,
     _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+impl SshOutput {
+    /// Extended data from a non-PTY exec channel. Interactive PTY output remains
+    /// a single terminal byte stream as before.
+    pub fn is_stderr(&self) -> bool {
+        self.stderr
+    }
 }
 impl std::ops::Deref for SshOutput {
     type Target = [u8];
@@ -92,12 +100,17 @@ impl EventSink {
     }
 
     pub(crate) async fn data(&self, bytes: &[u8]) {
+        self.output(bytes, false).await;
+    }
+
+    async fn output(&self, bytes: &[u8], stderr: bool) {
         for chunk in bytes.chunks(OUTPUT_CHUNK) {
             let Ok(permit) = self.1.clone().acquire_many_owned(chunk.len() as u32).await else {
                 return;
             };
             let output = SshOutput {
                 bytes: Arc::from(chunk),
+                stderr,
                 _permit: Arc::new(permit),
             };
             if self.0.unbounded_send(SshEvent::Data(output)).is_err() {
@@ -551,7 +564,8 @@ async fn run_exec_channel(
                 let mut exit_status = None;
                 while let Some(message) = reader.wait().await {
                     match message {
-                        ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => sink.data(&data).await,
+                        ChannelMsg::Data { data } => sink.data(&data).await,
+                        ChannelMsg::ExtendedData { data, .. } => sink.output(&data, true).await,
                         ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
                         ChannelMsg::Failure => anyhow::bail!("SSH exec request rejected"),
                         ChannelMsg::Close => break,
@@ -574,6 +588,21 @@ async fn run_exec_channel(
 mod output_tests {
     use super::*;
     use futures::{FutureExt as _, StreamExt as _};
+
+    #[tokio::test]
+    async fn exec_output_retains_stdout_and_stderr_identity() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let sink = EventSink::new(tx);
+        sink.data(b"out").await;
+        sink.output(b"err", true).await;
+        for (expected, stderr) in [(b"out", false), (b"err", true)] {
+            let SshEvent::Data(chunk) = rx.next().await.unwrap() else {
+                panic!("expected data");
+            };
+            assert_eq!(&*chunk, expected);
+            assert_eq!(chunk.is_stderr(), stderr);
+        }
+    }
 
     #[tokio::test]
     async fn output_chunking_preserves_all_binary_bytes() {
