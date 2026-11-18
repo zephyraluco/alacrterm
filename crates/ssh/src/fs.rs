@@ -170,6 +170,7 @@ enum TransferKind {
     UploadOne {
         local_file: PathBuf,
         remote_file: String,
+        expected: Option<Vec<u8>>,
     },
     /// 删除一个文件或目录(目录**递归**)。
     ///
@@ -279,6 +280,20 @@ impl SshFs {
             Reply::Home(path) => Ok(path),
             _ => Err(unexpected()),
         })
+    }
+
+    /// Resolve a remote path through SFTP, including symbolic links.
+    pub fn canonicalize(
+        &self,
+        path: impl Into<String>,
+    ) -> BoxFuture<'static, Result<String, SshError>> {
+        expect(
+            self.send(RequestKind::Canonicalize(path.into())),
+            |reply| match reply {
+                Reply::Home(path) => Ok(path),
+                _ => Err(unexpected()),
+            },
+        )
     }
 
     /// 列一层目录(不递归)。`path` 是 POSIX 绝对路径。
@@ -433,6 +448,22 @@ impl SshFs {
         self.send_transfer(TransferKind::UploadOne {
             local_file: local_file.into(),
             remote_file: remote_file.into(),
+            expected: None,
+        })
+    }
+
+    /// Replace only if the remote bytes still match immediately before the
+    /// atomic rename. The original remains intact on conflict or cancellation.
+    pub fn upload_one_checked(
+        &self,
+        local_file: impl Into<PathBuf>,
+        remote_file: impl Into<String>,
+        expected: Vec<u8>,
+    ) -> Transfer {
+        self.send_transfer(TransferKind::UploadOne {
+            local_file: local_file.into(),
+            remote_file: remote_file.into(),
+            expected: Some(expected),
         })
     }
 
@@ -567,6 +598,7 @@ struct Request {
 enum RequestKind {
     /// 家目录。
     Home,
+    Canonicalize(String),
     /// 列一层目录(POSIX 路径)。
     List(String),
     CompletionList(String),
@@ -682,6 +714,7 @@ async fn serve(params: SshParams, mut requests: UnboundedReceiver<Request>) {
 
         let outcome = match &request.kind {
             RequestKind::Home => session.canonicalize(".").await.map(Reply::Home),
+            RequestKind::Canonicalize(path) => session.canonicalize(path).await.map(Reply::Home),
             RequestKind::List(path) => list_dir(session, path).await.map(Reply::Entries),
             RequestKind::CompletionList(path) => {
                 match tokio::time::timeout(
@@ -1064,6 +1097,7 @@ async fn run_transfer(
         TransferKind::UploadOne {
             local_file,
             remote_file,
+            ..
         } => {
             let meta = std::fs::metadata(local_file).map_err(TransferFailure::local)?;
             vec![Job {
@@ -1091,7 +1125,18 @@ async fn run_transfer(
                     .map_err(TransferFailure::local)?;
             }
         } else if uploading {
-            upload_file(session, Path::new(&job.source), &job.target, &mut reporter).await?;
+            let expected = match kind {
+                TransferKind::UploadOne { expected, .. } => expected.as_deref(),
+                _ => None,
+            };
+            upload_file(
+                session,
+                Path::new(&job.source),
+                &job.target,
+                expected,
+                &mut reporter,
+            )
+            .await?;
         } else {
             download_file(session, &job.source, &job.target, &mut reporter).await?;
         }
@@ -1438,6 +1483,7 @@ async fn upload_file(
     session: &FsConnection,
     local: &Path,
     remote: &Path,
+    expected: Option<&[u8]>,
     reporter: &mut Reporter<'_>,
 ) -> Result<(), TransferFailure> {
     let mut source = tokio::fs::File::open(local)
@@ -1547,6 +1593,35 @@ async fn upload_file(
                         .map_err(TransferFailure::from_sftp)?;
                 }
                 reporter.check()?;
+                if let Some(expected) = expected {
+                    let mut original = session
+                        .open(destination.clone())
+                        .await
+                        .map_err(TransferFailure::from_sftp)?;
+                    let mut actual = Vec::new();
+                    let compared = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        (&mut original)
+                            .take(expected.len() as u64 + 1)
+                            .read_to_end(&mut actual),
+                    )
+                    .await;
+                    let _ = original.close().await;
+                    compared
+                        .map_err(|_| {
+                            TransferFailure::from_io(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "remote comparison timed out",
+                            ))
+                        })?
+                        .map_err(TransferFailure::from_io)?;
+                    if actual != expected {
+                        return Err(TransferFailure::from_io(io::Error::other(
+                            "remote file changed before commit; original preserved",
+                        )));
+                    }
+                    reporter.check()?;
+                }
                 commit_upload(session, &temporary, &destination).await
             }
             .await
@@ -1720,12 +1795,35 @@ mod staged_upload_tests {
         let kind = TransferKind::UploadOne {
             local_file: source.clone(),
             remote_file: destination.to_string_lossy().into_owned(),
+            expected: None,
         };
         let (events, _receiver) = futures_mpsc::unbounded();
         run_transfer(&kind, &connection, &events, &CancelToken::default())
             .await
             .unwrap_or_else(|failure| panic!("{}", failure.error));
         assert_eq!(std::fs::read(&destination).unwrap(), b"new document");
+        let mut checked = TransferKind::UploadOne {
+            local_file: source.clone(),
+            remote_file: destination.to_string_lossy().into_owned(),
+            expected: Some(b"old document".to_vec()),
+        };
+        assert!(
+            run_transfer(&checked, &connection, &events, &CancelToken::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new document");
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            2,
+            "conflicts must clean staged files"
+        );
+        if let TransferKind::UploadOne { expected, .. } = &mut checked {
+            *expected = Some(b"new document".to_vec());
+        }
+        run_transfer(&checked, &connection, &events, &CancelToken::default())
+            .await
+            .unwrap_or_else(|failure| panic!("{}", failure.error));
         // OpenSSH's standard v3 rename rejects existing destinations. The
         // fallback must report failure without unlinking the old document.
         connection.posix_rename = false;
