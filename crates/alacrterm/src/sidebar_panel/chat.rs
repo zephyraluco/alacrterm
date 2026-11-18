@@ -13,7 +13,7 @@ use composer::ComposerOptions;
 use gpui::{
     AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, WeakEntity, Window, div, px,
+    Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
@@ -24,10 +24,11 @@ use gpui_kit::component::{
     list::ListItem,
     message::{Message, MessageAlignment, MessageContent, MessageFooter},
     message_scroller::{MessageScroller, MessageScrollerState},
+    text::TextView,
     v_flex,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -96,6 +97,7 @@ pub(crate) struct ChatPanel {
     configuration_error: Option<String>,
     sessions: Vec<ChatSession>,
     navigation: Navigation,
+    expanded_tools: HashSet<(agent::types::SessionId, usize)>,
     terminal_ids: HashMap<gpui::EntityId, TerminalId>,
     _events: gpui::Task<()>,
 }
@@ -121,6 +123,7 @@ impl ChatPanel {
             configuration_error,
             sessions: vec![],
             navigation: Navigation::default(),
+            expanded_tools: HashSet::new(),
             terminal_ids: HashMap::new(),
             _events: gpui::Task::ready(()),
         };
@@ -615,53 +618,108 @@ impl ChatPanel {
                     })),
             );
         }
-        let content = v_flex()
-            .gap_2()
-            .w_full()
-            .children((!message.thinking.is_empty()).then(|| {
-                div()
-                    .id(("chat-thinking", index))
-                    .max_h(px(120.))
-                    .overflow_y_scroll()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(message.thinking.clone())
-            }))
-            .child(message.body.clone())
-            .children(message.tools.iter().enumerate().map(|(tool_index, tool)| {
-                v_flex()
-                    .gap_1()
-                    .p_2()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded_sm()
-                    .text_xs()
-                    .child(format!(
-                        "{} · {}",
-                        tool.name,
-                        if tool.output.is_none() {
-                            "运行中"
-                        } else if tool.is_error {
-                            "失败"
-                        } else {
-                            "完成"
-                        }
-                    ))
-                    .child(
-                        div()
-                            .id(("chat-tool-input", index * 1000 + tool_index))
-                            .max_h(px(120.))
-                            .overflow_y_scroll()
-                            .child(serde_json::to_string_pretty(&tool.input).unwrap_or_default()),
-                    )
-                    .children(tool.output.as_ref().map(|output| {
-                        div()
-                            .id(("chat-tool-result", index * 1000 + tool_index))
-                            .max_h(px(180.))
-                            .overflow_y_scroll()
-                            .child(output.clone())
-                    }))
-            }));
+        let mut content = v_flex().min_w_0().gap_2();
+        if message.outgoing {
+            content = content.child(message.body.clone());
+        } else {
+            if !message.thinking.is_empty() {
+                content = content.child(
+                    div()
+                        .id(("chat-thinking", index))
+                        .max_h(px(96.))
+                        .overflow_y_scroll()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(message.thinking.clone()),
+                );
+            }
+            if !message.tools.is_empty() {
+                content = content.child(
+                    v_flex()
+                        .w_full()
+                        .border_l_1()
+                        .border_color(cx.theme().border)
+                        .pl_2()
+                        .children(message.tools.iter().enumerate().map(|(tool_index, tool)| {
+                            let key = (message.run, tool_index);
+                            let expanded = self.expanded_tools.contains(&key);
+                            let status = match (&tool.output, &message.state) {
+                                (Some(_), _) if tool.is_error => "失败",
+                                (Some(_), _) => "完成",
+                                (None, MessageState::Streaming) => "运行中",
+                                (None, _) => "未完成",
+                            };
+                            let row = Button::new(("chat-tool-toggle", tool_index))
+                                .ghost()
+                                .xsmall()
+                                .icon(ui_icon(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                }))
+                                .label(format!("{} · {status}", tool.name))
+                                .max_w_full()
+                                .overflow_hidden()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.expanded_tools.remove(&key) {
+                                        this.expanded_tools.insert(key);
+                                    }
+                                    this.sessions[session_index].scroller.update(
+                                        cx,
+                                        |state, cx| {
+                                            state.remeasure_items(index..index + 1, cx);
+                                        },
+                                    );
+                                    cx.notify();
+                                }));
+                            v_flex()
+                                .w_full()
+                                .min_w_0()
+                                .items_start()
+                                .py_1()
+                                .child(row)
+                                .when(expanded, |details| {
+                                    details.child(
+                                        div()
+                                            .id(("chat-tool-details", tool_index))
+                                            .w_full()
+                                            .max_h(px(180.))
+                                            .overflow_y_scroll()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .p_2()
+                                            .text_xs()
+                                            .child(
+                                                serde_json::to_string_pretty(&tool.input)
+                                                    .unwrap_or_default(),
+                                            )
+                                            .children(
+                                                tool.output
+                                                    .iter()
+                                                    .cloned()
+                                                    .map(|output| div().mt_2().child(output)),
+                                            ),
+                                    )
+                                })
+                        })),
+                );
+            }
+            if !message.body.is_empty() {
+                content = content.child(
+                    TextView::markdown(("chat-markdown", index), message.body.clone())
+                        .selectable(true)
+                        .on_link_click(|url, _, _, cx| {
+                            if url.starts_with("https://") || url.starts_with("http://") {
+                                cx.open_url(url);
+                            }
+                        })
+                        .image_source(|_| {
+                            gpui::ImageSource::Custom(std::sync::Arc::new(|_, _| None))
+                        }),
+                );
+            }
+        }
+
         Message::new()
             .id(("chat-message", index))
             .alignment(if message.outgoing {
