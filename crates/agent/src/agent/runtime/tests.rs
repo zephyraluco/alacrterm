@@ -92,6 +92,7 @@ fn request(session: Uuid, url: String, prompt: &str) -> StartRun {
         reasoning: None,
         tools: vec![],
         instructions: String::new(),
+        mcp: vec![],
     }
 }
 

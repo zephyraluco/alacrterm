@@ -36,6 +36,7 @@ pub struct StartRun {
     pub reasoning: Option<String>,
     pub tools: Vec<Arc<dyn Tool>>,
     pub instructions: String,
+    pub mcp: Vec<crate::mcp::McpResource>,
 }
 
 struct Running {
@@ -73,6 +74,45 @@ impl Publisher {
         let event = self.state.store.append(self.session, self.run, kind)?;
         let _ = self.state.events.send(event);
         Ok(())
+    }
+
+    async fn approval(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        target: Option<TargetBinding>,
+        cancel: &Cancel,
+    ) -> anyhow::Result<bool> {
+        let id = Uuid::new_v4();
+        let (reply, response) = oneshot::channel();
+        self.state
+            .approvals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                id,
+                PendingApproval {
+                    run: self.run,
+                    reply,
+                },
+            );
+        let _guard = ApprovalGuard {
+            approvals: self.state.approvals.clone(),
+            id,
+        };
+        self.emit(EventKind::ApprovalRequested {
+            id,
+            name: name.into(),
+            input,
+            target,
+        })?;
+        let approved = tokio::select! {
+            biased;
+            _ = cancelled(cancel) => false,
+            response = response => response.unwrap_or(false),
+        };
+        self.emit(EventKind::ApprovalResolved { id, approved })?;
+        Ok(approved)
     }
 }
 
@@ -282,8 +322,56 @@ async fn execute(
         cancel: cancel.clone(),
         images_enabled: false,
     };
-    for tool in request
-        .tools
+    let mut tools = request.tools;
+    for resource in request.mcp {
+        let names: Vec<_> = resource.config.servers.keys().cloned().collect();
+        let details: Vec<_> = resource
+            .config
+            .servers
+            .iter()
+            .map(|(name, server)| match server {
+                crate::mcp::ServerConfig::Stdio { command, args, .. } => {
+                    serde_json::json!({"name":name,"command":command,"args":args})
+                }
+                crate::mcp::ServerConfig::Http { url, .. } => {
+                    serde_json::json!({"name":name,"url":url})
+                }
+            })
+            .collect();
+        anyhow::ensure!(
+            publisher
+                .approval(
+                    "connect_mcp",
+                    serde_json::json!({"configuration":resource.label,"servers":details}),
+                    None,
+                    &cancel
+                )
+                .await?,
+            "MCP connection was declined"
+        );
+        let manager = tokio::select! {
+            biased;
+            _ = cancelled(&cancel) => return Ok(()),
+            manager=crate::mcp::McpManager::connect(resource.config,&resource.directory) => manager,
+        };
+        let failed: Vec<_> = manager
+            .status
+            .iter()
+            .filter(|s| !s.connected)
+            .map(|s| s.name.clone())
+            .collect();
+        anyhow::ensure!(
+            failed.is_empty(),
+            "MCP connection failed for {}; check configuration and access",
+            failed.join(", ")
+        );
+        anyhow::ensure!(
+            manager.status.len() == names.len(),
+            "MCP discovery was incomplete"
+        );
+        tools.extend(manager.tools().iter().cloned());
+    }
+    for tool in tools
         .into_iter()
         .filter(|t| request.mode == Mode::Agent || t.is_read_only())
     {
@@ -374,39 +462,15 @@ impl ToolBridge {
             input: input.clone(),
         })?;
         if !self.tool.is_read_only() {
-            let approval = Uuid::new_v4();
-            let (reply, response) = oneshot::channel();
-            self.publisher
-                .state
-                .approvals
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(
-                    approval,
-                    PendingApproval {
-                        run: self.publisher.run,
-                        reply,
-                    },
-                );
-            let _guard = ApprovalGuard {
-                approvals: self.publisher.state.approvals.clone(),
-                id: approval,
-            };
-            self.publisher.emit(EventKind::ApprovalRequested {
-                id: approval,
-                name: self.tool.name().into(),
-                input: input.clone(),
-                target: self.target.clone(),
-            })?;
-            let approved = tokio::select! {
-                biased;
-                _ = cancelled(&self.context.cancel) => false,
-                response = response => response.unwrap_or(false),
-            };
-            self.publisher.emit(EventKind::ApprovalResolved {
-                id: approval,
-                approved,
-            })?;
+            let approved = self
+                .publisher
+                .approval(
+                    self.tool.name(),
+                    input.clone(),
+                    self.target.clone(),
+                    &self.context.cancel,
+                )
+                .await?;
             if !approved {
                 return Ok(crate::tools::ToolOutput::error(
                     "The user denied this operation. Do not retry it without new instructions.",
